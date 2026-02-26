@@ -156,13 +156,38 @@ def build_triage_crew(alert_summary: str) -> Crew:
         context=[monitor_task, diagnose_task],
     )
 
-    # CrewAI memory uses OpenAI embeddings by default — only enable when OpenAI is the provider
-    memory_enabled = settings.llm_provider == "openai" and bool(settings.openai_api_key)
+    # Configure memory embedder per provider.
+    # Grok/Ollama have no embedding API — memory disabled for those.
+    embedder_config = None
+    if settings.llm_provider == "openai" and settings.openai_api_key:
+        embedder_config = {
+            "provider": "openai",
+            "config": {"model": "text-embedding-3-small", "api_key": settings.openai_api_key},
+        }
+    elif settings.llm_provider == "anthropic" and settings.anthropic_api_key:
+        # Anthropic has no embedding API — fall back to OpenAI if key available, else skip
+        if settings.openai_api_key:
+            embedder_config = {
+                "provider": "openai",
+                "config": {"model": "text-embedding-3-small", "api_key": settings.openai_api_key},
+            }
+    elif settings.llm_provider == "gemini" and settings.gemini_api_key:
+        embedder_config = {
+            "provider": "google",
+            "config": {"model": "models/text-embedding-004", "api_key": settings.gemini_api_key},
+        }
+    # grok/ollama: no embedding API — memory stays disabled
 
-    return Crew(
-        agents=[monitor, diagnoser, remediator],
-        tasks=[monitor_task, diagnose_task, remediate_task],
-        process=Process.sequential,
-        verbose=True,
-        memory=memory_enabled,
-    )
+    memory_enabled = embedder_config is not None
+
+    crew_kwargs: dict = {
+        "agents": [monitor, diagnoser, remediator],
+        "tasks": [monitor_task, diagnose_task, remediate_task],
+        "process": Process.sequential,
+        "verbose": True,
+        "memory": memory_enabled,
+    }
+    if embedder_config:
+        crew_kwargs["embedder"] = embedder_config
+
+    return Crew(**crew_kwargs)
