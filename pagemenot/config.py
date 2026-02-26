@@ -20,7 +20,12 @@ class Settings(BaseSettings):
     chroma_path: str = "/app/data/chroma"
 
     # ── Slack ─────────────────────────────────────────────
-    pagemenot_channel: str = "incidents"
+    pagemenot_channel: str = "incidents"           # channel where results are posted
+    pagemenot_alert_channels: str = "alerts,incidents"  # channels to passively monitor (comma-separated)
+    pagemenot_enable_channel_monitor: bool = True  # auto-triage alert-looking messages in watched channels
+    pagemenot_enable_mentions: bool = True         # respond to @Pagemenot mentions
+    pagemenot_enable_slash_command: bool = True    # respond to /pagemenot triage
+    pagemenot_enable_webhooks: bool = True         # receive webhook POSTs from external tools
 
     # ── Optional integrations ─────────────────────────────
     # Metrics / dashboards

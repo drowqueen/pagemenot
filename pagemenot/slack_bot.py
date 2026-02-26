@@ -36,6 +36,10 @@ def create_slack_app() -> AsyncApp:
     @app.command("/pagemenot")
     async def handle_command(ack, command, say):
         await ack()
+        if not settings.pagemenot_enable_slash_command:
+            await say("Slash command is disabled. Set PAGEMENOT_ENABLE_SLASH_COMMAND=true to enable.")
+            return
+
         text = command.get("text", "").strip()
         parts = text.split(maxsplit=1)
         sub = parts[0].lower() if parts else "help"
@@ -55,29 +59,26 @@ def create_slack_app() -> AsyncApp:
 
         else:
             await say(
-                "🦞 *Pagemenot — AI On-Call Copilot*\n\n"
+                "*Pagemenot — AI On-Call Copilot*\n\n"
                 "• `/pagemenot triage <description>` — Triage an incident\n"
                 "• `/pagemenot status` — Show connected integrations\n"
-                "• Mention `@Pagemenot` in a thread to ask follow-ups"
+                "• Mention `@Pagemenot` to triage from any channel\n"
+                "• Post alerts in watched channels for auto-triage"
             )
 
     # ── @mention handler ──────────────────────────────────
     @app.event("app_mention")
     async def handle_mention(event, say):
+        if not settings.pagemenot_enable_mentions:
+            return
         text = event.get("text", "")
         thread = event.get("thread_ts") or event.get("ts")
 
-        # If not in a triage thread, treat as a new triage
         if not event.get("thread_ts"):
-            await _do_triage(
-                say, source="manual",
-                payload={"text": text},
-                thread_ts=thread,
-            )
+            await _do_triage(say, source="manual", payload={"text": text}, thread_ts=thread)
         else:
-            # Follow-up in existing thread — future: contextual Q&A
             await say(
-                "🔍 Let me look into that... (follow-up context coming in v0.2)",
+                "Let me look into that... (follow-up context coming in v0.2)",
                 thread_ts=thread,
             )
 
@@ -114,8 +115,24 @@ def create_slack_app() -> AsyncApp:
         logger.info(f"Negative feedback from {body['user']['name']}")
 
     @app.event("message")
-    async def handle_message(event):
-        pass  # Required for Socket Mode
+    async def handle_message(event, say):
+        if not settings.pagemenot_enable_channel_monitor:
+            return
+        if event.get("bot_id") or event.get("subtype"):
+            return
+
+        channel = event.get("channel", "")
+        channel_name = event.get("channel_name", "")
+        watched = [c.strip() for c in settings.pagemenot_alert_channels.split(",")]
+        if channel not in watched and channel_name not in watched:
+            return
+
+        text = event.get("text", "")
+        if not text or len(text) < 20:
+            return
+
+        if _looks_like_alert(text):
+            await _do_triage(say, source="slack-channel", payload={"text": text})  # Required for Socket Mode
 
     return app
 
@@ -294,6 +311,19 @@ def _chunk_text(text: str, max_len: int) -> list[str]:
         chunks.append(text[:break_at])
         text = text[break_at:].lstrip("\n")
     return chunks
+
+
+def _looks_like_alert(text: str) -> bool:
+    """Heuristic: does this Slack message look like an alert that needs triage?"""
+    lower = text.lower()
+    alert_keywords = [
+        "alert", "alerting", "firing", "triggered", "pagerduty", "opsgenie",
+        "incident", "outage", "degraded", "down", "error rate", "p99",
+        "latency", "oomkill", "crashloop", "5xx", "500", "timeout",
+        "cpu", "memory", "disk full", "high", "critical", "warning",
+        "sev1", "sev2", "p1", "p2", "🔴", "🟠", "⚠️", "🚨",
+    ]
+    return any(kw in lower for kw in alert_keywords)
 
 
 def get_client() -> AsyncWebClient:
