@@ -22,8 +22,6 @@ def _build_llm() -> LLM:
         return LLM(model=f"anthropic/{settings.llm_model}", api_key=settings.anthropic_api_key)
     elif settings.llm_provider == "gemini":
         return LLM(model=f"gemini/{settings.llm_model}", api_key=settings.gemini_api_key)
-    elif settings.llm_provider == "grok":
-        return LLM(model=f"xai/{settings.llm_model}", api_key=settings.xai_api_key)
     else:
         return LLM(model=f"openai/{settings.llm_model}", api_key=settings.openai_api_key)
 
@@ -177,7 +175,7 @@ def build_triage_crew(alert_summary: str) -> Crew:
             "provider": "google",
             "config": {"model_name": "models/text-embedding-004", "api_key": settings.gemini_api_key},
         }
-    # grok/ollama: no embedding API — memory stays disabled
+    # ollama: no remote embedding API — memory stays disabled
 
     memory_enabled = embedder_config is not None
 
