@@ -172,9 +172,10 @@ def build_triage_crew(alert_summary: str) -> Crew:
                 "config": {"model": "text-embedding-3-small", "api_key": settings.openai_api_key},
             }
     elif settings.llm_provider == "gemini" and settings.gemini_api_key:
+        # ChromaDB Google embedding function uses model_name with models/ prefix
         embedder_config = {
             "provider": "google",
-            "config": {"model": "models/text-embedding-004", "api_key": settings.gemini_api_key},
+            "config": {"model_name": "models/text-embedding-004", "api_key": settings.gemini_api_key},
         }
     # grok/ollama: no embedding API — memory stays disabled
 
