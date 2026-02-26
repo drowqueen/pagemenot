@@ -670,14 +670,16 @@ _KUBECTL_ALLOWED_VERBS = {"rollout", "scale", "get", "describe", "logs"}
 _KUBECTL_FORBIDDEN_VERBS = {"delete", "drain", "taint", "cordon", "exec"}
 
 _SHELL_WHITELIST = [
-    r"^redis-cli\s+\S.*\s+FLUSHDB$",
+    # Read-only / non-destructive only. FLUSHDB removed — destructive, requires human.
     r"^curl\s+-sf\s+https?://\S+/health$",
     r"^curl\s+-sf\s+https?://\S+/ready$",
 ]
 
+# AWS: read-only actions only for autonomous execution.
+# update_service and set_desired_capacity removed — require human approval.
 _AWS_ALLOWED = {
-    "ecs": {"describe_services", "describe_tasks", "update_service"},
-    "autoscaling": {"describe_auto_scaling_groups", "set_desired_capacity"},
+    "ecs": {"describe_services", "describe_tasks"},
+    "autoscaling": {"describe_auto_scaling_groups"},
     "elasticache": {"describe_cache_clusters"},
     "cloudwatch": {"get_metric_statistics", "get_metric_data"},
 }
@@ -744,9 +746,10 @@ def exec_aws(service: str, action: str, params: dict) -> str:
 
 
 def exec_shell(command: str) -> str:
-    """Execute a whitelisted shell command (health checks, cache flush)."""
+    """Execute a whitelisted shell command (read-only health checks only)."""
     _exec_enabled()
-    if not any(re.match(pattern, command) for pattern in _SHELL_WHITELIST):
+    # re.fullmatch — prevents prefix-bypass attacks (e.g. "curl -sf http://x/health; rm -rf /")
+    if not any(re.fullmatch(pattern, command) for pattern in _SHELL_WHITELIST):
         raise ValueError(f"Command not in whitelist: {command!r}")
     result = subprocess.run(shlex.split(command), capture_output=True, text=True, timeout=30)
     if result.returncode != 0:
@@ -762,32 +765,46 @@ def exec_http(method: str, url: str, headers: dict | None = None, body: dict | N
         return f"{resp.status_code}: {resp.text[:200]}"
 
 
+def _safe_service_name(service: str) -> str:
+    """Validate service name used in template substitution — only safe chars allowed."""
+    if not re.fullmatch(r'[a-zA-Z0-9_\-]+', service):
+        raise ValueError(f"Unsafe service name for template substitution: {service!r}")
+    return service
+
+
 def dispatch_exec_step(step: str, service: str = "") -> str:
     """Parse and route a single exec step from a runbook to the correct executor.
 
-    Accepts raw commands or <!-- exec: command --> tags.
-    Substitutes {{ service }} template variable.
+    Only accepts <!-- exec: command --> tags from verified runbook files.
+    Template substitution ({{ service }}) happens after routing and validation.
     """
+    # Only exec tags from runbook files are accepted — raw LLM text rejected
     match = re.match(r'<!--\s*exec:\s*(.+?)\s*-->', step)
-    cmd = match.group(1) if match else step.strip()
-
-    if service:
-        cmd = cmd.replace("{{ service }}", service).replace("{{service}}", service)
-    cmd = cmd.strip()
+    if not match:
+        raise ValueError("Only <!-- exec: --> tagged steps from runbooks are allowed for autonomous execution")
+    cmd = match.group(1).strip()
 
     if not cmd:
         raise ValueError("Empty exec step")
 
+    # Route first, then substitute service name after validation
     if cmd.startswith("kubectl "):
-        return exec_kubectl(cmd[len("kubectl "):])
+        kubectl_cmd = cmd[len("kubectl "):]
+        if service:
+            kubectl_cmd = kubectl_cmd.replace("{{ service }}", _safe_service_name(service))
+            kubectl_cmd = kubectl_cmd.replace("{{service}}", service)
+        return exec_kubectl(kubectl_cmd)
     elif cmd.startswith("aws "):
+        if service:
+            cmd = cmd.replace("{{ service }}", _safe_service_name(service))
+            cmd = cmd.replace("{{service}}", service)
         parts = shlex.split(cmd)
         if len(parts) < 3:
             raise ValueError(f"Invalid AWS command: {cmd!r}")
         aws_service, aws_action = parts[1], parts[2].replace("-", "_")
         params: dict = {}
         i = 3
-        while i < len(parts) - 1:
+        while i + 1 < len(parts):
             if parts[i].startswith("--"):
                 params[parts[i].lstrip("-").replace("-", "_")] = parts[i + 1]
                 i += 2
@@ -797,6 +814,9 @@ def dispatch_exec_step(step: str, service: str = "") -> str:
     elif cmd.startswith("http://") or cmd.startswith("https://"):
         return exec_http("GET", cmd)
     else:
+        if service:
+            cmd = cmd.replace("{{ service }}", _safe_service_name(service))
+            cmd = cmd.replace("{{service}}", service)
         return exec_shell(cmd)
 
 

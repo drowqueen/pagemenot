@@ -333,6 +333,8 @@ async def _autoapprove_timer(
     finally:
         _pending_autoapprove.pop(task_id, None)
 
+    from pagemenot.triage import _redact_sensitive
+
     client = get_client()
     results = []
     for step in steps:
@@ -340,7 +342,7 @@ async def _autoapprove_timer(
             output = await asyncio.get_running_loop().run_in_executor(
                 _executor, dispatch_exec_step, step, service
             )
-            results.append(f"✅ {step[:80]}: {output[:100]}")
+            results.append(f"✅ {step[:80]}: {_redact_sensitive(output)[:100]}")
         except Exception as e:
             results.append(f"❌ {step[:80]}: {e}")
 

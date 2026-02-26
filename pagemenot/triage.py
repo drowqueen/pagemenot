@@ -13,6 +13,7 @@ Teams see none of this. They see: alert → triage → result.
 
 import asyncio
 import logging
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -170,6 +171,18 @@ def _parse_alert(source: str, payload: dict) -> dict:
         }
 
 
+_REDACT_RE = re.compile(
+    r'((?:password|passwd|secret|token|api.?key|authorization|bearer|aws.?secret|private.?key)'
+    r'\s*[:=]\s*)[^\s,\'";&\n]{4,}',
+    re.IGNORECASE,
+)
+
+
+def _redact_sensitive(text: str) -> str:
+    """Redact credential-like values before sending context to an LLM."""
+    return _REDACT_RE.sub(r'\1[REDACTED]', text)
+
+
 def _guess_service(text: str) -> str:
     for word in text.split():
         clean = word.strip(".,!?:;'\"")
@@ -260,14 +273,10 @@ def _try_runbook_exec(result: TriageResult):
 
     from pagemenot.tools import get_runbook_exec_steps, dispatch_exec_step
 
+    # Only use <!-- exec: --> tagged steps from verified runbook files.
+    # LLM-generated [AUTO-SAFE] text is NEVER used for autonomous execution
+    # (prompt injection risk: attacker could craft alert text to inject commands).
     steps = get_runbook_exec_steps(result.alert_title, service=result.service)
-
-    # Fall back to [AUTO-SAFE] steps from crew output if no runbook exec tags found
-    if not steps:
-        steps = [
-            s for s in result.remediation_steps
-            if "[AUTO-SAFE]" in s and not "[NEEDS APPROVAL]" in s
-        ]
 
     if not steps:
         return
@@ -323,12 +332,13 @@ async def run_triage(source: str, payload: dict[str, Any]) -> TriageResult:
     # 4. Seed mocks if real integrations aren't configured
     _seed_mock_if_needed(parsed)
 
-    # 5. Build summary for the crew
-    summary = (
+    # 5. Build summary for the crew — redact credentials before sending to LLM
+    raw_description = parsed.get('description', 'N/A')
+    summary = _redact_sensitive(
         f"**Alert:** {parsed['title']}\n"
         f"**Service:** {parsed['service']}\n"
         f"**Severity:** {parsed['severity']}\n"
-        f"**Description:** {parsed.get('description', 'N/A')}\n"
+        f"**Description:** {raw_description}\n"
         f"**Time:** {datetime.now(timezone.utc).isoformat()}"
     )
 
