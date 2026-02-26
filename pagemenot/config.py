@@ -25,9 +25,13 @@ class Settings(BaseSettings):
     # ── Optional integrations ─────────────────────────────
     # Metrics / dashboards
     prometheus_url: Optional[str] = None
+    prometheus_auth_token: Optional[str] = None
     grafana_url: Optional[str] = None
     grafana_api_key: Optional[str] = None
+    grafana_org_id: Optional[str] = None   # required for Grafana Cloud
     loki_url: Optional[str] = None
+    loki_auth_token: Optional[str] = None
+    loki_org_id: Optional[str] = None      # required for Grafana Cloud / multi-tenant Loki
     datadog_api_key: Optional[str] = None
     datadog_app_key: Optional[str] = None
     datadog_site: str = "datadoghq.com"

@@ -115,7 +115,6 @@ def query_prometheus(service_name: str) -> str:
     Input should be the service name (e.g., 'payment-service')."""
     try:
         end = datetime.now(timezone.utc)
-        start = end - timedelta(minutes=30)
 
         queries = {
             "error_rate": (
@@ -132,8 +131,12 @@ def query_prometheus(service_name: str) -> str:
             "pod_restarts": f'sum(increase(kube_pod_container_status_restarts_total{{pod=~"{service_name}.*"}}[30m]))',
         }
 
+        headers = {}
+        if settings.prometheus_auth_token:
+            headers["Authorization"] = f"Bearer {settings.prometheus_auth_token}"
+
         results = []
-        with httpx.Client(timeout=10) as client:
+        with httpx.Client(timeout=10, headers=headers) as client:
             for name, query in queries.items():
                 resp = client.get(
                     f"{settings.prometheus_url}/api/v1/query",
@@ -149,7 +152,7 @@ def query_prometheus(service_name: str) -> str:
         return f"Prometheus metrics for '{service_name}' (last 30min):\n" + "\n".join(results)
 
     except Exception as e:
-        return f"Prometheus query failed: {e}. Check if PROMETHEUS_URL is correct."
+        return f"Prometheus query failed: {e}. Check PROMETHEUS_URL is correct."
 
 
 @tool("Get Grafana Alert History")
@@ -157,27 +160,22 @@ def query_grafana_alerts(service_name: str) -> str:
     """Get recent Grafana alerts related to a service.
     Input should be the service name."""
     try:
-        with httpx.Client(timeout=10) as client:
-            resp = client.get(
-                f"{settings.grafana_url}/api/v1/provisioning/alert-rules",
-                headers={"Authorization": f"Bearer {settings.grafana_api_key}"},
-            )
+        headers = {"Authorization": f"Bearer {settings.grafana_api_key}"}
+        if settings.grafana_org_id:
+            headers["X-Grafana-Org-Id"] = settings.grafana_org_id
+
+        with httpx.Client(timeout=10, headers=headers) as client:
+            resp = client.get(f"{settings.grafana_url}/api/v1/provisioning/alert-rules")
             rules = resp.json()
 
-            # Filter alerts mentioning this service
-            relevant = [
-                r for r in rules
-                if service_name.lower() in str(r).lower()
-            ]
-
+            relevant = [r for r in rules if service_name.lower() in str(r).lower()]
             if not relevant:
                 return f"No Grafana alerts found for '{service_name}'."
 
-            summaries = []
-            for r in relevant[:5]:
-                summaries.append(
-                    f"  - {r.get('title', 'Unknown')}: {r.get('condition', 'N/A')}"
-                )
+            summaries = [
+                f"  - {r.get('title', 'Unknown')}: {r.get('condition', 'N/A')}"
+                for r in relevant[:5]
+            ]
             return f"Grafana alerts for '{service_name}':\n" + "\n".join(summaries)
 
     except Exception as e:
@@ -190,7 +188,6 @@ def search_logs_loki(query: str) -> str:
     Input should be a LogQL query or a service name with keywords
     like 'payment-service error' or '{app="checkout"} |= "exception"'."""
     try:
-        # If it doesn't look like LogQL, wrap it
         if not query.startswith("{"):
             parts = query.split(maxsplit=1)
             service = parts[0]
@@ -202,7 +199,13 @@ def search_logs_loki(query: str) -> str:
         end = datetime.now(timezone.utc)
         start = end - timedelta(minutes=30)
 
-        with httpx.Client(timeout=10) as client:
+        headers = {}
+        if settings.loki_auth_token:
+            headers["Authorization"] = f"Bearer {settings.loki_auth_token}"
+        if settings.loki_org_id:
+            headers["X-Scope-OrgID"] = settings.loki_org_id
+
+        with httpx.Client(timeout=10, headers=headers) as client:
             resp = client.get(
                 f"{settings.loki_url}/loki/api/v1/query_range",
                 params={
