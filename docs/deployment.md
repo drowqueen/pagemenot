@@ -328,3 +328,58 @@ helm upgrade kube-prom prometheus-community/kube-prometheus-stack \
 | Always-on | No (local) | Yes |
 | Real alert firing | Yes (Alertmanager) | Yes (hosted Alertmanager) |
 | Cleanup | `minikube delete` | Delete stack in UI |
+
+---
+
+## AWS IAM Role Setup
+
+Required when `AWS_ROLE_ARN` is set. Pagemenot assumes this role to query AWS services.
+
+### Create the role
+
+```bash
+# Replace ACCOUNT_ID with your AWS account ID
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+sed -i "s/ACCOUNT_ID/$ACCOUNT_ID/" deploy/pagemenot-trust-policy.json
+
+aws iam create-role \
+  --role-name pagemenot-exec \
+  --assume-role-policy-document file://deploy/pagemenot-trust-policy.json
+
+aws iam put-role-policy \
+  --role-name pagemenot-exec \
+  --policy-name pagemenot-policy \
+  --policy-document file://deploy/pagemenot-iam-policy.json
+
+aws iam get-role --role-name pagemenot-exec \
+  --query Role.Arn --output text
+```
+
+Paste the output ARN into `.env`:
+```
+AWS_ROLE_ARN=arn:aws:iam::ACCOUNT_ID:role/pagemenot-exec
+```
+
+### Permissions granted (read-only)
+
+| Service | Actions |
+|---------|---------|
+| ECS | DescribeServices, DescribeTasks, ListTasks, ListServices |
+| Auto Scaling | DescribeAutoScalingGroups, DescribeScalingActivities |
+| ElastiCache | DescribeCacheClusters, DescribeReplicationGroups |
+| CloudWatch | GetMetricStatistics, GetMetricData, ListMetrics, DescribeAlarms |
+| CloudWatch Logs | GetLogEvents, FilterLogEvents, DescribeLogGroups |
+
+All actions are read-only. Write actions (UpdateService, SetDesiredCapacity, etc.) are not granted and are blocked in code.
+
+### Scope to specific resources (optional)
+
+Replace `"Resource": "*"` in `pagemenot-iam-policy.json` with specific ARNs:
+
+```json
+"Resource": [
+  "arn:aws:ecs:us-east-1:ACCOUNT_ID:service/prod-cluster/*",
+  "arn:aws:logs:us-east-1:ACCOUNT_ID:log-group:/prod/*:*"
+]
+```
