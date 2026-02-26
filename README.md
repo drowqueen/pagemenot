@@ -54,61 +54,28 @@ No integrations configured → mock layer activates automatically. The crew stil
 
 ## Setup
 
-### 1. Slack app
-
-1. Go to https://api.slack.com/apps → **Create New App** → **From manifest**
-2. Paste:
-   ```yaml
-   display_information:
-     name: Pagemenot
-   features:
-     slash_commands:
-       - command: /pagemenot
-         url: https://<your-host>/slack/events
-         description: Triage an incident
-     bot_user:
-       display_name: Pagemenot
-   oauth_config:
-     scopes:
-       bot:
-         - app_mentions:read
-         - channels:history
-         - channels:read
-         - chat:write
-         - commands
-         - groups:history
-   settings:
-     event_subscriptions:
-       bot_events:
-         - app_mention
-         - message.channels
-     interactivity:
-       is_enabled: true
-     socket_mode_enabled: true
-   ```
-3. **Install to workspace** → copy **Bot Token** (`xoxb-…`)
-4. **Basic Information → App-Level Tokens** → generate token with `connections:write` scope → copy **App Token** (`xapp-…`)
-
-### 2. LLM
-
-Pick one provider and set its key:
-
-| Provider | Vars |
-|----------|------|
-| OpenAI | `LLM_PROVIDER=openai` + `OPENAI_API_KEY` |
-| Anthropic | `LLM_PROVIDER=anthropic` + `ANTHROPIC_API_KEY` |
-| Gemini | `LLM_PROVIDER=gemini` + `GEMINI_API_KEY` |
-| Ollama | `LLM_PROVIDER=ollama` + `OLLAMA_URL` |
-
-### 3. Run
-
 ```bash
-cp .env.example .env
-# Fill in SLACK_BOT_TOKEN, SLACK_APP_TOKEN, and one LLM key
+cp .env.example .env   # edit this one file — all config lives here
 docker compose up -d
 ```
 
-### 4. Test without real monitoring
+**Slack app** (one-time):
+1. https://api.slack.com/apps → **Create New App → From manifest** → paste `slack-manifest.yaml`
+2. **Install to workspace** → copy **Bot Token** (`xoxb-…`) → `SLACK_BOT_TOKEN`
+3. **Basic Information → App-Level Tokens** → create token with `connections:write` → copy (`xapp-…`) → `SLACK_APP_TOKEN`
+
+**LLM** — pick one, set in `.env`:
+
+| Provider | `LLM_PROVIDER` | Key var |
+|----------|---------------|---------|
+| OpenAI | `openai` | `OPENAI_API_KEY` |
+| Anthropic | `anthropic` | `ANTHROPIC_API_KEY` |
+| Gemini | `gemini` | `GEMINI_API_KEY` |
+| Ollama | `ollama` | `OLLAMA_URL` |
+
+All other integrations (Prometheus, Loki, Grafana, PagerDuty, etc.) are optional — set their vars in `.env` to activate. Unset = mock fallback.
+
+**Test without real monitoring:**
 
 ```bash
 python scripts/simulate_incident.py payment-500s
