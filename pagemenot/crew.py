@@ -20,6 +20,10 @@ def _build_llm() -> LLM:
         return LLM(model=f"ollama/{settings.llm_model}", base_url=settings.ollama_url)
     elif settings.llm_provider == "anthropic":
         return LLM(model=f"anthropic/{settings.llm_model}", api_key=settings.anthropic_api_key)
+    elif settings.llm_provider == "gemini":
+        return LLM(model=f"gemini/{settings.llm_model}", api_key=settings.gemini_api_key)
+    elif settings.llm_provider == "grok":
+        return LLM(model=f"xai/{settings.llm_model}", api_key=settings.xai_api_key)
     else:
         return LLM(model=f"openai/{settings.llm_model}", api_key=settings.openai_api_key)
 
@@ -152,7 +156,7 @@ def build_triage_crew(alert_summary: str) -> Crew:
         context=[monitor_task, diagnose_task],
     )
 
-    # Only enable memory when OpenAI is configured — CrewAI memory defaults to OpenAI embeddings
+    # CrewAI memory uses OpenAI embeddings by default — only enable when OpenAI is the provider
     memory_enabled = settings.llm_provider == "openai" and bool(settings.openai_api_key)
 
     return Crew(
