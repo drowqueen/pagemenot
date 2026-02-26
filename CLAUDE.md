@@ -31,6 +31,11 @@ FORBIDDEN everywhere: "robust", "seamless", "leverages", "powerful", "comprehens
 ### #24: COMMIT DISCIPLINE
 NEVER commit without explicit user command. NEVER commit credentials or secrets.
 
+### #24.5: BRANCH AND PR WORKFLOW
+ALWAYS work on a branch. NEVER commit directly to `main` or `develop`.
+Branch naming: `feature/<name>`, `fix/<name>`, `chore/<name>`.
+Every change must go through a PR. No exceptions.
+
 ### #25: DELEGATE — AGENTS USE SCREEN, NEVER BLOCK
 Task agents MUST use `screen -dmS` for any work >2 min. FORBIDDEN: blocking terminal waiting for agent results. Launch screen, report name + log path, move on. Agent inventory: `.claude/agents/README.md`.
 
