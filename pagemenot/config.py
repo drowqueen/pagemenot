@@ -1,0 +1,68 @@
+"""Pagemenot configuration — all from environment variables."""
+
+from pydantic_settings import BaseSettings
+from typing import Optional
+
+
+class Settings(BaseSettings):
+    # ── Required ──────────────────────────────────────────
+    slack_bot_token: str
+    slack_app_token: str
+
+    # ── LLM ───────────────────────────────────────────────
+    llm_provider: str = "openai"
+    llm_model: str = "gpt-4o"
+    openai_api_key: Optional[str] = None
+    anthropic_api_key: Optional[str] = None
+    ollama_url: Optional[str] = None
+
+    # ── Vector store (embedded ChromaDB) ──────────────────
+    chroma_path: str = "/app/data/chroma"
+
+    # ── Slack ─────────────────────────────────────────────
+    pagemenot_channel: str = "incidents"
+
+    # ── Optional integrations ─────────────────────────────
+    prometheus_url: Optional[str] = None
+    grafana_url: Optional[str] = None
+    grafana_api_key: Optional[str] = None
+    loki_url: Optional[str] = None
+    github_token: Optional[str] = None
+    github_org: Optional[str] = None
+    pagerduty_api_key: Optional[str] = None
+    kubeconfig_path: Optional[str] = None
+
+    log_level: str = "INFO"
+
+    @property
+    def crewai_llm_string(self) -> str:
+        """Return CrewAI-compatible LLM string."""
+        if self.llm_provider == "openai":
+            return f"openai/{self.llm_model}"
+        elif self.llm_provider == "anthropic":
+            return f"anthropic/{self.llm_model}"
+        elif self.llm_provider == "ollama":
+            return f"ollama/{self.llm_model}"
+        return self.llm_model
+
+    @property
+    def enabled_integrations(self) -> list[str]:
+        integrations = []
+        if self.prometheus_url:
+            integrations.append("prometheus")
+        if self.grafana_url:
+            integrations.append("grafana")
+        if self.loki_url:
+            integrations.append("loki")
+        if self.github_token:
+            integrations.append("github")
+        if self.pagerduty_api_key:
+            integrations.append("pagerduty")
+        if self.kubeconfig_path:
+            integrations.append("kubernetes")
+        return integrations
+
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+
+
+settings = Settings()

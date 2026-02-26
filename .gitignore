@@ -1,0 +1,11 @@
+.env
+*.pyc
+__pycache__/
+.DS_Store
+.venv/
+venv/
+dist/
+*.egg-info/
+logs/
+chroma_db/
+.claude/settings.local.json

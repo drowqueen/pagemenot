@@ -1,0 +1,17 @@
+services:
+  pagemenot:
+    build: .
+    container_name: pagemenot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - KNOWLEDGE_DIR=/app/knowledge
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./knowledge/postmortems:/app/knowledge/postmortems:ro
+      - ./knowledge/runbooks:/app/knowledge/runbooks:ro
+      - chromadata:/app/data/chroma
+
+volumes:
+  chromadata:

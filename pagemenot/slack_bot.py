@@ -1,0 +1,302 @@
+"""
+Slack bot — the only interface teams interact with.
+
+They never see CrewAI, agents, tools, or configs beyond .env.
+They see:
+  /pagemenot triage "something is broken"
+  → Pagemenot works → Result in thread
+"""
+
+import asyncio
+import json
+import logging
+
+from slack_bolt.async_app import AsyncApp
+from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
+from slack_sdk.web.async_client import AsyncWebClient
+
+from pagemenot.config import settings
+from pagemenot.triage import run_triage
+
+logger = logging.getLogger("pagemenot.slack")
+
+_app: AsyncApp | None = None
+_client: AsyncWebClient | None = None
+
+
+def create_slack_app() -> AsyncApp:
+    """Create and wire up the Slack app. Called once at startup."""
+    global _app, _client
+
+    app = AsyncApp(token=settings.slack_bot_token)
+    _app = app
+    _client = app.client
+
+    # ── Slash command ─────────────────────────────────────
+    @app.command("/pagemenot")
+    async def handle_command(ack, command, say):
+        await ack()
+        text = command.get("text", "").strip()
+        parts = text.split(maxsplit=1)
+        sub = parts[0].lower() if parts else "help"
+        args = parts[1] if len(parts) > 1 else ""
+
+        if sub == "triage":
+            if not args:
+                await say(
+                    "Usage: `/pagemenot triage <describe the issue>`\n"
+                    "Example: `/pagemenot triage payment-service returning 500s since 2 minutes ago`"
+                )
+                return
+            await _do_triage(say, source="manual", payload={"text": args})
+
+        elif sub == "status":
+            await _show_status(say)
+
+        else:
+            await say(
+                "🦞 *Pagemenot — AI On-Call Copilot*\n\n"
+                "• `/pagemenot triage <description>` — Triage an incident\n"
+                "• `/pagemenot status` — Show connected integrations\n"
+                "• Mention `@Pagemenot` in a thread to ask follow-ups"
+            )
+
+    # ── @mention handler ──────────────────────────────────
+    @app.event("app_mention")
+    async def handle_mention(event, say):
+        text = event.get("text", "")
+        thread = event.get("thread_ts") or event.get("ts")
+
+        # If not in a triage thread, treat as a new triage
+        if not event.get("thread_ts"):
+            await _do_triage(
+                say, source="manual",
+                payload={"text": text},
+                thread_ts=thread,
+            )
+        else:
+            # Follow-up in existing thread — future: contextual Q&A
+            await say(
+                "🔍 Let me look into that... (follow-up context coming in v0.2)",
+                thread_ts=thread,
+            )
+
+    # ── Approval buttons ──────────────────────────────────
+    @app.action("approve_action")
+    async def handle_approve(ack, body, say):
+        await ack()
+        user = body["user"]["name"]
+        action_id = body["actions"][0]["value"]
+        thread = body["container"].get("thread_ts") or body["container"].get("message_ts")
+
+        await say(
+            f"✅ Action approved by @{user}. Executing...\n"
+            f"(Automated execution coming in v0.4 — for now, run the suggested command manually)",
+            thread_ts=thread,
+        )
+
+    @app.action("reject_action")
+    async def handle_reject(ack, body, say):
+        await ack()
+        user = body["user"]["name"]
+        thread = body["container"].get("thread_ts") or body["container"].get("message_ts")
+        await say(f"❌ Action rejected by @{user}.", thread_ts=thread)
+
+    @app.action("feedback_positive")
+    async def handle_thumbs_up(ack, body):
+        await ack()
+        # TODO: Record feedback in knowledge store
+        logger.info(f"Positive feedback from {body['user']['name']}")
+
+    @app.action("feedback_negative")
+    async def handle_thumbs_down(ack, body):
+        await ack()
+        logger.info(f"Negative feedback from {body['user']['name']}")
+
+    @app.event("message")
+    async def handle_message(event):
+        pass  # Required for Socket Mode
+
+    return app
+
+
+async def _do_triage(say, source: str, payload: dict, thread_ts: str | None = None):
+    """Run triage and post results. This is the bridge between Slack and CrewAI."""
+
+    # Post "working on it" immediately
+    working_msg = await say(
+        "🔍 *Triage crew activated.* Gathering data, analyzing, and preparing recommendations...",
+        thread_ts=thread_ts,
+    )
+    thread = working_msg.get("ts") if not thread_ts else thread_ts
+
+    try:
+        result = await run_triage(source=source, payload=payload)
+
+        # ── Format result ─────────────────────────────────
+        sev = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🔵"}.get(
+            result.severity, "⚪"
+        )
+        conf = {"high": "🟢", "medium": "🟡", "low": "🔴"}.get(result.confidence, "⚪")
+
+        blocks = [
+            {
+                "type": "header",
+                "text": {"type": "plain_text", "text": f"{sev} {result.alert_title}"},
+            },
+            {"type": "divider"},
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"*🔍 Root Cause* (confidence: {conf} {result.confidence})\n\n"
+                        f"{result.root_cause}"
+                    ),
+                },
+            },
+        ]
+
+        # Full analysis in thread
+        await say(text=f"{sev} {result.alert_title}", blocks=blocks, thread_ts=thread)
+
+        # Post raw detailed analysis as a follow-up in the thread
+        # Truncate to Slack's 3000 char limit per block
+        detail_chunks = _chunk_text(result.raw_output, 2900)
+        for i, chunk in enumerate(detail_chunks[:3]):
+            await say(
+                text=f"Detailed analysis (part {i + 1})",
+                blocks=[{
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": f"```{chunk}```"},
+                }],
+                thread_ts=thread,
+            )
+
+        # Approval buttons if any actions need it
+        if result.needs_approval:
+            approval_text = "\n".join(f"• {a}" for a in result.needs_approval)
+            await say(
+                text="Actions requiring approval",
+                blocks=[
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"*⚠️ Actions requiring approval:*\n{approval_text}",
+                        },
+                    },
+                    {
+                        "type": "actions",
+                        "elements": [
+                            {
+                                "type": "button",
+                                "text": {"type": "plain_text", "text": "✅ Approve"},
+                                "action_id": "approve_action",
+                                "value": "triage_action",
+                                "style": "primary",
+                            },
+                            {
+                                "type": "button",
+                                "text": {"type": "plain_text", "text": "❌ Reject"},
+                                "action_id": "reject_action",
+                                "value": "triage_action",
+                                "style": "danger",
+                            },
+                        ],
+                    },
+                ],
+                thread_ts=thread,
+            )
+
+        # Feedback buttons
+        await say(
+            text="Was this helpful?",
+            blocks=[
+                {"type": "divider"},
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "👍 Helpful"},
+                            "action_id": "feedback_positive",
+                            "style": "primary",
+                        },
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "👎 Wrong"},
+                            "action_id": "feedback_negative",
+                            "style": "danger",
+                        },
+                    ],
+                },
+            ],
+            thread_ts=thread,
+        )
+
+        await say(
+            f"⏱️ Triage completed in {result.duration_seconds:.1f}s",
+            thread_ts=thread,
+        )
+
+    except Exception as e:
+        logger.error(f"Triage failed: {e}", exc_info=True)
+        await say(
+            f"❌ Triage failed: {str(e)[:200]}. Check logs for details.",
+            thread_ts=thread,
+        )
+
+
+async def _show_status(say):
+    """Show what's connected — helps teams see what they can add."""
+    connected = settings.enabled_integrations
+    if connected:
+        connected_str = "\n".join(f"  ✅ {i}" for i in connected)
+    else:
+        connected_str = "  (none yet)"
+
+    not_connected = []
+    if not settings.prometheus_url:
+        not_connected.append("Prometheus (PROMETHEUS_URL)")
+    if not settings.github_token:
+        not_connected.append("GitHub (GITHUB_TOKEN)")
+    if not settings.loki_url:
+        not_connected.append("Loki (LOKI_URL)")
+    if not settings.grafana_url:
+        not_connected.append("Grafana (GRAFANA_URL, GRAFANA_API_KEY)")
+    if not settings.pagerduty_api_key:
+        not_connected.append("PagerDuty (PAGERDUTY_API_KEY)")
+    if not settings.kubeconfig_path:
+        not_connected.append("Kubernetes (KUBECONFIG_PATH)")
+
+    not_connected_str = "\n".join(f"  💡 {n}" for n in not_connected) if not_connected else "  (all connected!)"
+
+    await say(
+        f"*🦞 Pagemenot Status*\n\n"
+        f"*Connected:*\n{connected_str}\n\n"
+        f"*Available to add:*\n{not_connected_str}\n\n"
+        f"_Add integrations by setting env vars in `.env` and restarting._"
+    )
+
+
+def _chunk_text(text: str, max_len: int) -> list[str]:
+    """Split text into chunks for Slack's character limits."""
+    chunks = []
+    while text:
+        if len(text) <= max_len:
+            chunks.append(text)
+            break
+        # Find a good break point
+        break_at = text.rfind("\n", 0, max_len)
+        if break_at < max_len // 2:
+            break_at = max_len
+        chunks.append(text[:break_at])
+        text = text[break_at:].lstrip("\n")
+    return chunks
+
+
+def get_client() -> AsyncWebClient:
+    if _client is None:
+        raise RuntimeError("Slack not initialized")
+    return _client
