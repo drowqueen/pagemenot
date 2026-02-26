@@ -10,8 +10,9 @@ Each tool is a CrewAI @tool that wraps the actual API call.
 """
 
 import logging
+import re
+import time
 from datetime import datetime, timedelta, timezone
-from typing import Any
 
 import httpx
 from crewai.tools import tool
@@ -19,6 +20,16 @@ from crewai.tools import tool
 from pagemenot.config import settings
 
 logger = logging.getLogger("pagemenot.tools")
+
+_SAFE_NAME_RE = re.compile(r'^[a-zA-Z0-9_.\-]+$')
+
+
+def _safe_name(name: str) -> str:
+    """Validate that a name contains only safe characters for use in queries.
+    Returns the name unchanged, raises ValueError if unsafe."""
+    if not _SAFE_NAME_RE.match(name):
+        raise ValueError(f"Unsafe characters in name: {name!r}")
+    return name
 
 
 # ══════════════════════════════════════════════════════════════
@@ -114,6 +125,11 @@ def query_prometheus(service_name: str) -> str:
     CPU, memory, and pod restarts over the last 30 minutes.
     Input should be the service name (e.g., 'payment-service')."""
     try:
+        try:
+            service_name = _safe_name(service_name)
+        except ValueError as e:
+            return f"Invalid service name: {e}"
+
         end = datetime.now(timezone.utc)
 
         queries = {
@@ -157,7 +173,7 @@ def query_prometheus(service_name: str) -> str:
 
 @tool("Get Grafana Alert History")
 def query_grafana_alerts(service_name: str) -> str:
-    """Get recent Grafana alerts related to a service.
+    """Get currently firing Grafana alerts related to a service.
     Input should be the service name."""
     try:
         headers = {"Authorization": f"Bearer {settings.grafana_api_key}"}
@@ -165,18 +181,27 @@ def query_grafana_alerts(service_name: str) -> str:
             headers["X-Grafana-Org-Id"] = settings.grafana_org_id
 
         with httpx.Client(timeout=10, headers=headers) as client:
-            resp = client.get(f"{settings.grafana_url}/api/v1/provisioning/alert-rules")
-            rules = resp.json()
+            # Query active firing alerts via Grafana-managed Alertmanager API
+            resp = client.get(
+                f"{settings.grafana_url}/api/alertmanager/grafana/api/v2/alerts",
+                params={"active": "true", "silenced": "false", "inhibited": "false"},
+            )
+            resp.raise_for_status()
+            alerts = resp.json()
 
-            relevant = [r for r in rules if service_name.lower() in str(r).lower()]
+            relevant = [a for a in alerts if service_name.lower() in str(a).lower()]
             if not relevant:
-                return f"No Grafana alerts found for '{service_name}'."
+                return f"No active Grafana alerts found for '{service_name}'."
 
-            summaries = [
-                f"  - {r.get('title', 'Unknown')}: {r.get('condition', 'N/A')}"
-                for r in relevant[:5]
-            ]
-            return f"Grafana alerts for '{service_name}':\n" + "\n".join(summaries)
+            summaries = []
+            for a in relevant[:5]:
+                labels = a.get("labels", {})
+                annotations = a.get("annotations", {})
+                summaries.append(
+                    f"  - {labels.get('alertname', 'Unknown')}: "
+                    f"{annotations.get('summary', a.get('status', {}).get('state', 'N/A'))}"
+                )
+            return f"Active Grafana alerts for '{service_name}':\n" + "\n".join(summaries)
 
     except Exception as e:
         return f"Grafana query failed: {e}"
@@ -192,6 +217,11 @@ def search_logs_loki(query: str) -> str:
             parts = query.split(maxsplit=1)
             service = parts[0]
             keywords = parts[1] if len(parts) > 1 else "error"
+            # Validate service name before embedding in LogQL
+            try:
+                service = _safe_name(service)
+            except ValueError as e:
+                return f"Invalid service name: {e}"
             logql = f'{{app="{service}"}} |= "{keywords}"'
         else:
             logql = query
@@ -237,15 +267,17 @@ def get_pagerduty_incident(incident_id_or_description: str) -> str:
     """Get details about a PagerDuty incident.
     Input can be an incident ID (like P1234567) or a search term."""
     try:
+        pd_headers = {
+            "Authorization": f"Token token={settings.pagerduty_api_key}",
+            "Accept": "application/vnd.pagerduty+json;version=2",
+            "Content-Type": "application/json",
+        }
         with httpx.Client(timeout=10) as client:
             # Try as incident ID first
             if incident_id_or_description.startswith("P"):
                 resp = client.get(
                     f"https://api.pagerduty.com/incidents/{incident_id_or_description}",
-                    headers={
-                        "Authorization": f"Token token={settings.pagerduty_api_key}",
-                        "Content-Type": "application/json",
-                    },
+                    headers=pd_headers,
                 )
                 if resp.status_code == 200:
                     inc = resp.json()["incident"]
@@ -262,10 +294,7 @@ def get_pagerduty_incident(incident_id_or_description: str) -> str:
             # Fall back to search
             resp = client.get(
                 "https://api.pagerduty.com/incidents",
-                headers={
-                    "Authorization": f"Token token={settings.pagerduty_api_key}",
-                    "Content-Type": "application/json",
-                },
+                headers=pd_headers,
                 params={"sort_by": "created_at:desc", "limit": 5},
             )
             incidents = resp.json().get("incidents", [])
@@ -328,7 +357,6 @@ def query_datadog_metrics(service_name: str) -> str:
     """Query Datadog for service metrics over the last 30 minutes.
     Input: service name (e.g., 'payment-service')."""
     try:
-        import time
         now = int(time.time())
         start = now - 1800
 
@@ -338,10 +366,11 @@ def query_datadog_metrics(service_name: str) -> str:
             "latency_p99": f"p99:trace.http.request.duration{{service:{service_name}}}",
         }
 
-        headers = {
+        # Filter None values — httpx would send "None" as a string otherwise
+        headers = {k: v for k, v in {
             "DD-API-KEY": settings.datadog_api_key,
             "DD-APPLICATION-KEY": settings.datadog_app_key,
-        }
+        }.items() if v is not None}
         base = f"https://api.{settings.datadog_site}"
 
         results = []
@@ -371,30 +400,41 @@ def query_newrelic_metrics(service_name: str) -> str:
     """Query New Relic for service error rate and throughput.
     Input: service/application name."""
     try:
+        if not settings.newrelic_account_id:
+            return "New Relic account ID not configured."
+
+        # Use GraphQL variables to avoid injection — service_name never touches query syntax
         nrql = (
-            f"SELECT count(*) as requests, "
-            f"filter(count(*), WHERE error IS true) as errors, "
-            f"average(duration) as avg_duration "
+            "SELECT count(*) as requests, "
+            "filter(count(*), WHERE error IS true) as errors, "
+            "average(duration) as avg_duration "
             f"FROM Transaction WHERE appName = '{service_name}' "
-            f"SINCE 30 minutes ago"
+            "SINCE 30 minutes ago"
         )
+        gql = """
+            query($accountId: Int!, $nrql: Nrql!) {
+                actor {
+                    account(id: $accountId) {
+                        nrql(query: $nrql) {
+                            results
+                        }
+                    }
+                }
+            }
+        """
         with httpx.Client(timeout=10) as client:
             resp = client.post(
-                f"https://api.newrelic.com/graphql",
+                "https://api.newrelic.com/graphql",
                 headers={
                     "API-Key": settings.newrelic_api_key,
                     "Content-Type": "application/json",
                 },
                 json={
-                    "query": f"""{{
-                        actor {{
-                            account(id: {settings.newrelic_account_id}) {{
-                                nrql(query: "{nrql}") {{
-                                    results
-                                }}
-                            }}
-                        }}
-                    }}"""
+                    "query": gql,
+                    "variables": {
+                        "accountId": int(settings.newrelic_account_id),
+                        "nrql": nrql,
+                    },
                 },
             )
             data = resp.json()
@@ -409,11 +449,13 @@ def query_newrelic_metrics(service_name: str) -> str:
                 return f"No New Relic data for '{service_name}'."
 
             r = results[0]
+            avg = r.get('avg_duration')
+            avg_str = f"{avg:.3f}s" if isinstance(avg, (int, float)) else "N/A"
             return (
                 f"New Relic metrics for '{service_name}' (last 30min):\n"
                 f"  requests: {r.get('requests', 'N/A')}\n"
                 f"  errors: {r.get('errors', 'N/A')}\n"
-                f"  avg_duration: {r.get('avg_duration', 'N/A'):.3f}s"
+                f"  avg_duration: {avg_str}"
             )
 
     except Exception as e:
@@ -433,14 +475,16 @@ def get_recent_deploys(repo_or_service: str) -> str:
         if "/" not in repo and settings.github_org:
             repo = f"{settings.github_org}/{repo_or_service}"
 
+        gh_headers = {
+            "Authorization": f"Bearer {settings.github_token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
         with httpx.Client(timeout=10) as client:
             # Get recent merged PRs (proxy for deploys)
             resp = client.get(
                 f"https://api.github.com/repos/{repo}/pulls",
-                headers={
-                    "Authorization": f"Bearer {settings.github_token}",
-                    "Accept": "application/vnd.github.v3+json",
-                },
+                headers=gh_headers,
                 params={"state": "closed", "sort": "updated", "direction": "desc", "per_page": 5},
             )
             prs = resp.json()
@@ -454,8 +498,7 @@ def get_recent_deploys(repo_or_service: str) -> str:
                     lines.append(
                         f"  PR #{pr['number']}: {pr['title']}\n"
                         f"    Author: {pr['user']['login']}\n"
-                        f"    Merged: {pr['merged_at']}\n"
-                        f"    Changed files: {pr.get('changed_files', '?')}"
+                        f"    Merged: {pr['merged_at']}"
                     )
             if not lines:
                 return f"No recently merged PRs for '{repo}'."
@@ -484,7 +527,8 @@ def get_pr_diff(repo_and_pr_number: str) -> str:
                 f"https://api.github.com/repos/{repo}/pulls/{pr_num}/files",
                 headers={
                     "Authorization": f"Bearer {settings.github_token}",
-                    "Accept": "application/vnd.github.v3+json",
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": "2022-11-28",
                 },
             )
             files = resp.json()

@@ -15,8 +15,8 @@ from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 
 from pagemenot.config import settings
 from pagemenot.knowledge.rag import ingest_all
-from pagemenot.slack_bot import create_slack_app
-from pagemenot.triage import run_triage
+from pagemenot.slack_bot import create_slack_app, _chunk_text
+from pagemenot.triage import run_triage, _executor
 
 logging.basicConfig(
     level=getattr(logging, settings.log_level),
@@ -50,6 +50,7 @@ async def lifespan(app: FastAPI):
     yield
 
     task.cancel()
+    _executor.shutdown(wait=False)
 
 
 app = FastAPI(title="Pagemenot", version="0.1.0", lifespan=lifespan)
@@ -72,7 +73,8 @@ async def health():
 async def pagerduty_webhook(request: Request):
     payload = await request.json()
     for msg in payload.get("messages", []):
-        if msg.get("event") == "incident.trigger":
+        # PagerDuty v2 webhook event type is "incident.triggered"
+        if msg.get("event") == "incident.triggered":
             asyncio.create_task(_auto_triage("pagerduty", msg.get("incident", {})))
     return {"status": "accepted"}
 
@@ -80,7 +82,9 @@ async def pagerduty_webhook(request: Request):
 @app.post("/webhooks/grafana")
 async def grafana_webhook(request: Request):
     payload = await request.json()
-    asyncio.create_task(_auto_triage("grafana", payload))
+    # Only triage firing alerts — skip resolved/ok state webhooks
+    if payload.get("status") == "firing":
+        asyncio.create_task(_auto_triage("grafana", payload))
     return {"status": "accepted"}
 
 
@@ -121,7 +125,9 @@ async def datadog_webhook(request: Request):
 @app.post("/webhooks/newrelic")
 async def newrelic_webhook(request: Request):
     payload = await request.json()
-    asyncio.create_task(_auto_triage("newrelic", payload))
+    # Only triage open incidents — skip acknowledged/closed states
+    if payload.get("state", "open") == "open":
+        asyncio.create_task(_auto_triage("newrelic", payload))
     return {"status": "accepted"}
 
 
@@ -154,14 +160,14 @@ async def _auto_triage(source: str, payload: dict):
             ),
         )
 
-        # Post full analysis
+        # Post full analysis in chunks (matches _do_triage behaviour)
         if result.raw_output:
-            truncated = result.raw_output[:2900]
-            await client.chat_postMessage(
-                channel=settings.pagemenot_channel,
-                thread_ts=thread,
-                text=f"```{truncated}```",
-            )
+            for i, chunk in enumerate(_chunk_text(result.raw_output, 2900)[:3]):
+                await client.chat_postMessage(
+                    channel=settings.pagemenot_channel,
+                    thread_ts=thread,
+                    text=f"Detailed analysis (part {i + 1})\n```{chunk}```",
+                )
 
     except Exception as e:
         logger.error(f"Auto-triage failed: {e}", exc_info=True)

@@ -24,8 +24,8 @@ def _build_llm() -> LLM:
         return LLM(model=f"openai/{settings.llm_model}", api_key=settings.openai_api_key)
 
 
-def build_crew() -> Crew:
-    """Auto-build triage crew from whatever integrations are available."""
+def build_triage_crew(alert_summary: str) -> Crew:
+    """Build a complete triage crew for a specific incident and return it ready to kickoff."""
     llm = _build_llm()
     available = get_available_tools()
 
@@ -88,22 +88,6 @@ def build_crew() -> Crew:
         allow_delegation=False,
     )
 
-    return Crew(
-        agents=[monitor, diagnoser, remediator],
-        process=Process.sequential,
-        verbose=True,
-        memory=True,
-    )
-
-
-def build_triage_tasks(
-    alert_summary: str,
-    monitor_agent: Agent,
-    diagnoser_agent: Agent,
-    remediator_agent: Agent,
-) -> list[Task]:
-    """Build triage tasks for a specific incident."""
-
     monitor_task = Task(
         description=(
             f"An incident has been reported:\n\n{alert_summary}\n\n"
@@ -121,7 +105,7 @@ def build_triage_tasks(
             "- Alert context\n"
             "- Pre-incident anomalies"
         ),
-        agent=monitor_agent,
+        agent=monitor,
     )
 
     diagnose_task = Task(
@@ -142,7 +126,7 @@ def build_triage_tasks(
             "- Similar past incidents (if found)\n"
             "- What changed (deploy, config, traffic)"
         ),
-        agent=diagnoser_agent,
+        agent=diagnoser,
         context=[monitor_task],
     )
 
@@ -164,8 +148,17 @@ def build_triage_tasks(
             "- Postmortem draft (3 sentences)\n"
             "- Estimated time to resolution"
         ),
-        agent=remediator_agent,
+        agent=remediator,
         context=[monitor_task, diagnose_task],
     )
 
-    return [monitor_task, diagnose_task, remediate_task]
+    # Only enable memory when OpenAI is configured — CrewAI memory defaults to OpenAI embeddings
+    memory_enabled = settings.llm_provider == "openai" and bool(settings.openai_api_key)
+
+    return Crew(
+        agents=[monitor, diagnoser, remediator],
+        tasks=[monitor_task, diagnose_task, remediate_task],
+        process=Process.sequential,
+        verbose=True,
+        memory=memory_enabled,
+    )

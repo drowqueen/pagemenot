@@ -54,17 +54,6 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     @property
-    def crewai_llm_string(self) -> str:
-        """Return CrewAI-compatible LLM string."""
-        if self.llm_provider == "openai":
-            return f"openai/{self.llm_model}"
-        elif self.llm_provider == "anthropic":
-            return f"anthropic/{self.llm_model}"
-        elif self.llm_provider == "ollama":
-            return f"ollama/{self.llm_model}"
-        return self.llm_model
-
-    @property
     def enabled_integrations(self) -> list[str]:
         integrations = []
         if self.prometheus_url:

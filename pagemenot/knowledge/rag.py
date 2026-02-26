@@ -19,14 +19,14 @@ from pagemenot.config import settings
 logger = logging.getLogger("pagemenot.knowledge")
 
 _REPO_ROOT = Path(__file__).parent.parent.parent
-POSTMORTEMS_DIR = Path(os.environ.get("KNOWLEDGE_DIR", _REPO_ROOT / "knowledge")) / "postmortems"
-RUNBOOKS_DIR = Path(os.environ.get("KNOWLEDGE_DIR", _REPO_ROOT / "knowledge")) / "runbooks"
+_KNOWLEDGE_BASE = Path(os.environ.get("KNOWLEDGE_DIR", str(_REPO_ROOT / "knowledge")))
+POSTMORTEMS_DIR = _KNOWLEDGE_BASE / "postmortems"
+RUNBOOKS_DIR = _KNOWLEDGE_BASE / "runbooks"
 
 
 def ingest_all():
     """Auto-ingest all knowledge on startup. Called from main.py."""
     try:
-        import os
         os.makedirs(settings.chroma_path, exist_ok=True)
         client = chromadb.PersistentClient(path=settings.chroma_path)
 

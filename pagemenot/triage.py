@@ -13,6 +13,7 @@ Teams see none of this. They see: alert → triage → result.
 
 import asyncio
 import logging
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -25,24 +26,28 @@ _executor = ThreadPoolExecutor(max_workers=3)
 
 # Import scenarios for mock seeding
 SCENARIOS = None
+_scenarios_lock = threading.Lock()
 
 
 def _load_scenarios():
     """Lazy-load scenarios from simulator."""
     global SCENARIOS
-    if SCENARIOS is None:
+    with _scenarios_lock:
+        if SCENARIOS is not None:
+            return
         try:
-            # Import from the simulate_incident script
             import importlib.util
-            import sys
             from pathlib import Path
 
             spec_path = Path(__file__).parent.parent / "scripts" / "simulate_incident.py"
             if spec_path.exists():
                 spec = importlib.util.spec_from_file_location("simulator", spec_path)
-                mod = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(mod)
-                SCENARIOS = mod.SCENARIOS
+                if spec and spec.loader:
+                    mod = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(mod)
+                    SCENARIOS = mod.SCENARIOS
+                else:
+                    SCENARIOS = {}
             else:
                 SCENARIOS = {}
         except Exception:
@@ -86,9 +91,15 @@ def _parse_alert(source: str, payload: dict) -> dict:
             "external_id": payload.get("alertId", ""),
         }
     elif source == "datadog":
+        # Datadog sends tags as a list of "key:value" strings, not a dict
+        tags_raw = payload.get("tags", [])
+        if isinstance(tags_raw, list):
+            tags = {k: v for k, v in (t.split(":", 1) for t in tags_raw if ":" in t)}
+        else:
+            tags = tags_raw if isinstance(tags_raw, dict) else {}
         return {
             "title": payload.get("title", payload.get("event_title", "Unknown")),
-            "service": payload.get("tags", {}).get("service", _guess_service(str(payload))),
+            "service": tags.get("service", _guess_service(str(payload))),
             "severity": "critical" if payload.get("alert_type") == "error" else "medium",
             "description": payload.get("body", payload.get("text", "")),
             "external_id": str(payload.get("id", "")),
@@ -165,19 +176,9 @@ def _seed_mock_if_needed(parsed_alert: dict):
 
 def _run_crew_sync(alert_summary: str) -> str:
     """Run the crew synchronously (in thread pool)."""
-    from pagemenot.crew import build_crew, build_triage_tasks
+    from pagemenot.crew import build_triage_crew
 
-    crew = build_crew()
-    agents = crew.agents
-
-    tasks = build_triage_tasks(
-        alert_summary=alert_summary,
-        monitor_agent=agents[0],
-        diagnoser_agent=agents[1],
-        remediator_agent=agents[2],
-    )
-
-    crew.tasks = tasks
+    crew = build_triage_crew(alert_summary)
     result = crew.kickoff()
     return str(result)
 

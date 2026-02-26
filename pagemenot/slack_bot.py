@@ -75,7 +75,8 @@ def create_slack_app() -> AsyncApp:
         thread = event.get("thread_ts") or event.get("ts")
 
         if not event.get("thread_ts"):
-            await _do_triage(say, source="manual", payload={"text": text}, thread_ts=thread)
+            # Fire-and-forget — triage can take minutes; don't block the event handler
+            asyncio.create_task(_do_triage(say, source="manual", payload={"text": text}, thread_ts=thread))
         else:
             await say(
                 "Let me look into that... (follow-up context coming in v0.2)",
@@ -132,7 +133,8 @@ def create_slack_app() -> AsyncApp:
             return
 
         if _looks_like_alert(text):
-            await _do_triage(say, source="slack-channel", payload={"text": text})  # Required for Socket Mode
+            # Fire-and-forget — triage blocks; Slack retries if handler takes >3s
+            asyncio.create_task(_do_triage(say, source="slack-channel", payload={"text": text}))
 
     return app
 
@@ -156,10 +158,12 @@ async def _do_triage(say, source: str, payload: dict, thread_ts: str | None = No
         )
         conf = {"high": "🟢", "medium": "🟡", "low": "🔴"}.get(result.confidence, "⚪")
 
+        # Slack header blocks have a 150-char limit for plain_text
+        header_text = f"{sev} {result.alert_title}"[:150]
         blocks = [
             {
                 "type": "header",
-                "text": {"type": "plain_text", "text": f"{sev} {result.alert_title}"},
+                "text": {"type": "plain_text", "text": header_text},
             },
             {"type": "divider"},
             {
