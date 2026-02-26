@@ -1,8 +1,6 @@
 # Pagemenot — AI On-Call Copilot
 
-Open-source, self-hosted AI SRE that handles 3 AM pages so you don't have to.
-
-Alert fires → crew triages in <60s → root cause + fix in Slack, waiting for your approval.
+Self-hosted AI SRE. Alert fires → 3-agent crew triages → root cause + remediation plan posted to Slack with human approval gate.
 
 ---
 
@@ -54,19 +52,67 @@ No integrations configured → mock layer activates automatically. The crew stil
 
 ---
 
-## Quick Start
+## Setup
+
+### 1. Slack app
+
+1. Go to https://api.slack.com/apps → **Create New App** → **From manifest**
+2. Paste:
+   ```yaml
+   display_information:
+     name: Pagemenot
+   features:
+     slash_commands:
+       - command: /pagemenot
+         url: https://<your-host>/slack/events
+         description: Triage an incident
+     bot_user:
+       display_name: Pagemenot
+   oauth_config:
+     scopes:
+       bot:
+         - app_mentions:read
+         - channels:history
+         - channels:read
+         - chat:write
+         - commands
+         - groups:history
+   settings:
+     event_subscriptions:
+       bot_events:
+         - app_mention
+         - message.channels
+     interactivity:
+       is_enabled: true
+     socket_mode_enabled: true
+   ```
+3. **Install to workspace** → copy **Bot Token** (`xoxb-…`)
+4. **Basic Information → App-Level Tokens** → generate token with `connections:write` scope → copy **App Token** (`xapp-…`)
+
+### 2. LLM
+
+Pick one provider and set its key:
+
+| Provider | Vars |
+|----------|------|
+| OpenAI | `LLM_PROVIDER=openai` + `OPENAI_API_KEY` |
+| Anthropic | `LLM_PROVIDER=anthropic` + `ANTHROPIC_API_KEY` |
+| Gemini | `LLM_PROVIDER=gemini` + `GEMINI_API_KEY` |
+| Ollama | `LLM_PROVIDER=ollama` + `OLLAMA_URL` |
+
+### 3. Run
 
 ```bash
 cp .env.example .env
-# Minimum: SLACK_BOT_TOKEN, SLACK_APP_TOKEN, OPENAI_API_KEY
+# Fill in SLACK_BOT_TOKEN, SLACK_APP_TOKEN, and one LLM key
 docker compose up -d
 ```
 
-**Demo without real monitoring:**
+### 4. Test without real monitoring
 
 ```bash
 python scripts/simulate_incident.py payment-500s
-# or: --source opsgenie | datadog | newrelic | alertmanager
+# --source opsgenie | datadog | newrelic | alertmanager
 ```
 
 Scenarios: `payment-500s`, `checkout-oom`, `db-connection-pool`, `cert-renewal`, `traffic-spike`, `--random`
@@ -94,7 +140,7 @@ Set env vars in `.env` — each one upgrades that tool from mock → live data.
 | Deploys | GitHub | `GITHUB_TOKEN` + `GITHUB_ORG` |
 | Execution | Kubernetes | `KUBECONFIG_PATH` |
 
-Skip anything you don't use.
+Unset vars activate mock fallbacks — the crew still runs.
 
 ---
 
@@ -111,12 +157,6 @@ Drop markdown files into `knowledge/postmortems/` and `knowledge/runbooks/` — 
 /pagemenot status                 Show connected integrations
 @Pagemenot <message>              Triage from any channel
 ```
-
----
-
-## Responsible AI
-
-Every remediation requires explicit Slack approval before execution. No autonomous infrastructure changes.
 
 ---
 
