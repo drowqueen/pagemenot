@@ -171,16 +171,27 @@ def _parse_alert(source: str, payload: dict) -> dict:
         }
 
 
-_REDACT_RE = re.compile(
-    r'((?:password|passwd|secret|token|api.?key|authorization|bearer|aws.?secret|private.?key)'
-    r'\s*[:=]\s*)[^\s,\'";&\n]{4,}',
+_REDACT_CREDENTIAL_RE = re.compile(
+    r'((?:password|passwd|secret|token|api.?key|authorization|bearer|aws.?secret'
+    r'|private.?key|username|user|login|db.?user|database.?user)'
+    r'\s*[:=]\s*)[^\s,\'";&\n]{2,}',
     re.IGNORECASE,
+)
+_REDACT_DSN_RE = re.compile(
+    r'(?:postgresql|postgres|mysql|mongodb|redis|amqp|amqps|jdbc:\w+)://[^\s\'"<>\n]+',
+    re.IGNORECASE,
+)
+_REDACT_IPV4_RE = re.compile(
+    r'\b(?:\d{1,3}\.){3}\d{1,3}\b'
 )
 
 
 def _redact_sensitive(text: str) -> str:
-    """Redact credential-like values before sending context to an LLM."""
-    return _REDACT_RE.sub(r'\1[REDACTED]', text)
+    """Redact credentials, DSNs, and IP addresses before sending context to an LLM."""
+    text = _REDACT_CREDENTIAL_RE.sub(r'\1[REDACTED]', text)
+    text = _REDACT_DSN_RE.sub('[DSN_REDACTED]', text)
+    text = _REDACT_IPV4_RE.sub('[IP_REDACTED]', text)
+    return text
 
 
 def _guess_service(text: str) -> str:
