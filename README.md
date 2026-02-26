@@ -68,12 +68,26 @@ docker compose up -d
 
 **LLM** — pick one, set in `.env`:
 
-| Provider | `LLM_PROVIDER` | Key var |
-|----------|---------------|---------|
-| OpenAI | `openai` | `OPENAI_API_KEY` |
-| Anthropic | `anthropic` | `ANTHROPIC_API_KEY` |
-| Gemini | `gemini` | `GEMINI_API_KEY` |
-| Ollama | `ollama` | `OLLAMA_URL` |
+| Provider | Data stays in | Production SRE use |
+|----------|--------------|-------------------|
+| Ollama (self-hosted) | Your network | Yes — recommended default |
+| OpenAI Enterprise | OpenAI (with DPA) | Yes — requires `LLM_EXTERNAL_ENTERPRISE_CONFIRMED=true` |
+| Google Vertex AI | Google (with DPA) | Yes — requires `LLM_EXTERNAL_ENTERPRISE_CONFIRMED=true` |
+| OpenAI / Anthropic / Gemini (standard) | Provider API | No — dev/test only |
+
+> ---
+> **⛔ DATA PRIVACY WARNING**
+>
+> Agents send tool outputs — Prometheus metrics, filtered error logs, GitHub PR diffs, and runbook text — to the configured LLM.
+>
+> **Standard API tiers (OpenAI, Anthropic, Gemini) are not suitable for production SRE use.** Your operational data will leave your network and may be used for model training under standard terms.
+>
+> For production use:
+> - **Self-hosted:** `LLM_PROVIDER=ollama` — nothing leaves your network
+> - **External:** requires an enterprise plan with a signed DPA and zero data retention. Set `LLM_EXTERNAL_ENTERPRISE_CONFIRMED=true` only after legal review.
+>
+> Pagemenot will refuse to start with an external LLM unless `LLM_EXTERNAL_ENTERPRISE_CONFIRMED=true` is set.
+> ---
 
 All other integrations (Prometheus, Loki, Grafana, PagerDuty, etc.) are optional — set their vars in `.env` to activate. Unset = mock fallback.
 

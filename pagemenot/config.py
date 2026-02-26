@@ -57,6 +57,8 @@ class Settings(BaseSettings):
     pagemenot_autoapprove_delay: int = 900      # seconds before auto-executing [AUTO-SAFE] steps
     pagemenot_dedup_ttl_short: int = 600        # dedup window for critical/high (seconds)
     pagemenot_dedup_ttl_long: int = 1800        # dedup window for medium/low (seconds)
+    # External LLM compliance gate
+    llm_external_enterprise_confirmed: bool = False  # must be true to use non-Ollama LLMs
     # AWS execution role
     aws_role_arn: Optional[str] = None          # IAM role pagemenot assumes for AWS ops
     aws_region: str = "us-east-1"

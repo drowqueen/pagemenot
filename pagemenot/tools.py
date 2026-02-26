@@ -253,12 +253,18 @@ def search_logs_loki(query: str) -> str:
         if not streams:
             return f"No log entries found for query: {logql}"
 
+        _warn_err = re.compile(r'\b(warn|warning|error|err|fatal|critical|exception|traceback|panic)\b', re.IGNORECASE)
         lines = []
         for stream in streams[:5]:
-            for ts, line in stream.get("values", [])[:10]:
-                lines.append(f"  {line[:200]}")
+            for ts, line in stream.get("values", [])[:50]:
+                if _warn_err.search(line):
+                    lines.append(f"  {line[:200]}")
+                if len(lines) >= 20:
+                    break
 
-        return f"Loki logs ({len(lines)} entries, last 30min):\n" + "\n".join(lines)
+        if not lines:
+            return f"No warning/error log entries found (last 30min) for query: {logql}"
+        return f"Loki warning/error logs ({len(lines)} entries, last 30min):\n" + "\n".join(lines)
 
     except Exception as e:
         return f"Loki query failed: {e}"

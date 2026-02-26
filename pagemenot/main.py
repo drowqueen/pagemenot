@@ -45,6 +45,20 @@ async def lifespan(app: FastAPI):
     logger.info(f"   LLM: {settings.llm_provider}/{settings.llm_model}")
     logger.info(f"   Integrations: {settings.enabled_integrations or ['none — add via .env']}")
     logger.info(f"   Slack channel: #{settings.pagemenot_channel}")
+    logger.info(f"   Exec: {'dry-run' if settings.pagemenot_exec_dry_run else 'enabled' if settings.pagemenot_exec_enabled else 'disabled'}")
+    if settings.llm_provider != "ollama":
+        if not settings.llm_external_enterprise_confirmed:
+            raise RuntimeError(
+                f"External LLM '{settings.llm_provider}' requires "
+                f"LLM_EXTERNAL_ENTERPRISE_CONFIRMED=true in .env. "
+                f"Tool outputs (metrics, logs, diffs) will leave your network. "
+                f"Only set this after confirming an enterprise/DPA agreement with your provider, "
+                f"or switch to LLM_PROVIDER=ollama."
+            )
+        logger.warning(
+            f"⚠️  External LLM ({settings.llm_provider}) active — "
+            f"tool outputs leave your network. Ensure your enterprise DPA is in place."
+        )
     logger.info("═" * 50)
 
     yield
