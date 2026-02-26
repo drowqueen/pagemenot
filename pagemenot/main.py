@@ -7,11 +7,14 @@ That's it. Everything auto-configures.
 """
 
 import asyncio
+import hashlib
+import hmac
 import logging
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Header, HTTPException, Request
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
+from typing import Optional
 
 from pagemenot.config import settings
 from pagemenot.knowledge.rag import ingest_all
@@ -23,6 +26,32 @@ logging.basicConfig(
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
 )
 logger = logging.getLogger("pagemenot")
+
+
+def _verify_hmac(secret: str, body: bytes, sig_header: str, prefix: str = "") -> bool:
+    """Constant-time HMAC-SHA256 verification."""
+    sig = sig_header.removeprefix(prefix)
+    expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, sig)
+
+
+async def _check_sig(
+    provider: str,
+    secret: Optional[str],
+    body: bytes,
+    sig_header: Optional[str],
+    prefix: str = "",
+) -> None:
+    """Raise 401 if verification fails. Warn and pass if secret not configured."""
+    if not secret:
+        logger.warning("Webhook secret not set for %s — signature not verified", provider)
+        return
+    if not sig_header:
+        raise HTTPException(status_code=401, detail="Missing signature header")
+    # Take first value for multi-value headers (e.g. PagerDuty "v1=x,v1=y")
+    first_sig = sig_header.split(",")[0].strip()
+    if not _verify_hmac(secret, body, first_sig, prefix):
+        raise HTTPException(status_code=401, detail="Signature mismatch")
 
 
 @asynccontextmanager
@@ -84,7 +113,12 @@ async def health():
 # here. Pagemenot auto-detects the format and triages.
 
 @app.post("/webhooks/pagerduty")
-async def pagerduty_webhook(request: Request):
+async def pagerduty_webhook(
+    request: Request,
+    x_pagerduty_signature: Optional[str] = Header(default=None),
+):
+    body = await request.body()
+    await _check_sig("pagerduty", settings.webhook_secret_pagerduty, body, x_pagerduty_signature, prefix="v1=")
     payload = await request.json()
     for msg in payload.get("messages", []):
         # PagerDuty v2 webhook event type is "incident.triggered"
@@ -94,7 +128,12 @@ async def pagerduty_webhook(request: Request):
 
 
 @app.post("/webhooks/grafana")
-async def grafana_webhook(request: Request):
+async def grafana_webhook(
+    request: Request,
+    x_grafana_signature: Optional[str] = Header(default=None),
+):
+    body = await request.body()
+    await _check_sig("grafana", settings.webhook_secret_grafana, body, x_grafana_signature)
     payload = await request.json()
     # Only triage firing alerts — skip resolved/ok state webhooks
     if payload.get("status") == "firing":
@@ -103,7 +142,12 @@ async def grafana_webhook(request: Request):
 
 
 @app.post("/webhooks/alertmanager")
-async def alertmanager_webhook(request: Request):
+async def alertmanager_webhook(
+    request: Request,
+    x_alertmanager_token: Optional[str] = Header(default=None),
+):
+    body = await request.body()
+    await _check_sig("alertmanager", settings.webhook_secret_alertmanager, body, x_alertmanager_token)
     payload = await request.json()
     for alert in payload.get("alerts", []):
         if alert.get("status") == "firing":
@@ -112,15 +156,25 @@ async def alertmanager_webhook(request: Request):
 
 
 @app.post("/webhooks/generic")
-async def generic_webhook(request: Request):
+async def generic_webhook(
+    request: Request,
+    x_pagemenot_signature: Optional[str] = Header(default=None),
+):
     """Catch-all for any alert source. Just POST JSON with a 'title' or 'message'."""
+    body = await request.body()
+    await _check_sig("generic", settings.webhook_secret_generic, body, x_pagemenot_signature, prefix="sha256=")
     payload = await request.json()
     asyncio.create_task(_auto_triage("generic", payload))
     return {"status": "accepted"}
 
 
 @app.post("/webhooks/opsgenie")
-async def opsgenie_webhook(request: Request):
+async def opsgenie_webhook(
+    request: Request,
+    x_og_hash: Optional[str] = Header(default=None),
+):
+    body = await request.body()
+    await _check_sig("opsgenie", settings.webhook_secret_opsgenie, body, x_og_hash)
     payload = await request.json()
     # OpsGenie sends action + alert fields
     if payload.get("action") in ("Create", "Acknowledge") and payload.get("alert"):
@@ -129,7 +183,12 @@ async def opsgenie_webhook(request: Request):
 
 
 @app.post("/webhooks/datadog")
-async def datadog_webhook(request: Request):
+async def datadog_webhook(
+    request: Request,
+    x_datadog_signature: Optional[str] = Header(default=None),
+):
+    body = await request.body()
+    await _check_sig("datadog", settings.webhook_secret_datadog, body, x_datadog_signature)
     payload = await request.json()
     if payload.get("alert_type") != "success":  # skip recoveries
         asyncio.create_task(_auto_triage("datadog", payload))
@@ -137,7 +196,12 @@ async def datadog_webhook(request: Request):
 
 
 @app.post("/webhooks/newrelic")
-async def newrelic_webhook(request: Request):
+async def newrelic_webhook(
+    request: Request,
+    x_nr_webhook_token: Optional[str] = Header(default=None),
+):
+    body = await request.body()
+    await _check_sig("newrelic", settings.webhook_secret_newrelic, body, x_nr_webhook_token)
     payload = await request.json()
     # Only triage open incidents — skip acknowledged/closed states
     if payload.get("state", "open") == "open":

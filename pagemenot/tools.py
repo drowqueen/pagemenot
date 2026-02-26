@@ -215,18 +215,17 @@ def search_logs_loki(query: str) -> str:
     Input should be a LogQL query or a service name with keywords
     like 'payment-service error' or '{app="checkout"} |= "exception"'."""
     try:
-        if not query.startswith("{"):
-            parts = query.split(maxsplit=1)
-            service = parts[0]
-            keywords = parts[1] if len(parts) > 1 else "error"
-            # Validate service name before embedding in LogQL
-            try:
-                service = _safe_name(service)
-            except ValueError as e:
-                return f"Invalid service name: {e}"
-            logql = f'{{app="{service}"}} |= "{keywords}"'
-        else:
-            logql = query
+        # Never accept raw LogQL from alert input — always build from validated parts
+        parts = query.split(maxsplit=1)
+        service = parts[0]
+        keywords = parts[1] if len(parts) > 1 else "error"
+        try:
+            service = _safe_name(service)
+        except ValueError as e:
+            return f"Invalid service name: {e}"
+        # keywords: strip quotes to prevent LogQL injection
+        keywords = keywords.replace('"', '').replace("'", '')[:100]
+        logql = f'{{app="{service}"}} |= "{keywords}"'
 
         end = datetime.now(timezone.utc)
         start = end - timedelta(minutes=30)
@@ -411,7 +410,11 @@ def query_newrelic_metrics(service_name: str) -> str:
         if not settings.newrelic_account_id:
             return "New Relic account ID not configured."
 
-        # Use GraphQL variables to avoid injection — service_name never touches query syntax
+        # NRQL has no bind parameters — validate service_name before embedding
+        try:
+            service_name = _safe_name(service_name)
+        except ValueError as e:
+            return f"Invalid service name: {e}"
         nrql = (
             "SELECT count(*) as requests, "
             "filter(count(*), WHERE error IS true) as errors, "
@@ -770,11 +773,29 @@ def exec_shell(command: str) -> str:
 
 
 def exec_http(method: str, url: str, headers: dict | None = None, body: dict | None = None) -> str:
-    """Make an HTTP call (health check or alert acknowledge)."""
+    """Make an HTTP call (health check or alert acknowledge).
+    Restricted to domains explicitly configured in .env to prevent SSRF."""
     _exec_enabled()
     if settings.pagemenot_exec_dry_run:
         return f"[DRY RUN] would {method.upper()} {url}"
-    with httpx.Client(timeout=10) as client:
+
+    # SSRF guard — only allow calls to configured integration domains
+    from urllib.parse import urlparse
+    allowed_hosts = {
+        urlparse(u).hostname
+        for u in [
+            settings.prometheus_url, settings.grafana_url, settings.loki_url,
+        ]
+        if u
+    }
+    host = urlparse(url).hostname
+    if not host or host not in allowed_hosts:
+        raise ValueError(
+            f"exec_http blocked: '{host}' not in configured integration hosts. "
+            f"Only explicitly configured service URLs are allowed."
+        )
+
+    with httpx.Client(timeout=10, verify=True) as client:
         resp = client.request(method.upper(), url, headers=headers or {}, json=body)
         return f"{resp.status_code}: {resp.text[:200]}"
 

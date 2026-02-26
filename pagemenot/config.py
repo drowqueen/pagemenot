@@ -57,6 +57,15 @@ class Settings(BaseSettings):
     pagemenot_autoapprove_delay: int = 900      # seconds before auto-executing [AUTO-SAFE] steps
     pagemenot_dedup_ttl_short: int = 600        # dedup window for critical/high (seconds)
     pagemenot_dedup_ttl_long: int = 1800        # dedup window for medium/low (seconds)
+    # Webhook HMAC secrets (optional — skip verification if not set, warn at startup)
+    webhook_secret_pagerduty: Optional[str] = None
+    webhook_secret_grafana: Optional[str] = None
+    webhook_secret_alertmanager: Optional[str] = None
+    webhook_secret_datadog: Optional[str] = None
+    webhook_secret_opsgenie: Optional[str] = None
+    webhook_secret_newrelic: Optional[str] = None
+    webhook_secret_generic: Optional[str] = None
+
     # External LLM compliance gate
     llm_external_enterprise_confirmed: bool = False  # must be true to use non-Ollama LLMs
     # AWS execution role

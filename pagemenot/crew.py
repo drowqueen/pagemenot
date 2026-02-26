@@ -30,6 +30,7 @@ def build_triage_crew(alert_summary: str) -> Crew:
     """Build a complete triage crew for a specific incident and return it ready to kickoff."""
     llm = _build_llm()
     available = get_available_tools()
+    _verbose = logger.isEnabledFor(logging.DEBUG)
 
     monitor = Agent(
         role="Senior SRE Monitoring Specialist",
@@ -45,7 +46,7 @@ def build_triage_crew(alert_summary: str) -> Crew:
         ),
         tools=available["monitor"],
         llm=llm,
-        verbose=True,
+        verbose=_verbose,
         max_iter=10,
         allow_delegation=False,
     )
@@ -65,7 +66,7 @@ def build_triage_crew(alert_summary: str) -> Crew:
         ),
         tools=available["diagnoser"],
         llm=llm,
-        verbose=True,
+        verbose=_verbose,
         max_iter=10,
         allow_delegation=False,
     )
@@ -85,7 +86,7 @@ def build_triage_crew(alert_summary: str) -> Crew:
         ),
         tools=available["remediator"],
         llm=llm,
-        verbose=True,
+        verbose=_verbose,
         max_iter=8,
         allow_delegation=False,
     )
@@ -183,7 +184,7 @@ def build_triage_crew(alert_summary: str) -> Crew:
         "agents": [monitor, diagnoser, remediator],
         "tasks": [monitor_task, diagnose_task, remediate_task],
         "process": Process.sequential,
-        "verbose": True,
+        "verbose": _verbose,
         "memory": memory_enabled,
     }
     if embedder_config:
