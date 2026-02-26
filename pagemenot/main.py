@@ -132,26 +132,57 @@ async def newrelic_webhook(request: Request):
 
 
 async def _auto_triage(source: str, payload: dict):
-    """Run triage and post to the configured Slack channel."""
+    """Run triage and route result based on severity and resolution status."""
     try:
         from pagemenot.slack_bot import get_client
 
         result = await run_triage(source=source, payload=payload)
         client = get_client()
+        channel = settings.pagemenot_channel
+
+        # Suppressed (duplicate or low-severity)
+        if result.suppressed:
+            sev_label = "Low-severity" if result.severity == "low" else "Duplicate"
+            await client.chat_postMessage(
+                channel=channel,
+                text=f"⚪ {sev_label} suppressed: {result.alert_title} ({result.service})",
+            )
+            return
+
+        # Auto-resolved by runbook execution
+        if result.resolved_automatically:
+            log_text = "\n".join(result.execution_log) if result.execution_log else "No steps logged."
+            await client.chat_postMessage(
+                channel=channel,
+                text=(
+                    f"✅ *Auto-resolved:* {result.alert_title}\n"
+                    f"Service: {result.service} | ⏱️ {result.duration_seconds:.1f}s\n\n"
+                    f"*Steps executed:*\n{log_text}"
+                ),
+            )
+            return
 
         sev = {"critical": "🔴", "high": "🟠", "medium": "🟡"}.get(result.severity, "⚪")
-
-        # Post headline
-        resp = await client.chat_postMessage(
-            channel=settings.pagemenot_channel,
-            text=f"{sev} *INCIDENT: {result.alert_title}*",
-        )
-        thread = resp["ts"]
-
-        # Post root cause in thread
         conf = {"high": "🟢", "medium": "🟡", "low": "🔴"}.get(result.confidence, "⚪")
+
+        # Medium: quiet post — no INCIDENT caps, no on-call ping
+        if result.severity == "medium":
+            resp = await client.chat_postMessage(
+                channel=channel,
+                text=f"{sev} {result.alert_title} — triage complete",
+            )
+            thread = resp["ts"]
+        else:
+            # Critical / high: loud headline
+            resp = await client.chat_postMessage(
+                channel=channel,
+                text=f"{sev} *INCIDENT: {result.alert_title}*",
+            )
+            thread = resp["ts"]
+
+        # Post root cause + analysis in thread
         await client.chat_postMessage(
-            channel=settings.pagemenot_channel,
+            channel=channel,
             thread_ts=thread,
             text=(
                 f"*🔍 Root Cause* (confidence: {conf} {result.confidence})\n\n"
@@ -160,14 +191,23 @@ async def _auto_triage(source: str, payload: dict):
             ),
         )
 
-        # Post full analysis in chunks (matches _do_triage behaviour)
         if result.raw_output:
             for i, chunk in enumerate(_chunk_text(result.raw_output, 2900)[:3]):
                 await client.chat_postMessage(
-                    channel=settings.pagemenot_channel,
+                    channel=channel,
                     thread_ts=thread,
                     text=f"Detailed analysis (part {i + 1})\n```{chunk}```",
                 )
+
+        # Escalate critical/high to on-call channel
+        if result.severity in ("critical", "high") and settings.pagemenot_oncall_channel:
+            await client.chat_postMessage(
+                channel=settings.pagemenot_oncall_channel,
+                text=(
+                    f"{sev} *ESCALATION:* {result.alert_title} ({result.service})\n"
+                    f"Confidence: {conf} {result.confidence} — see #{channel}"
+                ),
+            )
 
     except Exception as e:
         logger.error(f"Auto-triage failed: {e}", exc_info=True)

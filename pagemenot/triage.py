@@ -14,6 +14,7 @@ Teams see none of this. They see: alert → triage → result.
 import asyncio
 import logging
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -23,6 +24,31 @@ from pagemenot.config import settings
 
 logger = logging.getLogger("pagemenot.triage")
 _executor = ThreadPoolExecutor(max_workers=3)
+
+# ── Deduplication store ────────────────────────────────────────
+# (service, title_hash) → expiry timestamp (time.monotonic())
+_active_incidents: dict[tuple[str, str], float] = {}
+_dedup_lock = threading.Lock()
+
+
+def _dedup_key(service: str, title: str) -> tuple[str, str]:
+    return (service.lower(), str(hash(title.lower()[:60])))
+
+
+def _check_and_register(service: str, title: str, severity: str) -> bool:
+    """Return True if this is a duplicate (within TTL). Register if not."""
+    ttl = settings.pagemenot_dedup_ttl_short if severity in ("critical", "high") else settings.pagemenot_dedup_ttl_long
+    key = _dedup_key(service, title)
+    now = time.monotonic()
+    with _dedup_lock:
+        # Prune expired entries
+        expired = [k for k, exp in _active_incidents.items() if now > exp]
+        for k in expired:
+            del _active_incidents[k]
+        if key in _active_incidents:
+            return True
+        _active_incidents[key] = now + ttl
+        return False
 
 # Import scenarios for mock seeding
 SCENARIOS = None
@@ -69,6 +95,9 @@ class TriageResult:
     postmortem_draft: str = ""
     raw_output: str = ""
     duration_seconds: float = 0.0
+    suppressed: bool = False              # True = dedup or severity gate, crew never ran
+    resolved_automatically: bool = False  # True = runbook exec succeeded
+    execution_log: list[str] = field(default_factory=list)
 
 
 def _parse_alert(source: str, payload: dict) -> dict:
@@ -210,15 +239,55 @@ def _parse_crew_output(raw: str, parsed_alert: dict) -> TriageResult:
             result.confidence = level
             break
 
-    # Approval-gated actions
+    # Remediation steps (AUTO-SAFE and NEEDS APPROVAL)
     for line in raw.split("\n"):
+        stripped = line.strip(" -•*[]")
+        if "[AUTO-SAFE]" in line:
+            result.remediation_steps.append(stripped)
         if "NEEDS APPROVAL" in line or "HUMAN APPROVAL" in line:
-            result.needs_approval.append(line.strip(" -•*[]"))
+            result.needs_approval.append(stripped)
 
     if not result.root_cause:
         result.root_cause = "See detailed analysis below."
 
     return result
+
+
+def _try_runbook_exec(result: TriageResult):
+    """Attempt autonomous runbook execution. Mutates result in place."""
+    if not settings.pagemenot_exec_enabled:
+        return
+
+    from pagemenot.tools import get_runbook_exec_steps, dispatch_exec_step
+
+    steps = get_runbook_exec_steps(result.alert_title, service=result.service)
+
+    # Fall back to [AUTO-SAFE] steps from crew output if no runbook exec tags found
+    if not steps:
+        steps = [
+            s for s in result.remediation_steps
+            if "[AUTO-SAFE]" in s and not "[NEEDS APPROVAL]" in s
+        ]
+
+    if not steps:
+        return
+
+    logger.info(f"Attempting runbook exec: {len(steps)} step(s) for {result.service}")
+    all_ok = True
+    for step in steps:
+        try:
+            output = dispatch_exec_step(step, service=result.service)
+            result.execution_log.append(f"✅ {step[:100]}: {output[:150]}")
+            logger.info(f"Exec step succeeded: {step[:80]}")
+        except Exception as e:
+            result.execution_log.append(f"❌ {step[:100]}: {e}")
+            logger.warning(f"Exec step failed: {step[:80]} — {e}")
+            all_ok = False
+            break  # stop on first failure, escalate with context
+
+    if all_ok and steps:
+        result.resolved_automatically = True
+        logger.info(f"Incident auto-resolved: {result.alert_title}")
 
 
 async def run_triage(source: str, payload: dict[str, Any]) -> TriageResult:
@@ -229,10 +298,32 @@ async def run_triage(source: str, payload: dict[str, Any]) -> TriageResult:
     parsed = _parse_alert(source, payload)
     logger.info(f"Triaging: {parsed['title']} (service={parsed['service']})")
 
-    # 2. Seed mocks if real integrations aren't configured
+    # 2. Dedup check
+    if _check_and_register(parsed["service"], parsed["title"], parsed["severity"]):
+        logger.info(f"Duplicate suppressed: {parsed['title']}")
+        return TriageResult(
+            alert_title=parsed["title"],
+            service=parsed["service"],
+            severity=parsed["severity"],
+            suppressed=True,
+            duration_seconds=0.0,
+        )
+
+    # 3. Severity gate — skip crew for low-severity noise
+    if parsed["severity"] == "low":
+        logger.info(f"Low-severity suppressed: {parsed['title']}")
+        return TriageResult(
+            alert_title=parsed["title"],
+            service=parsed["service"],
+            severity="low",
+            suppressed=True,
+            duration_seconds=0.0,
+        )
+
+    # 4. Seed mocks if real integrations aren't configured
     _seed_mock_if_needed(parsed)
 
-    # 3. Build summary for the crew
+    # 5. Build summary for the crew
     summary = (
         f"**Alert:** {parsed['title']}\n"
         f"**Service:** {parsed['service']}\n"
@@ -241,13 +332,19 @@ async def run_triage(source: str, payload: dict[str, Any]) -> TriageResult:
         f"**Time:** {datetime.now(timezone.utc).isoformat()}"
     )
 
-    # 4. Run crew
+    # 6. Run crew
     loop = asyncio.get_running_loop()
     raw = await loop.run_in_executor(_executor, _run_crew_sync, summary)
 
-    # 5. Parse + return
+    # 7. Parse output
     result = _parse_crew_output(raw, parsed)
-    result.duration_seconds = (datetime.now(timezone.utc) - start).total_seconds()
 
-    logger.info(f"Triage done in {result.duration_seconds:.1f}s")
+    # 8. Attempt runbook-driven resolution (only if exec is enabled)
+    _try_runbook_exec(result)
+
+    result.duration_seconds = (datetime.now(timezone.utc) - start).total_seconds()
+    logger.info(
+        f"Triage done in {result.duration_seconds:.1f}s "
+        f"(resolved={result.resolved_automatically})"
+    )
     return result

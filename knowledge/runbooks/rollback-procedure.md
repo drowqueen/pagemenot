@@ -10,14 +10,10 @@
    - Compare error start time with deploy time
 
 2. Initiate rollback:
-   ```
-   kubectl rollout undo deployment/<service> -n production
-   ```
+   <!-- exec: kubectl rollout undo deployment/{{ service }} -n production -->
 
 3. Verify rollback:
-   ```
-   kubectl rollout status deployment/<service> -n production
-   ```
+   <!-- exec: kubectl rollout status deployment/{{ service }} -n production -->
 
 4. Confirm error rate returns to baseline in monitoring
 

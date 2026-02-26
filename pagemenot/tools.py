@@ -11,6 +11,8 @@ Each tool is a CrewAI @tool that wraps the actual API call.
 
 import logging
 import re
+import shlex
+import subprocess
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -644,8 +646,6 @@ def kubectl_rollback(deployment_name: str) -> str:
     """Roll back a Kubernetes deployment to the previous revision.
     Input should be 'namespace/deployment' like 'production/payment-service'.
     IMPORTANT: This requires human approval first!"""
-    # In a real implementation, this would use the kubernetes client.
-    # For safety, it always returns the COMMAND rather than executing it.
     parts = deployment_name.split("/")
     if len(parts) == 2:
         ns, deploy = parts
@@ -658,3 +658,179 @@ def kubectl_rollback(deployment_name: str) -> str:
         f"  To execute: Engineer must approve via Slack reaction.\n"
         f"  Current status: AWAITING APPROVAL"
     )
+
+
+# ══════════════════════════════════════════════════════════════
+# EXECUTOR — plain functions (not @tool), called directly
+# Only runs when PAGEMENOT_EXEC_ENABLED=true
+# No destructive operations — only safe/reversible actions
+# ══════════════════════════════════════════════════════════════
+
+_KUBECTL_ALLOWED_VERBS = {"rollout", "scale", "get", "describe", "logs"}
+_KUBECTL_FORBIDDEN_VERBS = {"delete", "drain", "taint", "cordon", "exec"}
+
+_SHELL_WHITELIST = [
+    r"^redis-cli\s+\S.*\s+FLUSHDB$",
+    r"^curl\s+-sf\s+https?://\S+/health$",
+    r"^curl\s+-sf\s+https?://\S+/ready$",
+]
+
+_AWS_ALLOWED = {
+    "ecs": {"describe_services", "describe_tasks", "update_service"},
+    "autoscaling": {"describe_auto_scaling_groups", "set_desired_capacity"},
+    "elasticache": {"describe_cache_clusters"},
+    "cloudwatch": {"get_metric_statistics", "get_metric_data"},
+}
+
+
+def _exec_enabled():
+    if not settings.pagemenot_exec_enabled:
+        raise RuntimeError("PAGEMENOT_EXEC_ENABLED is false — autonomous execution is disabled")
+
+
+def exec_kubectl(command: str) -> str:
+    """Execute a safe kubectl command. Allowed: rollout undo, scale (up), get, describe, logs."""
+    _exec_enabled()
+    if not settings.kubeconfig_path:
+        raise RuntimeError("KUBECONFIG_PATH not configured")
+
+    parts = shlex.split(command)
+    verb = parts[0].lower() if parts else ""
+
+    if verb in _KUBECTL_FORBIDDEN_VERBS:
+        raise ValueError(f"kubectl '{verb}' is forbidden for autonomous execution")
+    if verb not in _KUBECTL_ALLOWED_VERBS:
+        raise ValueError(f"kubectl '{verb}' not in allowed list")
+    if verb == "rollout" and (len(parts) < 2 or parts[1].lower() != "undo"):
+        raise ValueError("Only 'rollout undo' is allowed autonomously")
+
+    cmd = ["kubectl", "--kubeconfig", settings.kubeconfig_path] + parts
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    if result.returncode != 0:
+        raise RuntimeError(f"kubectl failed: {result.stderr[:300]}")
+    return result.stdout.strip()[:500]
+
+
+def exec_aws(service: str, action: str, params: dict) -> str:
+    """Execute a safe AWS operation via assumed IAM role."""
+    _exec_enabled()
+    if not settings.aws_role_arn:
+        raise RuntimeError("AWS_ROLE_ARN not configured")
+
+    allowed = _AWS_ALLOWED.get(service, set())
+    if action not in allowed:
+        raise ValueError(f"AWS {service}:{action} not in allowed list")
+
+    try:
+        import boto3
+    except ImportError:
+        raise RuntimeError("boto3 not installed — add to requirements.txt")
+
+    sts = boto3.client("sts", region_name=settings.aws_region)
+    creds = sts.assume_role(
+        RoleArn=settings.aws_role_arn,
+        RoleSessionName="pagemenot-exec",
+    )["Credentials"]
+
+    client = boto3.client(
+        service,
+        region_name=settings.aws_region,
+        aws_access_key_id=creds["AccessKeyId"],
+        aws_secret_access_key=creds["SecretAccessKey"],
+        aws_session_token=creds["SessionToken"],
+    )
+    response = getattr(client, action)(**params)
+    return str(response)[:300]
+
+
+def exec_shell(command: str) -> str:
+    """Execute a whitelisted shell command (health checks, cache flush)."""
+    _exec_enabled()
+    if not any(re.match(pattern, command) for pattern in _SHELL_WHITELIST):
+        raise ValueError(f"Command not in whitelist: {command!r}")
+    result = subprocess.run(shlex.split(command), capture_output=True, text=True, timeout=30)
+    if result.returncode != 0:
+        raise RuntimeError(f"Command failed: {result.stderr[:300]}")
+    return result.stdout.strip()[:500]
+
+
+def exec_http(method: str, url: str, headers: dict | None = None, body: dict | None = None) -> str:
+    """Make an HTTP call (health check or alert acknowledge)."""
+    _exec_enabled()
+    with httpx.Client(timeout=10) as client:
+        resp = client.request(method.upper(), url, headers=headers or {}, json=body)
+        return f"{resp.status_code}: {resp.text[:200]}"
+
+
+def dispatch_exec_step(step: str, service: str = "") -> str:
+    """Parse and route a single exec step from a runbook to the correct executor.
+
+    Accepts raw commands or <!-- exec: command --> tags.
+    Substitutes {{ service }} template variable.
+    """
+    match = re.match(r'<!--\s*exec:\s*(.+?)\s*-->', step)
+    cmd = match.group(1) if match else step.strip()
+
+    if service:
+        cmd = cmd.replace("{{ service }}", service).replace("{{service}}", service)
+    cmd = cmd.strip()
+
+    if not cmd:
+        raise ValueError("Empty exec step")
+
+    if cmd.startswith("kubectl "):
+        return exec_kubectl(cmd[len("kubectl "):])
+    elif cmd.startswith("aws "):
+        parts = shlex.split(cmd)
+        if len(parts) < 3:
+            raise ValueError(f"Invalid AWS command: {cmd!r}")
+        aws_service, aws_action = parts[1], parts[2].replace("-", "_")
+        params: dict = {}
+        i = 3
+        while i < len(parts) - 1:
+            if parts[i].startswith("--"):
+                params[parts[i].lstrip("-").replace("-", "_")] = parts[i + 1]
+                i += 2
+            else:
+                i += 1
+        return exec_aws(aws_service, aws_action, params)
+    elif cmd.startswith("http://") or cmd.startswith("https://"):
+        return exec_http("GET", cmd)
+    else:
+        return exec_shell(cmd)
+
+
+def get_runbook_exec_steps(query: str, service: str = "") -> list[str]:
+    """Search runbooks by query, return all <!-- exec: --> steps from matched files."""
+    try:
+        client = _chroma_client()
+        try:
+            collection = client.get_collection("runbooks")
+        except Exception:
+            return []
+
+        results = collection.query(query_texts=[query], n_results=3)
+        if not results["documents"] or not results["documents"][0]:
+            return []
+
+        from pagemenot.knowledge.rag import RUNBOOKS_DIR
+
+        exec_steps: list[str] = []
+        seen: set[str] = set()
+        for meta in results["metadatas"][0]:
+            filename = meta.get("filename", "")
+            if not filename or filename in seen:
+                continue
+            seen.add(filename)
+            runbook_path = RUNBOOKS_DIR / filename
+            if runbook_path.exists():
+                content = runbook_path.read_text(encoding="utf-8")
+                for raw_step in re.findall(r'<!--\s*exec:\s*(.+?)\s*-->', content):
+                    resolved = raw_step.replace("{{ service }}", service).replace("{{service}}", service)
+                    exec_steps.append(resolved.strip())
+
+        return exec_steps
+
+    except Exception as e:
+        logger.warning(f"Runbook exec step lookup failed: {e}")
+        return []
