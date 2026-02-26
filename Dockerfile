@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf 
 COPY pyproject.toml ./
 RUN pip install --no-cache-dir .
 
-COPY sentinel/ sentinel/
+COPY pagemenot/ pagemenot/
 COPY scripts/ scripts/
 COPY knowledge/ knowledge/
 
@@ -16,4 +16,4 @@ HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
 
 EXPOSE 8080
 
-CMD ["python", "-m", "sentinel.main"]
+CMD ["python", "-m", "pagemenot.main"]

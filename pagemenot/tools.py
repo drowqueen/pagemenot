@@ -35,7 +35,7 @@ def get_available_tools() -> dict[str, list]:
     diagnoser_tools = []
     remediator_tools = []
 
-    # ── Monitor tools ─────────────────────────────────────
+    # ── Monitor: metrics ──────────────────────────────────
     if settings.prometheus_url:
         monitor_tools.append(query_prometheus)
         logger.info("✅ Prometheus connected")
@@ -48,9 +48,22 @@ def get_available_tools() -> dict[str, list]:
         monitor_tools.append(search_logs_loki)
         logger.info("✅ Loki connected")
 
+    if settings.datadog_api_key:
+        monitor_tools.append(query_datadog_metrics)
+        logger.info("✅ Datadog connected")
+
+    if settings.newrelic_api_key:
+        monitor_tools.append(query_newrelic_metrics)
+        logger.info("✅ New Relic connected")
+
+    # ── Monitor: alerting / on-call ───────────────────────
     if settings.pagerduty_api_key:
         monitor_tools.append(get_pagerduty_incident)
         logger.info("✅ PagerDuty connected")
+
+    if settings.opsgenie_api_key:
+        monitor_tools.append(get_opsgenie_alert)
+        logger.info("✅ OpsGenie connected")
 
     # ── Diagnoser tools ───────────────────────────────────
     if settings.github_token:
@@ -58,7 +71,6 @@ def get_available_tools() -> dict[str, list]:
         diagnoser_tools.append(get_pr_diff)
         logger.info("✅ GitHub connected")
 
-    # RAG tool is always available (uses local ChromaDB)
     diagnoser_tools.append(search_past_incidents)
     logger.info("✅ Incident RAG ready")
 
@@ -70,21 +82,20 @@ def get_available_tools() -> dict[str, list]:
         remediator_tools.append(kubectl_rollback)
         logger.info("✅ Kubernetes connected")
 
-    # Log what's NOT configured so teams know what they can add
-    unconfigured = []
-    if not settings.prometheus_url:
-        unconfigured.append("PROMETHEUS_URL")
-    if not settings.github_token:
-        unconfigured.append("GITHUB_TOKEN")
-    if not settings.loki_url:
-        unconfigured.append("LOKI_URL")
-    if not settings.grafana_url:
-        unconfigured.append("GRAFANA_URL")
-    if not settings.pagerduty_api_key:
-        unconfigured.append("PAGERDUTY_API_KEY")
-
+    unconfigured = [
+        v for v, s in [
+            ("PROMETHEUS_URL", settings.prometheus_url),
+            ("DATADOG_API_KEY", settings.datadog_api_key),
+            ("NEWRELIC_API_KEY", settings.newrelic_api_key),
+            ("LOKI_URL", settings.loki_url),
+            ("GRAFANA_URL", settings.grafana_url),
+            ("PAGERDUTY_API_KEY", settings.pagerduty_api_key),
+            ("OPSGENIE_API_KEY", settings.opsgenie_api_key),
+            ("GITHUB_TOKEN", settings.github_token),
+        ] if not s
+    ]
     if unconfigured:
-        logger.info(f"💡 Optional integrations not configured: {', '.join(unconfigured)}")
+        logger.info(f"💡 Not configured (all optional): {', '.join(unconfigured)}")
 
     return {
         "monitor": monitor_tools,
@@ -268,6 +279,142 @@ def get_pagerduty_incident(incident_id_or_description: str) -> str:
 
     except Exception as e:
         return f"PagerDuty query failed: {e}"
+
+
+@tool("Get OpsGenie Alert Details")
+def get_opsgenie_alert(alert_id_or_service: str) -> str:
+    """Get OpsGenie alert details. Input: alert ID or service name."""
+    try:
+        with httpx.Client(timeout=10) as client:
+            if len(alert_id_or_service) == 36 and "-" in alert_id_or_service:
+                resp = client.get(
+                    f"https://api.opsgenie.com/v2/alerts/{alert_id_or_service}",
+                    headers={"Authorization": f"GenieKey {settings.opsgenie_api_key}"},
+                )
+                if resp.status_code == 200:
+                    a = resp.json()["data"]
+                    return (
+                        f"OpsGenie Alert {a['id']}:\n"
+                        f"  Message: {a.get('message', 'N/A')}\n"
+                        f"  Priority: {a.get('priority', 'N/A')}\n"
+                        f"  Status: {a.get('status', 'N/A')}\n"
+                        f"  Tags: {', '.join(a.get('tags', []))}\n"
+                        f"  Created: {a.get('createdAt', 'N/A')}"
+                    )
+
+            resp = client.get(
+                "https://api.opsgenie.com/v2/alerts",
+                headers={"Authorization": f"GenieKey {settings.opsgenie_api_key}"},
+                params={"query": alert_id_or_service, "limit": 5, "sort": "createdAt", "order": "desc"},
+            )
+            alerts = resp.json().get("data", [])
+            if not alerts:
+                return f"No OpsGenie alerts found for '{alert_id_or_service}'."
+
+            lines = []
+            for a in alerts:
+                lines.append(f"  [{a['id'][:8]}] {a.get('message', '?')} — {a.get('status', '?')} ({a.get('priority', '?')})")
+            return "Recent OpsGenie alerts:\n" + "\n".join(lines)
+
+    except Exception as e:
+        return f"OpsGenie query failed: {e}"
+
+
+@tool("Query Datadog Metrics")
+def query_datadog_metrics(service_name: str) -> str:
+    """Query Datadog for service metrics over the last 30 minutes.
+    Input: service name (e.g., 'payment-service')."""
+    try:
+        import time
+        now = int(time.time())
+        start = now - 1800
+
+        queries = {
+            "error_rate": f"sum:trace.http.request.errors{{service:{service_name}}}",
+            "request_rate": f"sum:trace.http.request.hits{{service:{service_name}}}",
+            "latency_p99": f"p99:trace.http.request.duration{{service:{service_name}}}",
+        }
+
+        headers = {
+            "DD-API-KEY": settings.datadog_api_key,
+            "DD-APPLICATION-KEY": settings.datadog_app_key,
+        }
+        base = f"https://api.{settings.datadog_site}"
+
+        results = []
+        with httpx.Client(timeout=10) as client:
+            for name, query in queries.items():
+                resp = client.get(
+                    f"{base}/api/v1/query",
+                    headers=headers,
+                    params={"query": query, "from": start, "to": now},
+                )
+                data = resp.json()
+                series = data.get("series", [])
+                if series and series[0].get("pointlist"):
+                    val = series[0]["pointlist"][-1][1]
+                    results.append(f"  {name}: {val:.3f}")
+                else:
+                    results.append(f"  {name}: no data")
+
+        return f"Datadog metrics for '{service_name}' (last 30min):\n" + "\n".join(results)
+
+    except Exception as e:
+        return f"Datadog query failed: {e}"
+
+
+@tool("Query New Relic Metrics")
+def query_newrelic_metrics(service_name: str) -> str:
+    """Query New Relic for service error rate and throughput.
+    Input: service/application name."""
+    try:
+        nrql = (
+            f"SELECT count(*) as requests, "
+            f"filter(count(*), WHERE error IS true) as errors, "
+            f"average(duration) as avg_duration "
+            f"FROM Transaction WHERE appName = '{service_name}' "
+            f"SINCE 30 minutes ago"
+        )
+        with httpx.Client(timeout=10) as client:
+            resp = client.post(
+                f"https://api.newrelic.com/graphql",
+                headers={
+                    "API-Key": settings.newrelic_api_key,
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "query": f"""{{
+                        actor {{
+                            account(id: {settings.newrelic_account_id}) {{
+                                nrql(query: "{nrql}") {{
+                                    results
+                                }}
+                            }}
+                        }}
+                    }}"""
+                },
+            )
+            data = resp.json()
+            results = (
+                data.get("data", {})
+                .get("actor", {})
+                .get("account", {})
+                .get("nrql", {})
+                .get("results", [{}])
+            )
+            if not results:
+                return f"No New Relic data for '{service_name}'."
+
+            r = results[0]
+            return (
+                f"New Relic metrics for '{service_name}' (last 30min):\n"
+                f"  requests: {r.get('requests', 'N/A')}\n"
+                f"  errors: {r.get('errors', 'N/A')}\n"
+                f"  avg_duration: {r.get('avg_duration', 'N/A'):.3f}s"
+            )
+
+    except Exception as e:
+        return f"New Relic query failed: {e}"
 
 
 # ══════════════════════════════════════════════════════════════

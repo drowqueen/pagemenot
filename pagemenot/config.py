@@ -23,13 +23,23 @@ class Settings(BaseSettings):
     pagemenot_channel: str = "incidents"
 
     # ── Optional integrations ─────────────────────────────
+    # Metrics / dashboards
     prometheus_url: Optional[str] = None
     grafana_url: Optional[str] = None
     grafana_api_key: Optional[str] = None
     loki_url: Optional[str] = None
+    datadog_api_key: Optional[str] = None
+    datadog_app_key: Optional[str] = None
+    datadog_site: str = "datadoghq.com"
+    newrelic_api_key: Optional[str] = None
+    newrelic_account_id: Optional[str] = None
+    # Alerting / on-call
+    pagerduty_api_key: Optional[str] = None
+    opsgenie_api_key: Optional[str] = None
+    # Source control / deploys
     github_token: Optional[str] = None
     github_org: Optional[str] = None
-    pagerduty_api_key: Optional[str] = None
+    # Execution
     kubeconfig_path: Optional[str] = None
 
     log_level: str = "INFO"
@@ -54,10 +64,16 @@ class Settings(BaseSettings):
             integrations.append("grafana")
         if self.loki_url:
             integrations.append("loki")
-        if self.github_token:
-            integrations.append("github")
+        if self.datadog_api_key:
+            integrations.append("datadog")
+        if self.newrelic_api_key:
+            integrations.append("newrelic")
         if self.pagerduty_api_key:
             integrations.append("pagerduty")
+        if self.opsgenie_api_key:
+            integrations.append("opsgenie")
+        if self.github_token:
+            integrations.append("github")
         if self.kubeconfig_path:
             integrations.append("kubernetes")
         return integrations

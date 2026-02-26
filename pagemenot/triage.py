@@ -76,6 +76,31 @@ def _parse_alert(source: str, payload: dict) -> dict:
             "description": payload.get("description", ""),
             "external_id": payload.get("id", ""),
         }
+    elif source == "opsgenie":
+        priority_map = {"P1": "critical", "P2": "high", "P3": "medium", "P4": "low", "P5": "low"}
+        return {
+            "title": payload.get("message", "Unknown"),
+            "service": payload.get("entity", payload.get("alias", "unknown")),
+            "severity": priority_map.get(payload.get("priority", "P3"), "medium"),
+            "description": payload.get("description", ""),
+            "external_id": payload.get("alertId", ""),
+        }
+    elif source == "datadog":
+        return {
+            "title": payload.get("title", payload.get("event_title", "Unknown")),
+            "service": payload.get("tags", {}).get("service", _guess_service(str(payload))),
+            "severity": "critical" if payload.get("alert_type") == "error" else "medium",
+            "description": payload.get("body", payload.get("text", "")),
+            "external_id": str(payload.get("id", "")),
+        }
+    elif source == "newrelic":
+        return {
+            "title": payload.get("name", payload.get("condition_name", "Unknown")),
+            "service": payload.get("targets", [{}])[0].get("name", "unknown") if payload.get("targets") else "unknown",
+            "severity": "critical" if payload.get("severity", "").upper() == "CRITICAL" else "medium",
+            "description": payload.get("details", ""),
+            "external_id": str(payload.get("incident_id", "")),
+        }
     elif source == "grafana":
         alerts = payload.get("alerts", [{}])
         first = alerts[0] if alerts else {}

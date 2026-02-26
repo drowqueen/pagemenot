@@ -241,11 +241,17 @@ def send_alert(scenario_name: str):
         for name, s in SCENARIOS.items():
             print(f"  {name:25s} — {s['name']}")
         print(f"\n  --random                    — Pick a random scenario")
+        print("\nSource flags (test webhook parsing without real accounts):")
+        print("  --source pagerduty          (default)")
+        print("  --source opsgenie")
+        print("  --source datadog")
+        print("  --source newrelic")
+        print("  --source alertmanager")
         return
 
     if scenario_name == "--random":
         scenario_name = random.choice(list(SCENARIOS.keys()))
-        print(f"🎲 Randomly selected: {scenario_name}")
+        print(f"Randomly selected: {scenario_name}")
 
     scenario = SCENARIOS.get(scenario_name)
     if not scenario:
@@ -253,36 +259,75 @@ def send_alert(scenario_name: str):
         print(f"Available: {', '.join(SCENARIOS.keys())}")
         sys.exit(1)
 
-    # Build PagerDuty-format webhook
-    pd_payload = {
-        "messages": [
+    source = sys.argv[3] if len(sys.argv) > 3 and sys.argv[2] == "--source" else "pagerduty"
+    pd = scenario["pagerduty"]
+    service = pd["service"]["name"]
+
+    payloads = {
+        "pagerduty": (
+            "/webhooks/pagerduty",
+            {"messages": [{"event": "incident.trigger", "incident": {
+                **pd,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "assignments": [{"summary": "oncall-sre"}],
+                "status": "triggered",
+            }}]},
+        ),
+        "opsgenie": (
+            "/webhooks/opsgenie",
+            {"action": "Create", "alert": {
+                "alertId": pd["id"],
+                "message": pd["title"],
+                "entity": service,
+                "priority": "P1" if pd["urgency"] == "high" else "P3",
+                "description": pd.get("description", ""),
+            }},
+        ),
+        "datadog": (
+            "/webhooks/datadog",
             {
-                "event": "incident.trigger",
-                "incident": {
-                    **scenario["pagerduty"],
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                    "assignments": [{"summary": "oncall-sre"}],
-                    "status": "triggered",
-                },
-            }
-        ]
+                "title": pd["title"],
+                "alert_type": "error",
+                "body": pd.get("description", ""),
+                "tags": {"service": service},
+                "id": pd["id"],
+            },
+        ),
+        "newrelic": (
+            "/webhooks/newrelic",
+            {
+                "condition_name": pd["title"],
+                "severity": "CRITICAL" if pd["urgency"] == "high" else "WARNING",
+                "details": pd.get("description", ""),
+                "targets": [{"name": service}],
+                "incident_id": pd["id"],
+            },
+        ),
+        "alertmanager": (
+            "/webhooks/alertmanager",
+            {"alerts": [{"status": "firing", "labels": {
+                "alertname": pd["title"],
+                "service": service,
+                "severity": "critical" if pd["urgency"] == "high" else "warning",
+            }, "annotations": {"description": pd.get("description", "")}}]},
+        ),
     }
 
-    print(f"🚨 Firing mock incident: {scenario['name']}")
-    print(f"   Service: {scenario['pagerduty']['service']['name']}")
-    print(f"   → POST {PAGEMENOT_URL}/webhooks/pagerduty")
+    if source not in payloads:
+        print(f"Unknown source: {source}. Use: {', '.join(payloads)}")
+        sys.exit(1)
+
+    path, payload = payloads[source]
+    print(f"Firing [{source}] {scenario['name']}")
+    print(f"  Service: {service}")
+    print(f"  → POST {PAGEMENOT_URL}{path}")
 
     try:
-        resp = httpx.post(
-            f"{PAGEMENOT_URL}/webhooks/pagerduty",
-            json=pd_payload,
-            timeout=5.0,
-        )
-        print(f"\n✅ Accepted ({resp.status_code})")
-        print("👀 Check Slack — the crew is triaging now!")
+        resp = httpx.post(f"{PAGEMENOT_URL}{path}", json=payload, timeout=5.0)
+        print(f"\nAccepted ({resp.status_code}) — check Slack")
     except httpx.ConnectError:
-        print(f"\n❌ Can't reach Pagemenot at {PAGEMENOT_URL}")
-        print("   Run: docker compose up -d")
+        print(f"\nCannot reach Pagemenot at {PAGEMENOT_URL}")
+        print("Run: docker compose up -d")
         sys.exit(1)
 
 

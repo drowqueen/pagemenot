@@ -125,6 +125,44 @@ def mock_grafana(service_name: str) -> str:
     )
 
 
+@tool("Get OpsGenie Alert Details")
+def mock_opsgenie(alert_id_or_service: str) -> str:
+    """Get OpsGenie alert details. Input: alert ID or service name."""
+    pd = _mock_context.get("pagerduty", {})
+    return (
+        f"OpsGenie Alert (mock):\n"
+        f"  Message: {pd.get('title', f'{alert_id_or_service} alert')}\n"
+        f"  Priority: P2\n"
+        f"  Status: open\n"
+        f"  Entity: {pd.get('service', {}).get('name', alert_id_or_service)}"
+    )
+
+
+@tool("Query Datadog Metrics")
+def mock_datadog(service_name: str) -> str:
+    """Query Datadog for service metrics. Input: service name."""
+    metrics = _mock_context.get("mock_metrics", {})
+    if not metrics:
+        return f"Datadog metrics for '{service_name}': no data in last 30min."
+    lines = [f"Datadog metrics for '{service_name}' (last 30min):"]
+    for name, data in metrics.items():
+        lines.append(f"  {name}: {data['after']}{data['unit']}")
+    return "\n".join(lines)
+
+
+@tool("Query New Relic Metrics")
+def mock_newrelic(service_name: str) -> str:
+    """Query New Relic for service metrics. Input: service name."""
+    metrics = _mock_context.get("mock_metrics", {})
+    err = metrics.get("error_rate", {}).get("after", "N/A")
+    lat = metrics.get("latency_p99", {}).get("after", "N/A")
+    return (
+        f"New Relic metrics for '{service_name}' (last 30min):\n"
+        f"  error_rate: {err}%\n"
+        f"  avg_duration: {lat}s"
+    )
+
+
 # ══════════════════════════════════════════════════════════════
 # MOCK DIAGNOSER TOOLS
 # ══════════════════════════════════════════════════════════════
@@ -212,73 +250,43 @@ def get_available_tools() -> dict[str, list]:
     For each integration:
     - If configured in .env → return REAL tool
     - If not configured → return MOCK tool (with realistic data)
-
-    Teams get a working demo either way.
     """
     from pagemenot.tools import (
         query_prometheus, search_logs_loki, get_pagerduty_incident,
         query_grafana_alerts, get_recent_deploys, get_pr_diff,
         search_past_incidents, search_runbooks, request_human_approval,
-        kubectl_rollback,
+        kubectl_rollback, get_opsgenie_alert, query_datadog_metrics,
+        query_newrelic_metrics,
     )
 
-    monitor_tools = []
-    diagnoser_tools = []
-    remediator_tools = []
+    def _pick(condition, real, mock, label):
+        if condition:
+            logger.info(f"✅ {label}: LIVE")
+            return real
+        logger.info(f"🔶 {label}: MOCK")
+        return mock
 
-    # ── Monitor: real or mock ─────────────────────────────
-    if settings.prometheus_url:
-        monitor_tools.append(query_prometheus)
-        logger.info("✅ Prometheus: LIVE")
-    else:
-        monitor_tools.append(mock_prometheus)
-        logger.info("🔶 Prometheus: MOCK (add PROMETHEUS_URL for real data)")
+    monitor_tools = [
+        _pick(settings.prometheus_url,             query_prometheus,       mock_prometheus,    "Prometheus"),
+        _pick(settings.loki_url,                   search_logs_loki,       mock_loki,          "Loki"),
+        _pick(settings.grafana_url,                query_grafana_alerts,   mock_grafana,       "Grafana"),
+        _pick(settings.datadog_api_key,            query_datadog_metrics,  mock_datadog,       "Datadog"),
+        _pick(settings.newrelic_api_key,           query_newrelic_metrics, mock_newrelic,      "New Relic"),
+        _pick(settings.pagerduty_api_key,          get_pagerduty_incident, mock_pagerduty,     "PagerDuty"),
+        _pick(settings.opsgenie_api_key,           get_opsgenie_alert,     mock_opsgenie,      "OpsGenie"),
+    ]
 
-    if settings.loki_url:
-        monitor_tools.append(search_logs_loki)
-        logger.info("✅ Loki: LIVE")
-    else:
-        monitor_tools.append(mock_loki)
-        logger.info("🔶 Loki: MOCK (add LOKI_URL for real data)")
-
-    if settings.pagerduty_api_key:
-        monitor_tools.append(get_pagerduty_incident)
-        logger.info("✅ PagerDuty: LIVE")
-    else:
-        monitor_tools.append(mock_pagerduty)
-        logger.info("🔶 PagerDuty: MOCK (add PAGERDUTY_API_KEY for real data)")
-
-    if settings.grafana_url and settings.grafana_api_key:
-        monitor_tools.append(query_grafana_alerts)
-        logger.info("✅ Grafana: LIVE")
-    else:
-        monitor_tools.append(mock_grafana)
-        logger.info("🔶 Grafana: MOCK (add GRAFANA_URL for real data)")
-
-    # ── Diagnoser: real or mock ───────────────────────────
-    if settings.github_token:
-        diagnoser_tools.append(get_recent_deploys)
-        diagnoser_tools.append(get_pr_diff)
-        logger.info("✅ GitHub: LIVE")
-    else:
-        diagnoser_tools.append(mock_github_deploys)
-        diagnoser_tools.append(mock_github_diff)
-        logger.info("🔶 GitHub: MOCK (add GITHUB_TOKEN for real data)")
-
-    # RAG is always real (local ChromaDB)
-    diagnoser_tools.append(search_past_incidents)
+    diagnoser_tools = [
+        *(_pick(settings.github_token, [get_recent_deploys, get_pr_diff], [mock_github_deploys, mock_github_diff], "GitHub")),
+        search_past_incidents,
+    ]
     logger.info("✅ Incident RAG: LIVE (local ChromaDB)")
 
-    # ── Remediator ────────────────────────────────────────
-    remediator_tools.append(search_runbooks)
-    remediator_tools.append(request_human_approval)
-
-    if settings.kubeconfig_path:
-        remediator_tools.append(kubectl_rollback)
-        logger.info("✅ Kubernetes: LIVE")
-    else:
-        remediator_tools.append(mock_kubernetes)
-        logger.info("🔶 Kubernetes: MOCK (add KUBECONFIG_PATH for real data)")
+    remediator_tools = [
+        search_runbooks,
+        request_human_approval,
+        _pick(settings.kubeconfig_path, kubectl_rollback, mock_kubernetes, "Kubernetes"),
+    ]
 
     return {
         "monitor": monitor_tools,

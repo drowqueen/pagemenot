@@ -101,6 +101,30 @@ async def generic_webhook(request: Request):
     return {"status": "accepted"}
 
 
+@app.post("/webhooks/opsgenie")
+async def opsgenie_webhook(request: Request):
+    payload = await request.json()
+    # OpsGenie sends action + alert fields
+    if payload.get("action") in ("Create", "Acknowledge") and payload.get("alert"):
+        asyncio.create_task(_auto_triage("opsgenie", payload["alert"]))
+    return {"status": "accepted"}
+
+
+@app.post("/webhooks/datadog")
+async def datadog_webhook(request: Request):
+    payload = await request.json()
+    if payload.get("alert_type") != "success":  # skip recoveries
+        asyncio.create_task(_auto_triage("datadog", payload))
+    return {"status": "accepted"}
+
+
+@app.post("/webhooks/newrelic")
+async def newrelic_webhook(request: Request):
+    payload = await request.json()
+    asyncio.create_task(_auto_triage("newrelic", payload))
+    return {"status": "accepted"}
+
+
 async def _auto_triage(source: str, payload: dict):
     """Run triage and post to the configured Slack channel."""
     try:
