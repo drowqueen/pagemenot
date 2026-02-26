@@ -292,7 +292,8 @@ def _try_runbook_exec(result: TriageResult):
     if not steps:
         return
 
-    logger.info(f"Attempting runbook exec: {len(steps)} step(s) for {result.service}")
+    mode = "DRY RUN" if settings.pagemenot_exec_dry_run else "EXEC"
+    logger.info(f"[{mode}] Attempting runbook exec: {len(steps)} step(s) for {result.service}")
     all_ok = True
     for step in steps:
         try:

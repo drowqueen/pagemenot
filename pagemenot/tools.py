@@ -686,13 +686,15 @@ _AWS_ALLOWED = {
 
 
 def _exec_enabled():
-    if not settings.pagemenot_exec_enabled:
+    if not settings.pagemenot_exec_enabled and not settings.pagemenot_exec_dry_run:
         raise RuntimeError("PAGEMENOT_EXEC_ENABLED is false — autonomous execution is disabled")
 
 
 def exec_kubectl(command: str) -> str:
     """Execute a safe kubectl command. Allowed: rollout undo, scale (up), get, describe, logs."""
     _exec_enabled()
+    if settings.pagemenot_exec_dry_run:
+        return f"[DRY RUN] would execute: kubectl {command}"
     if not settings.kubeconfig_path:
         raise RuntimeError("KUBECONFIG_PATH not configured")
 
@@ -716,6 +718,8 @@ def exec_kubectl(command: str) -> str:
 def exec_aws(service: str, action: str, params: dict) -> str:
     """Execute a safe AWS operation via assumed IAM role."""
     _exec_enabled()
+    if settings.pagemenot_exec_dry_run:
+        return f"[DRY RUN] would call: aws {service} {action}({params})"
     if not settings.aws_role_arn:
         raise RuntimeError("AWS_ROLE_ARN not configured")
 
@@ -748,6 +752,8 @@ def exec_aws(service: str, action: str, params: dict) -> str:
 def exec_shell(command: str) -> str:
     """Execute a whitelisted shell command (read-only health checks only)."""
     _exec_enabled()
+    if settings.pagemenot_exec_dry_run:
+        return f"[DRY RUN] would execute: {command}"
     # re.fullmatch — prevents prefix-bypass attacks (e.g. "curl -sf http://x/health; rm -rf /")
     if not any(re.fullmatch(pattern, command) for pattern in _SHELL_WHITELIST):
         raise ValueError(f"Command not in whitelist: {command!r}")
@@ -760,6 +766,8 @@ def exec_shell(command: str) -> str:
 def exec_http(method: str, url: str, headers: dict | None = None, body: dict | None = None) -> str:
     """Make an HTTP call (health check or alert acknowledge)."""
     _exec_enabled()
+    if settings.pagemenot_exec_dry_run:
+        return f"[DRY RUN] would {method.upper()} {url}"
     with httpx.Client(timeout=10) as client:
         resp = client.request(method.upper(), url, headers=headers or {}, json=body)
         return f"{resp.status_code}: {resp.text[:200]}"

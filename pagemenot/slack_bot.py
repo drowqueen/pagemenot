@@ -177,11 +177,12 @@ async def _do_triage(say, source: str, payload: dict, thread_ts: str | None = No
         # Auto-resolved
         if result.resolved_automatically:
             log_text = "\n".join(result.execution_log) if result.execution_log else ""
+            dry = settings.pagemenot_exec_dry_run
             await say(
                 text=(
-                    f"✅ *Auto-resolved:* {result.alert_title}\n"
+                    f"{'🔵 *Dry run* —' if dry else '✅'} *{'Would have resolved' if dry else 'Auto-resolved'}:* {result.alert_title}\n"
                     f"⏱️ {result.duration_seconds:.1f}s\n\n"
-                    + (f"*Steps executed:*\n{log_text}" if log_text else "")
+                    + (f"*{'Steps that would execute' if dry else 'Steps executed'}:*\n{log_text}" if log_text else "")
                 ),
                 thread_ts=thread,
             )
