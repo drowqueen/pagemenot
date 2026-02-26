@@ -22,11 +22,16 @@ FORBIDDEN: `sleep N && tail`, polling loops. Launch in detached screen, report n
 ### #7: SCREEN FOR LONG JOBS
 `screen -dmS <name> bash -c "PYTHONUNBUFFERED=1 python script.py > logs/... 2>&1"`
 
-### #11: NO FLUFF — CODE AND PROSE
-**Code:** No defensive comments, no "# This is designed to...", no explanatory prints unless they carry data. Variable names are self-documenting. No dead code, no commented-out blocks.
-**Responses:** No preamble ("Great question!"), no summaries restating what was just done, no sign-offs. Lead with the result.
-**Docs:** No motivation paragraphs, no benefit statements. Facts only: what it does, inputs, outputs.
-FORBIDDEN everywhere: "robust", "seamless", "leverages", "powerful", "comprehensive", "state-of-the-art", "it's worth noting".
+### #11: NO FLUFF — EVERYWHERE
+Applies to: code, responses, docs, commit messages, PR titles/bodies, CHANGELOG, README.
+
+**Code:** No defensive comments, no explanatory prints unless they carry data. No dead code, no commented-out blocks.
+**Responses:** No preamble, no summaries restating what was just done, no sign-offs. Lead with the result.
+**Docs / README / CHANGELOG:** Facts only — what changed, what it does, inputs, outputs. No motivation paragraphs, no benefit statements, no closing summaries.
+**Commit messages:** `<type>: <what changed>` — one line, imperative, specific. No "This commit...", no "In order to...", no explaining why unless non-obvious.
+**PR descriptions:** bullet facts only — what changed and why (if non-obvious). No intro paragraph, no "This PR adds...", no sign-off.
+
+FORBIDDEN everywhere: "robust", "seamless", "leverages", "powerful", "comprehensive", "state-of-the-art", "it's worth noting", "This is designed to", "In order to", "ensure that".
 
 ### #24: COMMIT DISCIPLINE
 NEVER commit without explicit user command. NEVER commit credentials or secrets.
@@ -50,13 +55,10 @@ FORBIDDEN: Creating new scripts when an existing script covers the same domain/f
 REQUIRED: Search first, add parameters or functions to existing scripts.
 
 ### #30: DOCUMENTATION STANDARDS
-All docs must be:
-- **Factual only** — what it does, inputs, outputs, constraints
-- **No filler** — forbidden: "This script is designed to...", "In order to...", "It is worth noting..."
-- **Minimal prose** — prefer tables and code blocks over paragraphs
-- **Diagrams over words** — ASCII diagrams for architecture and data flow
-
-FORBIDDEN in any doc: introductory paragraphs, closing summaries, benefit statements, "robust", "seamless", "comprehensive", "leverages", "state-of-the-art".
+- Factual only — what it does, inputs, outputs, constraints
+- Prefer tables and code blocks over paragraphs
+- ASCII diagrams for architecture and data flow
+- See #11 for full forbidden word/phrase list.
 
 ### #31: NO NEW DOC FILES
 Do not create new `.md` files. Add content to the nearest existing doc. If no existing doc fits, ask the user which file to update.
@@ -85,7 +87,6 @@ pagemenot/
 │   └── simulate_incident.py
 ├── docs/
 │   └── deployment.md
-├── deploy/             # Terraform + userdata
 ├── Dockerfile
 └── docker-compose.yml
 ```
