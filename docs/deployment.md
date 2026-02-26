@@ -117,3 +117,214 @@ docker compose up -d
 ```
 
 **That's it. Same 4 commands everywhere.**
+
+---
+
+## Observability Stack for Testing (Prometheus + Loki)
+
+Two paths: **local** (minikube, free, disposable) or **cloud** (Grafana Cloud free tier, zero infra).
+
+---
+
+### Path A: Minikube (Local K8s — Recommended for Full Testing)
+
+Runs kube-prometheus-stack (Prometheus + Alertmanager + Grafana) + Loki on your laptop.
+Alertmanager fires webhooks directly to pagemenot. Tests the full incident pipeline.
+
+**Prerequisites**
+
+```bash
+# macOS
+brew install minikube helm kubectl
+
+# Linux
+curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
+sudo install minikube-linux-amd64 /usr/local/bin/minikube
+# helm: https://helm.sh/docs/intro/install/
+# kubectl: https://kubernetes.io/docs/tasks/tools/
+```
+
+**1. Start minikube**
+
+```bash
+minikube start --cpus=4 --memory=8192 --driver=docker
+```
+
+**2. Install Prometheus + Alertmanager + Grafana**
+
+```bash
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo add grafana https://grafana.github.io/helm-charts
+helm repo update
+
+kubectl create namespace monitoring
+
+helm install kube-prom prometheus-community/kube-prometheus-stack \
+  --namespace monitoring \
+  --set grafana.adminPassword=pagemenot \
+  --set alertmanager.alertmanagerSpec.externalUrl=http://localhost:9093
+```
+
+**3. Install Loki + Promtail**
+
+```bash
+helm install loki grafana/loki-stack \
+  --namespace monitoring \
+  --set grafana.enabled=false \
+  --set prometheus.enabled=false \
+  --set promtail.enabled=true
+```
+
+**4. Wire Alertmanager → pagemenot**
+
+Pagemenot runs as docker compose on your host; Alertmanager is inside minikube.
+`host.minikube.internal` resolves to the host from inside minikube.
+
+```bash
+cat <<'EOF' | kubectl apply -f -
+apiVersion: v1
+kind: Secret
+metadata:
+  name: alertmanager-pagemenot
+  namespace: monitoring
+stringData:
+  alertmanager.yaml: |
+    global:
+      resolve_timeout: 5m
+    route:
+      group_by: ['alertname', 'job']
+      group_wait: 10s
+      group_interval: 5m
+      repeat_interval: 12h
+      receiver: pagemenot
+    receivers:
+      - name: pagemenot
+        webhook_configs:
+          - url: http://host.minikube.internal:8080/webhooks/alertmanager
+            send_resolved: false
+EOF
+
+# Patch kube-prom to use this secret
+kubectl patch alertmanager kube-prom-kube-prometheus-alertmanager \
+  --namespace monitoring \
+  --type merge \
+  -p '{"spec":{"configSecret":"alertmanager-pagemenot"}}'
+```
+
+**5. Port-forward endpoints**
+
+```bash
+# Run each in a separate terminal (or use tmux/screen)
+kubectl port-forward -n monitoring svc/kube-prom-kube-prometheus-prometheus 9090:9090
+kubectl port-forward -n monitoring svc/kube-prom-grafana                    3000:80
+kubectl port-forward -n monitoring svc/loki                                  3100:3100
+kubectl port-forward -n monitoring svc/kube-prom-kube-prometheus-alertmanager 9093:9093
+```
+
+**6. Get Grafana API key**
+
+```bash
+# Open http://localhost:3000 — login: admin / pagemenot
+# Navigate to: Administration → API Keys → Add API key
+# Role: Editor, no expiry
+```
+
+**7. Update pagemenot .env**
+
+```env
+PROMETHEUS_URL=http://localhost:9090
+LOKI_URL=http://localhost:3100
+GRAFANA_URL=http://localhost:3000
+GRAFANA_API_KEY=<paste key from step 6>
+```
+
+Restart pagemenot: `docker compose restart pagemenot`
+
+**8. Verify connection**
+
+```bash
+/pagemenot status    # in Slack — should show Prometheus, Loki, Grafana as connected
+```
+
+**Cleanup (complete teardown)**
+
+```bash
+minikube delete          # destroys the entire cluster and all data
+# That's it. Nothing persists outside the minikube VM.
+```
+
+---
+
+### Path B: Grafana Cloud Free Tier (Zero Infra, No K8s)
+
+Free tier: 10k Prometheus active series, 50GB Loki/month, hosted Grafana, hosted Alertmanager.
+No local cluster needed — just point pagemenot at the cloud endpoints.
+
+| What you get | Limit |
+|---|---|
+| Prometheus (Grafana Mimir) | 10k active series |
+| Loki | 50GB/month |
+| Grafana | hosted, unlimited dashboards |
+| Alertmanager | hosted |
+
+**1. Sign up**
+
+Go to [grafana.com](https://grafana.com) → Start for free → create a stack (choose a region).
+
+**2. Get connection details**
+
+In your Grafana Cloud portal → Connections → Add new connection:
+
+| Setting | Where to find it |
+|---|---|
+| `PROMETHEUS_URL` | Prometheus → Details → Prometheus endpoint URL (without `/api/prom`) |
+| `PROMETHEUS_AUTH_TOKEN` | Prometheus → Details → Password (generate API token) |
+| `LOKI_URL` | Loki → Details → Loki endpoint URL |
+| `LOKI_AUTH_TOKEN` | Loki → Details → Password |
+| `GRAFANA_URL` | Your stack URL, e.g. `https://yourstack.grafana.net` |
+| `GRAFANA_API_KEY` | Grafana → Administration → API Keys → Add |
+
+Grafana Cloud Prometheus and Loki use HTTP Basic Auth — username is a numeric ID, password is an API token.
+Map these to the Bearer token fields:
+
+```env
+PROMETHEUS_URL=https://prometheus-prod-XX-prod-XX-X.grafana.net
+PROMETHEUS_AUTH_TOKEN=<api-token>
+LOKI_URL=https://logs-prod-XX.grafana.net
+LOKI_AUTH_TOKEN=<api-token>
+GRAFANA_URL=https://yourstack.grafana.net
+GRAFANA_API_KEY=<grafana-api-key>
+GRAFANA_ORG_ID=<numeric-org-id>
+```
+
+> **Note**: Grafana Cloud uses Basic Auth (`username:password`), not Bearer tokens. The current
+> tools.py sends `Authorization: Bearer <token>`. For Grafana Cloud, update `PROMETHEUS_AUTH_TOKEN`
+> and `LOKI_AUTH_TOKEN` to base64-encoded `username:token` and set the header format to Basic Auth.
+> Track this as a follow-up: [issue: add Basic Auth support for hosted Prometheus/Loki].
+
+**To send your own metrics to Grafana Cloud Prometheus** (optional — so your services appear in pagemenot queries):
+
+```bash
+# If you have Prometheus running (e.g., from minikube path above), add remote_write:
+helm upgrade kube-prom prometheus-community/kube-prometheus-stack \
+  --namespace monitoring \
+  --reuse-values \
+  --set prometheus.prometheusSpec.remoteWrite[0].url="https://prometheus-prod-XX.grafana.net/api/prom/push" \
+  --set prometheus.prometheusSpec.remoteWrite[0].basicAuth.username="<numeric-user-id>" \
+  --set prometheus.prometheusSpec.remoteWrite[0].basicAuth.password.name="grafana-cloud-secret" \
+  --set prometheus.prometheusSpec.remoteWrite[0].basicAuth.password.key="password"
+```
+
+---
+
+### Comparison
+
+| | Minikube | Grafana Cloud Free |
+|---|---|---|
+| Cost | Free | Free |
+| Setup time | ~15 min | ~5 min |
+| Requires K8s | Yes (local) | No |
+| Tests kubectl rollback tool | Yes | No |
+| Always-on | No (local) | Yes |
+| Real alert firing | Yes (Alertmanager) | Yes (hosted Alertmanager) |
+| Cleanup | `minikube delete` | Delete stack in UI |
