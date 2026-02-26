@@ -60,9 +60,12 @@ docker compose up -d
 ```
 
 **Slack app** (one-time):
-1. https://api.slack.com/apps → **Create New App → From manifest** → paste `slack-manifest.yaml`
-2. **Install to workspace** → copy **Bot Token** (`xoxb-…`) → `SLACK_BOT_TOKEN`
-3. **Basic Information → App-Level Tokens** → create token with `connections:write` → copy (`xapp-…`) → `SLACK_APP_TOKEN`
+1. https://api.slack.com/apps → **Create New App → From scratch**
+2. **OAuth & Permissions → Bot Token Scopes**: `app_mentions:read`, `channels:history`, `channels:read`, `chat:write`, `commands`, `groups:history`
+3. **Event Subscriptions → Subscribe to bot events**: `app_mention`, `message.channels`
+4. **Slash Commands**: create `/pagemenot`
+5. **Socket Mode**: enable, generate app-level token with `connections:write` scope
+6. **Install to workspace** → copy **Bot Token** (`xoxb-…`) → `SLACK_BOT_TOKEN`, app token (`xapp-…`) → `SLACK_APP_TOKEN`
 
 **LLM** — pick one, set in `.env`:
 
