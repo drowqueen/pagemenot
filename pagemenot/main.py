@@ -422,22 +422,14 @@ async def _auto_triage(source: str, payload: dict):
         sev = {"critical": "🔴", "high": "🟠", "medium": "🟡"}.get(result.severity, "⚪")
         conf = {"high": "🟢", "medium": "🟡", "low": "🔴"}.get(result.confidence, "⚪")
 
-        # Medium: quiet post — no INCIDENT caps, no on-call ping
-        if result.severity == "medium":
-            resp = await client.chat_postMessage(
-                channel=channel,
-                text=f"{sev} {result.alert_title} — triage complete",
-            )
-            thread = resp["ts"]
-        else:
-            # Critical / high: loud headline
-            resp = await client.chat_postMessage(
-                channel=channel,
-                text=f"{sev} *INCIDENT: {result.alert_title}*",
-            )
-            thread = resp["ts"]
+        # Headline — always post so the channel knows triage ran
+        resp = await client.chat_postMessage(
+            channel=channel,
+            text=f"{sev} *INCIDENT: {result.alert_title}* — runbook could not resolve, escalating",
+        )
+        thread = resp["ts"]
 
-        # Post root cause + analysis in thread
+        # Root cause + analysis in thread
         await client.chat_postMessage(
             channel=channel,
             thread_ts=thread,
@@ -456,35 +448,32 @@ async def _auto_triage(source: str, payload: dict):
                     text=f"Detailed analysis (part {i + 1})\n```{chunk}```",
                 )
 
-        # Open Jira SM ticket + page PagerDuty for critical/high incidents
-        jira_url = pd_url = None
-        if result.severity in ("critical", "high"):
-            jira_url, pd_url = await asyncio.gather(
-                _open_jira_ticket(result),
-                _page_pagerduty(result),
-                return_exceptions=True,
+        # Escalate — always, because runbook did not resolve it
+        jira_url, pd_url = await asyncio.gather(
+            _open_jira_ticket(result),
+            _page_pagerduty(result),
+            return_exceptions=True,
+        )
+        if isinstance(jira_url, str):
+            await client.chat_postMessage(
+                channel=channel,
+                thread_ts=thread,
+                text=f"🎫 Jira ticket opened: {jira_url}",
             )
-            if isinstance(jira_url, str):
-                await client.chat_postMessage(
-                    channel=channel,
-                    thread_ts=thread,
-                    text=f"🎫 Jira ticket opened: {jira_url}",
-                )
-            if isinstance(pd_url, str):
-                await client.chat_postMessage(
-                    channel=channel,
-                    thread_ts=thread,
-                    text=f"📟 On-call paged via PagerDuty: {pd_url}",
-                )
+        if isinstance(pd_url, str):
+            await client.chat_postMessage(
+                channel=channel,
+                thread_ts=thread,
+                text=f"📟 On-call paged via PagerDuty: {pd_url}",
+            )
 
-        # Escalate critical/high to on-call channel
-        if result.severity in ("critical", "high") and settings.pagemenot_oncall_channel:
+        if settings.pagemenot_oncall_channel:
             pd_line = f"\n📟 PagerDuty: {pd_url}" if isinstance(pd_url, str) else ""
             await client.chat_postMessage(
                 channel=settings.pagemenot_oncall_channel,
                 text=(
                     f"{sev} *ESCALATION:* {result.alert_title} ({result.service})\n"
-                    f"Confidence: {conf} {result.confidence} — see #{channel}"
+                    f"Confidence: {conf} {result.confidence} — runbook could not resolve — see #{channel}"
                     f"{pd_line}"
                 ),
             )
