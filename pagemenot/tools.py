@@ -15,6 +15,7 @@ import shlex
 import subprocess
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import httpx
 from crewai.tools import tool
@@ -477,44 +478,105 @@ def query_newrelic_metrics(service_name: str) -> str:
 # DIAGNOSER TOOLS
 # ══════════════════════════════════════════════════════════════
 
+_SERVICES_REGISTRY: dict | None = None
+_SERVICES_REGISTRY_PATH = Path(__file__).parent.parent / "knowledge" / "services.yaml"
+
+
+def _load_services_registry() -> dict:
+    global _SERVICES_REGISTRY
+    if _SERVICES_REGISTRY is None:
+        if _SERVICES_REGISTRY_PATH.exists():
+            import yaml
+            with open(_SERVICES_REGISTRY_PATH) as f:
+                _SERVICES_REGISTRY = yaml.safe_load(f) or {}
+        else:
+            _SERVICES_REGISTRY = {}
+    return _SERVICES_REGISTRY
+
+
+def _resolve_repos(service: str) -> list[tuple[str, list[str]]]:
+    """Return [(org/repo, [path_prefixes]), ...] for a service name.
+
+    Lookup order:
+    1. knowledge/services.yaml entry
+    2. GITHUB_ORG/service-name fallback
+    """
+    registry = _load_services_registry()
+    entry = registry.get(service, {})
+    repos = entry.get("repos", [])
+    paths = entry.get("paths", [])
+
+    if not repos:
+        # Fallback: assume repo name matches service name
+        repo = service if "/" in service else f"{settings.github_org}/{service}" if settings.github_org else service
+        return [(repo, [])]
+
+    return [(r if "/" in r else f"{settings.github_org}/{r}", paths) for r in repos]
+
+
+_GH_HEADERS = {
+    "Accept": "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+}
+
+
+def _gh_headers() -> dict:
+    return {**_GH_HEADERS, "Authorization": f"Bearer {settings.github_token}"}
+
+
+def _pr_touches_paths(files: list[dict], paths: list[str]) -> bool:
+    """Return True if any changed file is under one of the given path prefixes."""
+    if not paths:
+        return True
+    return any(f["filename"].startswith(p) for f in files for p in paths)
+
+
 @tool("Get Recent Deploys from GitHub")
-def get_recent_deploys(repo_or_service: str) -> str:
-    """Get recent deployments/merges for a repo or service.
-    Input should be a repo name (e.g., 'payment-service') or full 'org/repo'."""
+def get_recent_deploys(service_name: str) -> str:
+    """Get recent merged PRs for a service. Input: service name (e.g. 'payment-service').
+    Resolves repo(s) via knowledge/services.yaml; falls back to GITHUB_ORG/service-name."""
     try:
-        repo = repo_or_service
-        if "/" not in repo and settings.github_org:
-            repo = f"{settings.github_org}/{repo_or_service}"
+        repo_entries = _resolve_repos(service_name)
+        all_lines = []
 
-        gh_headers = {
-            "Authorization": f"Bearer {settings.github_token}",
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        }
         with httpx.Client(timeout=10) as client:
-            # Get recent merged PRs (proxy for deploys)
-            resp = client.get(
-                f"https://api.github.com/repos/{repo}/pulls",
-                headers=gh_headers,
-                params={"state": "closed", "sort": "updated", "direction": "desc", "per_page": 5},
-            )
-            prs = resp.json()
+            for repo, path_prefixes in repo_entries:
+                resp = client.get(
+                    f"https://api.github.com/repos/{repo}/pulls",
+                    headers=_gh_headers(),
+                    params={"state": "closed", "sort": "updated", "direction": "desc", "per_page": 10},
+                )
+                if resp.status_code != 200:
+                    all_lines.append(f"  [{repo}] API error {resp.status_code}")
+                    continue
 
-            if not prs or isinstance(prs, dict):
-                return f"No recent PRs found for '{repo}'. Check repo name."
+                prs = resp.json()
+                if not prs or isinstance(prs, dict):
+                    all_lines.append(f"  [{repo}] No recent PRs found")
+                    continue
 
-            lines = []
-            for pr in prs:
-                if pr.get("merged_at"):
-                    lines.append(
-                        f"  PR #{pr['number']}: {pr['title']}\n"
-                        f"    Author: {pr['user']['login']}\n"
-                        f"    Merged: {pr['merged_at']}"
+                for pr in prs:
+                    if not pr.get("merged_at"):
+                        continue
+                    # For monorepos: filter by path prefix using the files endpoint
+                    if path_prefixes:
+                        files_resp = client.get(
+                            f"https://api.github.com/repos/{repo}/pulls/{pr['number']}/files",
+                            headers=_gh_headers(),
+                        )
+                        if files_resp.status_code != 200 or not _pr_touches_paths(files_resp.json(), path_prefixes):
+                            continue
+
+                    all_lines.append(
+                        f"  [{repo}] PR #{pr['number']}: {pr['title']}\n"
+                        f"    Author: {pr['user']['login']}  Merged: {pr['merged_at']}"
                     )
-            if not lines:
-                return f"No recently merged PRs for '{repo}'."
 
-            return f"Recent deploys for '{repo}':\n" + "\n".join(lines)
+        return (
+            f"Recent deploys for '{service_name}':\n" + "\n".join(all_lines)
+            if all_lines
+            else f"No recent merged PRs found for '{service_name}'."
+        )
 
     except Exception as e:
         return f"GitHub query failed: {e}"
@@ -522,8 +584,7 @@ def get_recent_deploys(repo_or_service: str) -> str:
 
 @tool("Get Pull Request Diff")
 def get_pr_diff(repo_and_pr_number: str) -> str:
-    """Get the diff/changes from a specific PR. Input should be 'repo#number'
-    like 'payment-service#891' or 'org/payment-service#891'."""
+    """Get changed files and diff from a PR. Input: 'repo#number' or 'org/repo#number'."""
     try:
         parts = repo_and_pr_number.split("#")
         if len(parts) != 2:
@@ -536,11 +597,7 @@ def get_pr_diff(repo_and_pr_number: str) -> str:
         with httpx.Client(timeout=10) as client:
             resp = client.get(
                 f"https://api.github.com/repos/{repo}/pulls/{pr_num}/files",
-                headers={
-                    "Authorization": f"Bearer {settings.github_token}",
-                    "Accept": "application/vnd.github+json",
-                    "X-GitHub-Api-Version": "2022-11-28",
-                },
+                headers=_gh_headers(),
             )
             files = resp.json()
 

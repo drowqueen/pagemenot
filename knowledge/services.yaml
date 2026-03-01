@@ -1,0 +1,34 @@
+# Service → GitHub repo mapping
+#
+# Used by DiagnoserAgent to find recent deploys and PR diffs.
+# Without this file, pagemenot falls back to GITHUB_ORG/service-name.
+#
+# Fields:
+#   repos:  list of org/repo strings (required)
+#   paths:  path prefixes to filter PRs in a monorepo (optional)
+#           Only PRs touching files under these paths are included.
+#
+# Examples:
+
+# Service with its own repo (name matches)
+# payment-service:
+#   repos:
+#     - myorg/payment-service
+
+# Service in a monorepo
+# checkout-service:
+#   repos:
+#     - myorg/platform
+#   paths:
+#     - services/checkout/
+
+# Service spread across multiple repos
+# api-gateway:
+#   repos:
+#     - myorg/api-gateway
+#     - myorg/gateway-plugins
+
+# Service with its own repo (name doesn't match)
+# auth-service:
+#   repos:
+#     - myorg/identity-platform
