@@ -28,6 +28,43 @@ _client: AsyncWebClient | None = None
 _pending_autoapprove: dict[str, asyncio.Task] = {}
 
 
+class _ApprovalStore:
+    """Pending approval store — Redis if REDIS_URL is set, in-memory fallback."""
+
+    def __init__(self):
+        self._mem: dict[str, dict] = {}
+        self._redis = None
+
+    async def _client(self):
+        if self._redis is None and settings.redis_url:
+            try:
+                import redis.asyncio as aioredis
+                self._redis = aioredis.from_url(settings.redis_url, decode_responses=True)
+            except ImportError:
+                logger.warning("redis package not installed — falling back to in-memory approval store")
+        return self._redis
+
+    async def set(self, key: str, value: dict, ttl: int = 3600) -> None:
+        r = await self._client()
+        if r:
+            await r.setex(key, ttl, json.dumps(value))
+        else:
+            self._mem[key] = value
+
+    async def pop(self, key: str) -> dict | None:
+        r = await self._client()
+        if r:
+            async with r.pipeline() as pipe:
+                pipe.get(key)
+                pipe.delete(key)
+                result, _ = await pipe.execute()
+            return json.loads(result) if result else None
+        return self._mem.pop(key, None)
+
+
+_approval_store = _ApprovalStore()
+
+
 def create_slack_app() -> AsyncApp:
     """Create and wire up the Slack app. Called once at startup."""
     global _app, _client
@@ -89,24 +126,82 @@ def create_slack_app() -> AsyncApp:
 
     # ── Approval buttons ──────────────────────────────────
     @app.action("approve_action")
-    async def handle_approve(ack, body, say):
+    async def handle_approve(ack, body, client):
         await ack()
-        user = body["user"]["name"]
-        action_id = body["actions"][0]["value"]
-        thread = body["container"].get("thread_ts") or body["container"].get("message_ts")
+        from pagemenot.tools import dispatch_exec_step
+        from pagemenot.triage import _redact_sensitive
 
-        await say(
-            f"✅ Action approved by @{user}. Executing...\n"
-            f"(Automated execution coming in v0.4 — for now, run the suggested command manually)",
-            thread_ts=thread,
+        approval_id = body["actions"][0]["value"]
+        user_id = body["user"]["id"]
+        user = body["user"]["name"]
+        channel = body["container"].get("channel_id") or body.get("channel", {}).get("id")
+        thread = body["container"].get("thread_ts") or body["container"].get("message_ts")
+        msg_ts = body["message"]["ts"]
+
+        entry = await _approval_store.pop(approval_id)
+        if not entry:
+            await client.chat_postMessage(
+                channel=channel, thread_ts=thread,
+                text="⚠️ This approval has already been handled or expired.",
+            )
+            return
+
+        steps = entry["steps"]
+        service = entry.get("service", "")
+
+        # Remove buttons immediately — prevents double-click
+        await client.chat_update(
+            channel=channel, ts=msg_ts,
+            text=f"✅ Approved by @{user}",
+            blocks=[{"type": "section", "text": {"type": "mrkdwn",
+                "text": f"✅ *Approved by <@{user_id}>* — executing {len(steps)} step(s)..."}}],
         )
 
+        success = True
+        for i, step in enumerate(steps, 1):
+            await client.chat_postMessage(
+                channel=channel, thread_ts=thread,
+                text=f"⚙️ Step {i}/{len(steps)}: `{step[:120]}`",
+            )
+            try:
+                output = await asyncio.get_running_loop().run_in_executor(
+                    _executor, dispatch_exec_step, step, service
+                )
+                await client.chat_postMessage(
+                    channel=channel, thread_ts=thread,
+                    text=f"✅ Step {i}/{len(steps)} done:\n```{_redact_sensitive(output)[:500]}```",
+                )
+            except Exception as e:
+                await client.chat_postMessage(
+                    channel=channel, thread_ts=thread,
+                    text=f"❌ Step {i}/{len(steps)} failed: `{e}`\nRemaining steps skipped.",
+                )
+                success = False
+                break
+
+        if success:
+            await client.chat_postMessage(
+                channel=channel, thread_ts=thread,
+                text=f"✅ All {len(steps)} step(s) executed successfully.",
+            )
+
     @app.action("reject_action")
-    async def handle_reject(ack, body, say):
+    async def handle_reject(ack, body, client):
         await ack()
+        approval_id = body["actions"][0]["value"]
+        user_id = body["user"]["id"]
         user = body["user"]["name"]
-        thread = body["container"].get("thread_ts") or body["container"].get("message_ts")
-        await say(f"❌ Action rejected by @{user}.", thread_ts=thread)
+        channel = body["container"].get("channel_id") or body.get("channel", {}).get("id")
+        msg_ts = body["message"]["ts"]
+
+        await _approval_store.pop(approval_id)  # discard
+
+        await client.chat_update(
+            channel=channel, ts=msg_ts,
+            text=f"❌ Rejected by @{user}",
+            blocks=[{"type": "section", "text": {"type": "mrkdwn",
+                "text": f"❌ *Rejected by <@{user_id}>* — steps will not execute."}}],
+        )
 
     @app.action("feedback_positive")
     async def handle_thumbs_up(ack, body):
@@ -214,7 +309,10 @@ async def _do_triage(say, source: str, payload: dict, thread_ts: str | None = No
             )
 
         # Auto-approve timer for [AUTO-SAFE] steps (exec enabled + high confidence)
+        # When approval gate is disabled, [NEEDS APPROVAL] steps are treated identically
         autosafe = [s for s in result.remediation_steps if "[AUTO-SAFE]" in s]
+        if not settings.pagemenot_approval_gate and result.needs_approval:
+            autosafe = autosafe + result.needs_approval
         if (autosafe and result.confidence == "high" and settings.pagemenot_exec_enabled):
             task_id = str(uuid.uuid4())[:8]
             delay_min = settings.pagemenot_autoapprove_delay // 60
@@ -251,8 +349,13 @@ async def _do_triage(say, source: str, payload: dict, thread_ts: str | None = No
             )
             _pending_autoapprove[task_id] = task
 
-        # Approval buttons for [NEEDS APPROVAL] steps
-        elif result.needs_approval:
+        # Approval buttons for [NEEDS APPROVAL] steps (or auto-execute if gate disabled)
+        elif result.needs_approval and settings.pagemenot_approval_gate:
+            approval_id = str(uuid.uuid4())[:8]
+            await _approval_store.set(approval_id, {
+                "steps": result.needs_approval,
+                "service": result.service or "",
+            })
             approval_text = "\n".join(f"• {a}" for a in result.needs_approval)
             await say(
                 text="Actions requiring approval",
@@ -268,14 +371,14 @@ async def _do_triage(say, source: str, payload: dict, thread_ts: str | None = No
                                 "type": "button",
                                 "text": {"type": "plain_text", "text": "✅ Approve"},
                                 "action_id": "approve_action",
-                                "value": "triage_action",
+                                "value": approval_id,
                                 "style": "primary",
                             },
                             {
                                 "type": "button",
                                 "text": {"type": "plain_text", "text": "❌ Reject"},
                                 "action_id": "reject_action",
-                                "value": "triage_action",
+                                "value": approval_id,
                                 "style": "danger",
                             },
                         ],

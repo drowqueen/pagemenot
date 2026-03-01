@@ -14,6 +14,9 @@ import logging
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Header, HTTPException, Request
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 from typing import Optional
 
@@ -27,6 +30,8 @@ logging.basicConfig(
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
 )
 logger = logging.getLogger("pagemenot")
+
+limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
 
 
 def _verify_hmac(secret: str, body: bytes, sig_header: str, prefix: str = "") -> bool:
@@ -98,6 +103,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Pagemenot", version="0.1.0", lifespan=lifespan)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 
 @app.get("/health")
@@ -114,6 +121,7 @@ async def health():
 # here. Pagemenot auto-detects the format and triages.
 
 @app.post("/webhooks/pagerduty")
+@limiter.limit("60/minute")
 async def pagerduty_webhook(
     request: Request,
     x_pagerduty_signature: Optional[str] = Header(default=None),
@@ -129,6 +137,7 @@ async def pagerduty_webhook(
 
 
 @app.post("/webhooks/grafana")
+@limiter.limit("60/minute")
 async def grafana_webhook(
     request: Request,
     x_grafana_signature: Optional[str] = Header(default=None),
@@ -143,6 +152,7 @@ async def grafana_webhook(
 
 
 @app.post("/webhooks/alertmanager")
+@limiter.limit("60/minute")
 async def alertmanager_webhook(
     request: Request,
     x_alertmanager_token: Optional[str] = Header(default=None),
@@ -157,6 +167,7 @@ async def alertmanager_webhook(
 
 
 @app.post("/webhooks/generic")
+@limiter.limit("60/minute")
 async def generic_webhook(
     request: Request,
     x_pagemenot_signature: Optional[str] = Header(default=None),
@@ -170,6 +181,7 @@ async def generic_webhook(
 
 
 @app.post("/webhooks/opsgenie")
+@limiter.limit("60/minute")
 async def opsgenie_webhook(
     request: Request,
     x_og_hash: Optional[str] = Header(default=None),
@@ -184,6 +196,7 @@ async def opsgenie_webhook(
 
 
 @app.post("/webhooks/datadog")
+@limiter.limit("60/minute")
 async def datadog_webhook(
     request: Request,
     x_datadog_signature: Optional[str] = Header(default=None),
@@ -197,6 +210,7 @@ async def datadog_webhook(
 
 
 @app.post("/webhooks/newrelic")
+@limiter.limit("60/minute")
 async def newrelic_webhook(
     request: Request,
     x_nr_webhook_token: Optional[str] = Header(default=None),
