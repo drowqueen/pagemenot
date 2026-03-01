@@ -18,7 +18,7 @@ Self-hosted AI SRE. Alert fires → 3-agent crew triages → root cause + remedi
 - [Knowledge base](#knowledge-base)
 - [Simulate incidents](#simulate-incidents)
 - [Deploy](#deploy)
-- [AWS IAM role](#aws-iam-role)
+- [Cloud IAM](#cloud-iam)
 - [Slash commands](#slash-commands)
 - [Stack](#stack)
 
@@ -249,17 +249,70 @@ Not suitable for FaaS (Lambda, Cloud Functions) — Slack Socket Mode requires a
 
 ---
 
-## AWS IAM role
+## Cloud IAM
 
-Required when `AWS_ROLE_ARN` is set. See `deploy/pagemenot-iam-policy.json` for the exact policy.
+Only needed if you set `AWS_ROLE_ARN` or `GOOGLE_APPLICATION_CREDENTIALS` to let pagemenot call cloud APIs for diagnosis and execution. Skip if not using cloud execution.
+
+### AWS
+
+Pagemenot assumes an IAM role to read ECS and CloudWatch. Create the role:
 
 ```bash
 aws iam create-role --role-name pagemenot-exec \
-  --assume-role-policy-document file://deploy/pagemenot-trust-policy.json
+  --assume-role-policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Principal": { "AWS": "arn:aws:iam::YOUR_ACCOUNT_ID:root" },
+      "Action": "sts:AssumeRole",
+      "Condition": { "StringEquals": { "sts:ExternalId": "pagemenot" } }
+    }]
+  }'
+
 aws iam put-role-policy --role-name pagemenot-exec \
   --policy-name pagemenot-policy \
-  --policy-document file://deploy/pagemenot-iam-policy.json
+  --policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Effect": "Allow",
+        "Action": [
+          "ecs:DescribeServices", "ecs:DescribeTasks",
+          "ecs:DescribeTaskDefinition", "ecs:ListTasks", "ecs:ListServices",
+          "cloudwatch:GetMetricStatistics", "cloudwatch:GetMetricData",
+          "cloudwatch:ListMetrics", "cloudwatch:DescribeAlarms",
+          "logs:GetLogEvents", "logs:FilterLogEvents",
+          "logs:DescribeLogGroups", "logs:DescribeLogStreams"
+        ],
+        "Resource": "*"
+      }
+    ]
+  }'
 ```
+
+Set `AWS_ROLE_ARN=arn:aws:iam::YOUR_ACCOUNT_ID:role/pagemenot-exec` in `.env`.
+
+### GCP
+
+Create a Service Account with read-only access to Monitoring and Logging:
+
+```bash
+gcloud iam service-accounts create pagemenot \
+  --display-name "Pagemenot SRE"
+
+gcloud projects add-iam-policy-binding YOUR_PROJECT \
+  --member "serviceAccount:pagemenot@YOUR_PROJECT.iam.gserviceaccount.com" \
+  --role "roles/monitoring.viewer"
+
+gcloud projects add-iam-policy-binding YOUR_PROJECT \
+  --member "serviceAccount:pagemenot@YOUR_PROJECT.iam.gserviceaccount.com" \
+  --role "roles/logging.viewer"
+
+gcloud iam service-accounts keys create pagemenot-sa.json \
+  --iam-account pagemenot@YOUR_PROJECT.iam.gserviceaccount.com
+```
+
+Set `GOOGLE_APPLICATION_CREDENTIALS=/path/to/pagemenot-sa.json` in `.env`.
 
 ---
 

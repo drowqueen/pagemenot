@@ -82,9 +82,10 @@ class Settings(BaseSettings):
 
     # External LLM compliance gate
     llm_external_enterprise_confirmed: bool = False  # must be true to use non-Ollama LLMs
-    # AWS execution role
-    aws_role_arn: Optional[str] = None          # IAM role pagemenot assumes for AWS ops
+    # Cloud execution credentials
+    aws_role_arn: Optional[str] = None                    # IAM role pagemenot assumes for AWS ops
     aws_region: str = "us-east-1"
+    google_application_credentials: Optional[str] = None  # path to GCP service account JSON
 
     log_level: str = "INFO"
 
