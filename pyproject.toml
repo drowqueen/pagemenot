@@ -37,6 +37,10 @@ dependencies = [
 
     # Optional: approval state persistence
     "redis[asyncio]>=5.0",
+
+    # Optional: Azure VM Run Command
+    "azure-identity>=1.15",
+    "azure-mgmt-compute>=30.0",
 ]
 
 [project.optional-dependencies]

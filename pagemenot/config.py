@@ -86,6 +86,10 @@ class Settings(BaseSettings):
     aws_role_arn: Optional[str] = None                    # IAM role pagemenot assumes for AWS ops
     aws_region: str = "us-east-1"
     google_application_credentials: Optional[str] = None  # path to GCP service account JSON
+    azure_tenant_id: Optional[str] = None
+    azure_client_id: Optional[str] = None
+    azure_client_secret: Optional[str] = None
+    azure_subscription_id: Optional[str] = None
 
     log_level: str = "INFO"
 

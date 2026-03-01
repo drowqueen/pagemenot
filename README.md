@@ -18,6 +18,7 @@ Self-hosted AI SRE. Alert fires → 3-agent crew triages → root cause + remedi
 - [Knowledge base](#knowledge-base)
 - [Simulate incidents](#simulate-incidents)
 - [Deploy](#deploy)
+- [Security](#security)
 - [Cloud IAM](#cloud-iam) (AWS · GCP · Azure alerts)
 - [Slash commands](#slash-commands)
 - [Stack](#stack)
@@ -258,6 +259,26 @@ docker compose up -d
 | GCP Cloud Run | `--min-instances 1` required (Socket Mode needs persistent connection) |
 
 Not suitable for FaaS (Lambda, Cloud Functions) — Slack Socket Mode requires a persistent connection.
+
+---
+
+## Security
+
+**TLS** — run pagemenot behind a reverse proxy (nginx, Caddy, ALB, GCP Load Balancer) that terminates TLS. Never expose port 8080 directly.
+
+**HMAC signature verification** — set `WEBHOOK_SECRET_<SOURCE>` for each alerting tool. Pagemenot rejects requests with invalid signatures. Unset = warn and accept (dev only).
+
+**IP allowlisting** — optionally restrict inbound webhook traffic to published IP ranges of your alerting tools:
+
+| Tool | IP ranges |
+|------|-----------|
+| PagerDuty | [pagerduty.com/docs/ip-safelisting](https://support.pagerduty.com/docs/ip-safelisting) |
+| Grafana Cloud | [grafana.com/docs/grafana-cloud/account-management/ip-addresses](https://grafana.com/docs/grafana-cloud/account-management/ip-addresses/) |
+| Datadog | [docs.datadoghq.com/api/latest/ip-ranges](https://docs.datadoghq.com/api/latest/ip-ranges/) |
+| New Relic | [docs.newrelic.com/docs/new-relic-solutions/get-started/networks](https://docs.newrelic.com/docs/new-relic-solutions/get-started/networks/) |
+| Alertmanager | Self-hosted — allowlist your own Alertmanager IP |
+
+Configure at your firewall, security group, or load balancer — not in pagemenot itself.
 
 ---
 

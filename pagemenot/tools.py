@@ -694,12 +694,12 @@ _AWS_ALLOWED = {
 _SSM_COMMAND_WHITELIST = [
     r"^journalctl\s+-u\s+[\w\-\.]+(\s+--no-pager)?(\s+-n\s+\d+)?(\s+--since\s+[\w\-\s:\"\']+)?$",
     r"^systemctl\s+status\s+[\w\-\.]+$",
-    r"^tail\s+-n\s+\d+\s+/var/log/[\w\-\./]+$",
+    r"^tail\s+-n\s+\d+\s+/var/log/[\w\-\.]+$",
     r"^df\s+-h$",
     r"^free\s+-[mhb]$",
     r"^ps\s+aux$",
     r"^ss\s+-tlnp$",
-    r"^curl\s+-sf\s+https?://\S+/(health|ready|status)$",
+    r"^curl\s+-sf\s+https?://[a-zA-Z0-9\-\.]+(:\d+)?/(health|ready|status)$",
 ]
 
 
@@ -814,6 +814,47 @@ def exec_ssm(instance_id: str, command: str) -> str:
     raise RuntimeError("SSM command timed out after 60s")
 
 
+def exec_azure_run_command(resource_group: str, vm_name: str, command: str) -> str:
+    """Run a whitelisted diagnostic command on an Azure VM via Run Command (no SSH/bastion needed)."""
+    _exec_enabled()
+    if not re.fullmatch(r'[\w\-\.]+', resource_group):
+        raise ValueError(f"Invalid resource group: {resource_group!r}")
+    if not re.fullmatch(r'[\w\-\.]+', vm_name):
+        raise ValueError(f"Invalid VM name: {vm_name!r}")
+    if not any(re.fullmatch(p, command) for p in _SSM_COMMAND_WHITELIST):
+        raise ValueError(f"Azure Run Command not in whitelist: {command!r}")
+    if settings.pagemenot_exec_dry_run:
+        return f"[DRY RUN] would Azure Run Command on {resource_group}/{vm_name}: {command}"
+    if not all([settings.azure_tenant_id, settings.azure_client_id,
+                settings.azure_client_secret, settings.azure_subscription_id]):
+        raise RuntimeError("Azure credentials not configured (AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_SUBSCRIPTION_ID)")
+
+    try:
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.compute import ComputeManagementClient
+        from azure.mgmt.compute.models import RunCommandInput
+    except ImportError:
+        raise RuntimeError("azure-identity and azure-mgmt-compute not installed")
+
+    credential = ClientSecretCredential(
+        tenant_id=settings.azure_tenant_id,
+        client_id=settings.azure_client_id,
+        client_secret=settings.azure_client_secret,
+    )
+    client = ComputeManagementClient(credential, settings.azure_subscription_id)
+    result = client.virtual_machines.begin_run_command(
+        resource_group_name=resource_group,
+        vm_name=vm_name,
+        parameters=RunCommandInput(command_id="RunShellScript", script=[command]),
+    ).result(timeout=60)
+
+    command_output = result.output.strip() if result.output else ""
+    command_error = result.error.strip() if result.error else ""
+    if result.exit_code != 0:
+        raise RuntimeError(f"Azure Run Command failed (exit {result.exit_code}): {command_error[:200]}")
+    return command_output[:500]
+
+
 def exec_shell(command: str) -> str:
     """Execute a whitelisted shell command (read-only health checks only)."""
     _exec_enabled()
@@ -896,8 +937,16 @@ def dispatch_exec_step(step: str, service: str = "") -> str:
         rest = cmd[4:]
         parts = rest.split(" ", 1)
         if len(parts) != 2:
-            raise ValueError(f"Invalid SSM step format — expected: ssm:<instance-id> <command>")
+            raise ValueError("Invalid SSM step format — expected: ssm:<instance-id> <command>")
         return exec_ssm(parts[0].strip(), parts[1].strip())
+    elif cmd.startswith("azure:"):
+        # Format: azure:<resource-group>/<vm-name> <command>
+        rest = cmd[6:]
+        parts = rest.split(" ", 1)
+        if len(parts) != 2 or "/" not in parts[0]:
+            raise ValueError("Invalid Azure step format — expected: azure:<resource-group>/<vm-name> <command>")
+        rg, vm = parts[0].split("/", 1)
+        return exec_azure_run_command(rg.strip(), vm.strip(), parts[1].strip())
     elif cmd.startswith("aws "):
         parts = shlex.split(cmd)
         if len(parts) < 3:
