@@ -58,6 +58,9 @@ class Settings(BaseSettings):
     # Source control / deploys
     github_token: Optional[str] = None
     github_org: Optional[str] = None
+    # Comma-separated service→repo mappings: service:org/repo or service:org/repo:path/prefix/
+    # Multiple entries for the same service = multi-repo. Default: GITHUB_ORG/service-name.
+    pagemenot_service_repos: Optional[str] = None
     # Execution
     kubeconfig_path: Optional[str] = None
     pagemenot_exec_namespace: str = "production"  # default k8s namespace for runbook {{ namespace }}

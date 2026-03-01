@@ -15,7 +15,6 @@ import shlex
 import subprocess
 import time
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import httpx
 from crewai.tools import tool
@@ -478,51 +477,36 @@ def query_newrelic_metrics(service_name: str) -> str:
 # DIAGNOSER TOOLS
 # ══════════════════════════════════════════════════════════════
 
-_SERVICES_REGISTRY: dict = {}
-_SERVICES_REGISTRY_MTIME: float = 0.0
-_SERVICES_REGISTRY_PATH = Path(__file__).parent.parent / "knowledge" / "services.yaml"
-
-
-def _load_services_registry() -> dict:
-    """Load (or hot-reload) knowledge/services.yaml. Re-reads only when file changes."""
-    global _SERVICES_REGISTRY, _SERVICES_REGISTRY_MTIME
-    if not _SERVICES_REGISTRY_PATH.exists():
-        return {}
-    mtime = _SERVICES_REGISTRY_PATH.stat().st_mtime
-    if mtime != _SERVICES_REGISTRY_MTIME:
-        import yaml
-        with open(_SERVICES_REGISTRY_PATH) as f:
-            _SERVICES_REGISTRY = yaml.safe_load(f) or {}
-        _SERVICES_REGISTRY_MTIME = mtime
-        logger.info("services.yaml reloaded (%d entries)", len(_SERVICES_REGISTRY.get("services", {})))
-    return _SERVICES_REGISTRY
-
-
 def _resolve_repos(service: str) -> list[tuple[str, list[str]]]:
     """Return [(org/repo, [path_prefixes]), ...] for a service name.
 
-    Lookup order:
-    1. knowledge/services.yaml services.<name> entry
-    2. GITHUB_ORG/service-name fallback (default_github_org in yaml takes priority over env)
+    Reads PAGEMENOT_SERVICE_REPOS from config. Format (comma-separated):
+        service:org/repo
+        service:org/repo:path/prefix/   ← monorepo with path filter
+    Multiple entries for the same service = multi-repo.
+
+    Falls back to GITHUB_ORG/service-name if no entry found.
     """
-    registry = _load_services_registry()
-    org = registry.get("default_github_org") or settings.github_org or ""
-    services = registry.get("services", {})
-    entries = services.get(service, [])
+    org = settings.github_org or ""
+    mapping: dict[str, list[tuple[str, list[str]]]] = {}
 
-    if not entries:
-        # Zero-config fallback: service name == repo name
-        repo = service if "/" in service else f"{org}/{service}" if org else service
-        return [(repo, [])]
-
-    result = []
-    for entry in entries:
-        repo = entry.get("repo", "")
+    raw = (settings.pagemenot_service_repos or "").strip()
+    for entry in (e.strip() for e in raw.split(",") if e.strip()):
+        parts = entry.split(":", 2)
+        if len(parts) < 2:
+            continue
+        svc, repo = parts[0].strip(), parts[1].strip()
+        path_prefix = parts[2].strip() if len(parts) == 3 else ""
         if "/" not in repo and org:
             repo = f"{org}/{repo}"
-        paths = [entry["path_prefix"]] if "path_prefix" in entry else []
-        result.append((repo, paths))
-    return result
+        mapping.setdefault(svc, []).append((repo, [path_prefix] if path_prefix else []))
+
+    if service in mapping:
+        return mapping[service]
+
+    # Zero-config fallback: service name == repo name
+    repo = service if "/" in service else f"{org}/{service}" if org else service
+    return [(repo, [])]
 
 
 _GH_HEADERS = {

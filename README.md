@@ -123,9 +123,30 @@ Set vars in `.env` → integration activates. Unset → mock fallback.
 | Logs | Loki (Grafana Cloud) | `LOKI_URL` + `LOKI_AUTH_TOKEN` + `LOKI_ORG_ID` |
 | On-call | PagerDuty | `PAGERDUTY_API_KEY` |
 | Deploys | GitHub | `GITHUB_TOKEN` + `GITHUB_ORG` |
+| Deploy mapping | Monorepo / name mismatch | `PAGEMENOT_SERVICE_REPOS` (see below) |
 | Execution | Kubernetes | `KUBECONFIG_PATH` |
 | Ticketing | Jira Service Management | `JIRA_SM_URL` + `JIRA_SM_EMAIL` + `JIRA_SM_API_TOKEN` |
 | Alerts | Azure Monitor | Action Group → Webhook → `/webhooks/generic` |
+
+### `PAGEMENOT_SERVICE_REPOS`
+
+Maps service names to GitHub repos. Default: `GITHUB_ORG/service-name` (zero config if names match).
+
+Format: comma-separated `service:org/repo` pairs.
+
+```
+# Repo name differs from service name
+PAGEMENOT_SERVICE_REPOS=payment-service:myorg/payments
+
+# Monorepo — append :path/prefix/ to filter PRs to that directory only
+PAGEMENOT_SERVICE_REPOS=checkout-service:myorg/platform:services/checkout/
+
+# Multi-repo — repeat the service name
+PAGEMENOT_SERVICE_REPOS=api-gateway:myorg/gateway,api-gateway:myorg/gateway-plugins
+
+# Combined
+PAGEMENOT_SERVICE_REPOS=payment-service:myorg/payments,checkout-service:myorg/platform:services/checkout/,api-gateway:myorg/gw,api-gateway:myorg/gw-plugins
+```
 
 ---
 
