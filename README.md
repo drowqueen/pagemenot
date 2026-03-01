@@ -152,12 +152,16 @@ Set `WEBHOOK_SECRET_<SOURCE>` to enable HMAC signature verification. Unset = war
 
 ## Autonomous execution
 
-Off by default. Enable progressively:
+Both flags default to `true` (exec enabled, dry run on). Enable live execution by setting dry run to false:
 
-```bash
-PAGEMENOT_EXEC_DRY_RUN=true    # reads real alerts, logs steps, executes nothing
-PAGEMENOT_EXEC_ENABLED=true    # real execution (after dry run validation)
-```
+| Setting | Default | Effect |
+|---------|---------|--------|
+| `PAGEMENOT_EXEC_ENABLED=true` | `true` | enables the runbook execution pipeline |
+| `PAGEMENOT_EXEC_DRY_RUN=true` | `true` | logs what would run, executes nothing |
+| `PAGEMENOT_EXEC_DRY_RUN=false` | — | runs commands against real infrastructure |
+| `PAGEMENOT_EXEC_NAMESPACE=production` | `production` | k8s namespace for `{{ namespace }}` in exec tags |
+
+**Dry run** is the safe default. Triage runs end-to-end, runbook steps are matched and logged with `[DRY RUN]` prefix in Slack, but no kubectl or AWS commands execute. Use this to validate runbook matching before going live.
 
 Execution is gated to runbook `<!-- exec: -->` tags only — LLM output never triggers commands directly.
 
