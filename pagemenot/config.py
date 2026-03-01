@@ -51,7 +51,9 @@ class Settings(BaseSettings):
     jira_sm_email: Optional[str] = None
     jira_sm_api_token: Optional[str] = None
     jira_sm_project_key: Optional[str] = None
-    jira_sm_issue_type: str = "Incident"  # issue type name in your JSM project
+    jira_sm_issue_type: str = "Service Request"  # fallback, not used when service desk API is available
+    jira_sm_service_desk_id: Optional[str] = None   # auto-discovered if not set
+    jira_sm_request_type_id: Optional[str] = None   # auto-discovered if not set
     # Source control / deploys
     github_token: Optional[str] = None
     github_org: Optional[str] = None

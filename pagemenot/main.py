@@ -210,54 +210,159 @@ async def newrelic_webhook(
     return {"status": "accepted"}
 
 
-async def _open_jira_ticket(result) -> Optional[str]:
-    """Create a Jira SM incident ticket. Returns the browser URL or None on failure."""
-    if not (settings.jira_sm_url and settings.jira_sm_email and
-            settings.jira_sm_api_token and settings.jira_sm_project_key):
+async def _page_pagerduty(result) -> Optional[str]:
+    """Create a PagerDuty incident to page the on-call human. Returns incident URL or None."""
+    if not settings.pagerduty_api_key:
         return None
     import httpx
 
-    credentials = base64.b64encode(
-        f"{settings.jira_sm_email}:{settings.jira_sm_api_token}".encode()
-    ).decode()
+    # Resolve the requester: fetch first user from account
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(
+                "https://api.pagerduty.com/users?limit=1",
+                headers={
+                    "Authorization": f"Token token={settings.pagerduty_api_key}",
+                    "Accept": "application/vnd.pagerduty+json;version=2",
+                },
+            )
+            from_email = r.json()["users"][0]["email"] if r.status_code == 200 else None
+    except Exception:
+        from_email = None
 
-    desc_text = (
-        f"Alert: {result.alert_title}\n"
-        f"Service: {result.service}\n"
-        f"Severity: {result.severity}\n\n"
-        f"Root cause: {result.root_cause}\n\n"
-        f"Triage confidence: {result.confidence}"
-    )
+    if not from_email:
+        logger.warning("PagerDuty escalation skipped — could not resolve requester email")
+        return None
+
+    # Fetch default service id
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(
+                "https://api.pagerduty.com/services?limit=1",
+                headers={
+                    "Authorization": f"Token token={settings.pagerduty_api_key}",
+                    "Accept": "application/vnd.pagerduty+json;version=2",
+                },
+            )
+            service_id = r.json()["services"][0]["id"] if r.status_code == 200 else None
+    except Exception:
+        service_id = None
+
+    if not service_id:
+        logger.warning("PagerDuty escalation skipped — no service found")
+        return None
+
+    urgency = "high" if result.severity == "critical" else "low"
     body = {
-        "fields": {
-            "project": {"key": settings.jira_sm_project_key},
-            "summary": f"INCIDENT: {result.alert_title} ({result.service})",
-            "description": {
-                "type": "doc",
-                "version": 1,
-                "content": [
-                    {
-                        "type": "paragraph",
-                        "content": [{"type": "text", "text": desc_text}],
-                    }
-                ],
+        "incident": {
+            "type": "incident",
+            "title": f"{result.alert_title} ({result.service})",
+            "service": {"id": service_id, "type": "service_reference"},
+            "urgency": urgency,
+            "body": {
+                "type": "incident_body",
+                "details": (
+                    f"pagemenot could not auto-resolve this incident.\n\n"
+                    f"Root cause: {result.root_cause}\n"
+                    f"Confidence: {result.confidence}\n"
+                    f"Triage duration: {result.duration_seconds:.1f}s"
+                ),
             },
-            "issuetype": {"name": settings.jira_sm_issue_type},
         }
     }
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(
-                f"{settings.jira_sm_url.rstrip('/')}/rest/api/3/issue",
+                "https://api.pagerduty.com/incidents",
                 json=body,
                 headers={
-                    "Authorization": f"Basic {credentials}",
+                    "Authorization": f"Token token={settings.pagerduty_api_key}",
                     "Content-Type": "application/json",
+                    "Accept": "application/vnd.pagerduty+json;version=2",
+                    "From": from_email,
                 },
             )
         if resp.status_code in (200, 201):
-            key = resp.json().get("key", "")
-            url = f"{settings.jira_sm_url.rstrip('/')}/browse/{key}"
+            inc = resp.json()["incident"]
+            url = inc["html_url"]
+            logger.info("PagerDuty incident created: %s", url)
+            return url
+        logger.warning("PagerDuty incident creation failed: %s %s", resp.status_code, resp.text[:200])
+    except Exception as e:
+        logger.warning("PagerDuty escalation error: %s", e)
+    return None
+
+
+async def _open_jira_ticket(result) -> Optional[str]:
+    """Create a Jira SM service request. Returns the browser URL or None on failure."""
+    if not (settings.jira_sm_url and settings.jira_sm_email and
+            settings.jira_sm_api_token and settings.jira_sm_project_key):
+        return None
+    import httpx
+
+    base = settings.jira_sm_url.rstrip("/")
+    credentials = base64.b64encode(
+        f"{settings.jira_sm_email}:{settings.jira_sm_api_token}".encode()
+    ).decode()
+    headers = {
+        "Authorization": f"Basic {credentials}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "X-ExperimentalApi": "opt-in",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            # Resolve service desk ID
+            sd_id = settings.jira_sm_service_desk_id
+            if not sd_id:
+                r = await client.get(f"{base}/rest/servicedeskapi/servicedesk", headers=headers)
+                for sd in r.json().get("values", []):
+                    if sd.get("projectKey") == settings.jira_sm_project_key:
+                        sd_id = str(sd["id"])
+                        break
+
+            if not sd_id:
+                logger.warning("Jira SM: service desk not found for project %s", settings.jira_sm_project_key)
+                return None
+
+            # Resolve request type ID
+            rt_id = settings.jira_sm_request_type_id
+            if not rt_id:
+                r = await client.get(
+                    f"{base}/rest/servicedeskapi/servicedesk/{sd_id}/requesttype", headers=headers
+                )
+                types = r.json().get("values", [])
+                if types:
+                    rt_id = str(types[0]["id"])
+
+            if not rt_id:
+                logger.warning("Jira SM: no request types found for service desk %s", sd_id)
+                return None
+
+            # Create the request
+            resp = await client.post(
+                f"{base}/rest/servicedeskapi/request",
+                headers=headers,
+                json={
+                    "serviceDeskId": sd_id,
+                    "requestTypeId": rt_id,
+                    "requestFieldValues": {
+                        "summary": f"INCIDENT: {result.alert_title} ({result.service})",
+                        "description": (
+                            f"Alert: {result.alert_title}\n"
+                            f"Service: {result.service}\n"
+                            f"Severity: {result.severity}\n\n"
+                            f"Root cause: {result.root_cause}\n\n"
+                            f"Triage confidence: {result.confidence}"
+                        ),
+                    },
+                },
+            )
+
+        if resp.status_code in (200, 201):
+            issue_key = resp.json().get("issueKey", "")
+            url = f"{base}/browse/{issue_key}"
             logger.info("Jira ticket created: %s", url)
             return url
         logger.warning("Jira ticket creation failed: %s %s", resp.status_code, resp.text[:200])
@@ -335,14 +440,24 @@ async def _auto_triage(source: str, payload: dict):
                     text=f"Detailed analysis (part {i + 1})\n```{chunk}```",
                 )
 
-        # Open Jira SM ticket for critical/high incidents
+        # Open Jira SM ticket + page PagerDuty for critical/high incidents
         if result.severity in ("critical", "high"):
-            jira_url = await _open_jira_ticket(result)
-            if jira_url:
+            jira_url, pd_url = await asyncio.gather(
+                _open_jira_ticket(result),
+                _page_pagerduty(result),
+                return_exceptions=True,
+            )
+            if isinstance(jira_url, str):
                 await client.chat_postMessage(
                     channel=channel,
                     thread_ts=thread,
                     text=f"🎫 Jira ticket opened: {jira_url}",
+                )
+            if isinstance(pd_url, str):
+                await client.chat_postMessage(
+                    channel=channel,
+                    thread_ts=thread,
+                    text=f"📟 On-call paged via PagerDuty: {pd_url}",
                 )
 
         # Escalate critical/high to on-call channel
