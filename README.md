@@ -57,17 +57,21 @@ No integrations configured → mock layer activates automatically. The crew stil
 ## Quick Start
 
 ```bash
-cp .env.example .env
-# Minimum: SLACK_BOT_TOKEN, SLACK_APP_TOKEN, OPENAI_API_KEY
-docker compose up -d
+cp .env.example .env   # fill in tokens — never commit this file
+make install           # validates config, pulls image, starts container
+make test              # fire a simulated incident
 ```
 
-**Demo without real monitoring:**
+`.env` is gitignored. `config/services.yaml` is committed (no secrets).
 
-```bash
-python scripts/simulate_incident.py payment-500s
-# or: --source opsgenie | datadog | newrelic | alertmanager
-```
+| Command | Effect |
+|---------|--------|
+| `make install` | validate config → pull image → start |
+| `make start` / `make stop` | start / stop container |
+| `make logs` | follow container logs |
+| `make status` | running containers + enabled integrations |
+| `make test SCENARIO=checkout-oom` | fire a simulated incident |
+| `make hooks` | install git pre-commit/pre-push hooks |
 
 Scenarios: `payment-500s`, `checkout-oom`, `db-connection-pool`, `cert-renewal`, `traffic-spike`, `--random`
 
