@@ -7,6 +7,7 @@ That's it. Everything auto-configures.
 """
 
 import asyncio
+import base64
 import hashlib
 import hmac
 import logging
@@ -209,6 +210,62 @@ async def newrelic_webhook(
     return {"status": "accepted"}
 
 
+async def _open_jira_ticket(result) -> Optional[str]:
+    """Create a Jira SM incident ticket. Returns the browser URL or None on failure."""
+    if not (settings.jira_sm_url and settings.jira_sm_email and
+            settings.jira_sm_api_token and settings.jira_sm_project_key):
+        return None
+    import httpx
+
+    credentials = base64.b64encode(
+        f"{settings.jira_sm_email}:{settings.jira_sm_api_token}".encode()
+    ).decode()
+
+    desc_text = (
+        f"Alert: {result.alert_title}\n"
+        f"Service: {result.service}\n"
+        f"Severity: {result.severity}\n\n"
+        f"Root cause: {result.root_cause}\n\n"
+        f"Triage confidence: {result.confidence}"
+    )
+    body = {
+        "fields": {
+            "project": {"key": settings.jira_sm_project_key},
+            "summary": f"INCIDENT: {result.alert_title} ({result.service})",
+            "description": {
+                "type": "doc",
+                "version": 1,
+                "content": [
+                    {
+                        "type": "paragraph",
+                        "content": [{"type": "text", "text": desc_text}],
+                    }
+                ],
+            },
+            "issuetype": {"name": settings.jira_sm_issue_type},
+        }
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                f"{settings.jira_sm_url.rstrip('/')}/rest/api/3/issue",
+                json=body,
+                headers={
+                    "Authorization": f"Basic {credentials}",
+                    "Content-Type": "application/json",
+                },
+            )
+        if resp.status_code in (200, 201):
+            key = resp.json().get("key", "")
+            url = f"{settings.jira_sm_url.rstrip('/')}/browse/{key}"
+            logger.info("Jira ticket created: %s", url)
+            return url
+        logger.warning("Jira ticket creation failed: %s %s", resp.status_code, resp.text[:200])
+    except Exception as e:
+        logger.warning("Jira ticket creation error: %s", e)
+    return None
+
+
 async def _auto_triage(source: str, payload: dict):
     """Run triage and route result based on severity and resolution status."""
     try:
@@ -276,6 +333,16 @@ async def _auto_triage(source: str, payload: dict):
                     channel=channel,
                     thread_ts=thread,
                     text=f"Detailed analysis (part {i + 1})\n```{chunk}```",
+                )
+
+        # Open Jira SM ticket for critical/high incidents
+        if result.severity in ("critical", "high"):
+            jira_url = await _open_jira_ticket(result)
+            if jira_url:
+                await client.chat_postMessage(
+                    channel=channel,
+                    thread_ts=thread,
+                    text=f"🎫 Jira ticket opened: {jira_url}",
                 )
 
         # Escalate critical/high to on-call channel

@@ -1,0 +1,176 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-code
+  namespace: demo
+data:
+  main.py: |
+    import time, random, logging, json, os
+    from fastapi import FastAPI, HTTPException, Request
+    from fastapi.responses import Response
+    from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+    import uvicorn
+
+    logging.basicConfig(
+        format='{"time":"%(asctime)s","level":"%(levelname)s","service":"backend","pod":"' + os.getenv("POD_NAME","unknown") + '","msg":"%(message)s"}',
+        level=logging.INFO,
+    )
+    logger = logging.getLogger("backend")
+
+    app = FastAPI()
+    REQUESTS = Counter("http_requests_total", "Total HTTP requests", ["method", "path", "status"])
+    LATENCY  = Histogram("http_request_duration_seconds", "Request latency", ["path"],
+                         buckets=[.005,.01,.025,.05,.1,.25,.5,1,2.5,5])
+
+    @app.middleware("http")
+    async def track(request: Request, call_next):
+        t = time.time()
+        try:
+            r = await call_next(request)
+            REQUESTS.labels(method=request.method, path=request.url.path, status=r.status_code).inc()
+        except Exception as e:
+            REQUESTS.labels(method=request.method, path=request.url.path, status=500).inc()
+            raise
+        finally:
+            LATENCY.labels(path=request.url.path).observe(time.time() - t)
+        return r
+
+    @app.get("/health")
+    def health():
+        return {"status": "ok", "pod": os.getenv("POD_NAME")}
+
+    @app.get("/metrics")
+    def metrics():
+        return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+    @app.get("/api/orders")
+    def list_orders():
+        if random.random() < 0.10:
+            logger.error("DB timeout fetching orders — connection pool exhausted")
+            raise HTTPException(500, "db timeout")
+        if random.random() < 0.05:
+            delay = random.uniform(0.8, 2.5)
+            time.sleep(delay)
+            logger.warning(f"Slow query on /api/orders — took {delay:.2f}s")
+        count = random.randint(1, 30)
+        logger.info(f"Orders listed count={count}")
+        return {"orders": [{"id": i, "status": random.choice(["pending","shipped","delivered"])} for i in range(count)]}
+
+    @app.post("/api/orders")
+    def create_order():
+        if random.random() < 0.06:
+            logger.error("Payment service unavailable — circuit breaker open")
+            raise HTTPException(503, "payment unavailable")
+        oid = random.randint(10000, 99999)
+        logger.info(f"Order created order_id={oid}")
+        return {"order_id": oid, "status": "created"}
+
+    @app.get("/api/payments")
+    def list_payments():
+        if random.random() < 0.08:
+            logger.error("Payment gateway timeout — upstream unresponsive")
+            raise HTTPException(504, "gateway timeout")
+        if random.random() < 0.03:
+            logger.error("Payment validation failed — invalid card checksum")
+            raise HTTPException(422, "validation error")
+        logger.info("Payments listed")
+        return {"payments": [{"id": i, "amount": round(random.uniform(9.99, 999.99), 2)} for i in range(random.randint(0, 12))]}
+
+    @app.get("/api/inventory")
+    def inventory():
+        if random.random() < 0.04:
+            logger.error("Inventory cache miss — Redis unreachable")
+            raise HTTPException(500, "cache error")
+        logger.info("Inventory fetched")
+        return {"items": [{"sku": f"SKU{i:04d}", "stock": random.randint(0, 500)} for i in range(random.randint(5, 25))]}
+
+    if __name__ == "__main__":
+        uvicorn.run(app, host="0.0.0.0", port=8000, log_config=None)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: demo
+  labels:
+    app: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port:   "8000"
+        prometheus.io/path:   "/metrics"
+    spec:
+      containers:
+        - name: backend
+          image: python:3.11-slim
+          command: ["sh", "-c", "pip install fastapi uvicorn prometheus_client -q && python /app/main.py"]
+          ports:
+            - containerPort: 8000
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          volumeMounts:
+            - name: code
+              mountPath: /app
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+      volumes:
+        - name: code
+          configMap:
+            name: backend-code
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: demo
+  labels:
+    app: backend
+    release: kube-prom
+spec:
+  selector:
+    app: backend
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: backend
+  namespace: demo
+  labels:
+    release: kube-prom
+spec:
+  selector:
+    matchLabels:
+      app: backend
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+  namespaceSelector:
+    matchNames:
+      - demo

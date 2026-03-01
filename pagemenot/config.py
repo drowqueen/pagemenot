@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     jira_sm_email: Optional[str] = None
     jira_sm_api_token: Optional[str] = None
     jira_sm_project_key: Optional[str] = None
+    jira_sm_issue_type: str = "Incident"  # issue type name in your JSM project
     # Source control / deploys
     github_token: Optional[str] = None
     github_org: Optional[str] = None
