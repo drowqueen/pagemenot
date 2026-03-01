@@ -58,9 +58,9 @@ No integrations configured → mock layer activates. Crew still runs end-to-end.
 ## Quick start
 
 ```bash
-cp .env.example .env   # fill in tokens — never commit this file
-make install           # validates config, pulls image, starts container
-make test              # fire a simulated incident
+./setup.sh     # interactive wizard — generates .env
+make install   # validates config, pulls image, starts container
+make test      # fire a simulated incident
 ```
 
 `.env` is gitignored. `config/services.yaml` is committed (no secrets).
