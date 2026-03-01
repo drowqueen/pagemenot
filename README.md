@@ -18,7 +18,7 @@ Self-hosted AI SRE. Alert fires → 3-agent crew triages → root cause + remedi
 - [Knowledge base](#knowledge-base)
 - [Simulate incidents](#simulate-incidents)
 - [Deploy](#deploy)
-- [Cloud IAM](#cloud-iam)
+- [Cloud IAM](#cloud-iam) (AWS · GCP · Azure alerts)
 - [Slash commands](#slash-commands)
 - [Stack](#stack)
 
@@ -254,6 +254,17 @@ Not suitable for FaaS (Lambda, Cloud Functions) — Slack Socket Mode requires a
 ## Cloud IAM
 
 Only needed if you set `AWS_ROLE_ARN` or `GOOGLE_APPLICATION_CREDENTIALS` to let pagemenot call cloud APIs for diagnosis and execution. Skip if not using cloud execution.
+
+### Azure Monitor alerts
+
+No `.env` vars required. In the Azure portal:
+
+1. **Monitor → Alerts → Action Groups** → create or edit a group
+2. Add action: **Webhook**
+3. URL: `https://your-pagemenot-url/webhooks/generic`
+4. Enable **common alert schema**
+
+Optionally set `WEBHOOK_SECRET_GENERIC` in `.env` — pagemenot will verify the `X-Pagemenot-Signature` header. Azure doesn't natively sign webhook payloads, so leave unset unless you add your own signing proxy.
 
 ### AWS
 
