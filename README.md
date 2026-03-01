@@ -58,12 +58,21 @@ No integrations configured → mock layer activates. Crew still runs end-to-end.
 ## Quick start
 
 ```bash
-cp .env.example .env        # fill in tokens — never commit this file
-docker compose up -d
-python scripts/simulate_incident.py payment-500s
+cp .env.example .env   # fill in tokens — never commit this file
+make install           # validates config, pulls image, starts container
+make test              # fire a simulated incident
 ```
 
 `.env` is gitignored. `config/services.yaml` is committed (no secrets).
+
+| Command | Effect |
+|---------|--------|
+| `make install` | validate config → pull image → start |
+| `make start` / `make stop` | start / stop container |
+| `make logs` | follow container logs |
+| `make status` | running containers + enabled integrations |
+| `make test SCENARIO=checkout-oom` | fire a simulated incident |
+| `make hooks` | install git pre-commit/pre-push hooks |
 
 ---
 
