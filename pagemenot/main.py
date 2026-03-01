@@ -421,12 +421,14 @@ async def _auto_triage(source: str, payload: dict):
 
         sev = {"critical": "🔴", "high": "🟠", "medium": "🟡"}.get(result.severity, "⚪")
         conf = {"high": "🟢", "medium": "🟡", "low": "🔴"}.get(result.confidence, "⚪")
+        needs_page = result.severity in ("critical", "high")
 
-        # Headline — always post so the channel knows triage ran
-        resp = await client.chat_postMessage(
-            channel=channel,
-            text=f"{sev} *INCIDENT: {result.alert_title}* — runbook could not resolve, escalating",
+        headline = (
+            f"{sev} *INCIDENT: {result.alert_title}* — could not auto-resolve, escalating"
+            if needs_page
+            else f"{sev} {result.alert_title} — triage complete, no runbook match"
         )
+        resp = await client.chat_postMessage(channel=channel, text=headline)
         thread = resp["ts"]
 
         # Root cause + analysis in thread
@@ -448,35 +450,36 @@ async def _auto_triage(source: str, payload: dict):
                     text=f"Detailed analysis (part {i + 1})\n```{chunk}```",
                 )
 
-        # Escalate — always, because runbook did not resolve it
-        jira_url, pd_url = await asyncio.gather(
-            _open_jira_ticket(result),
-            _page_pagerduty(result),
-            return_exceptions=True,
-        )
-        if isinstance(jira_url, str):
-            await client.chat_postMessage(
-                channel=channel,
-                thread_ts=thread,
-                text=f"🎫 Jira ticket opened: {jira_url}",
+        # Page humans only for critical/high that could not be auto-resolved
+        if needs_page:
+            jira_url, pd_url = await asyncio.gather(
+                _open_jira_ticket(result),
+                _page_pagerduty(result),
+                return_exceptions=True,
             )
-        if isinstance(pd_url, str):
-            await client.chat_postMessage(
-                channel=channel,
-                thread_ts=thread,
-                text=f"📟 On-call paged via PagerDuty: {pd_url}",
-            )
+            if isinstance(jira_url, str):
+                await client.chat_postMessage(
+                    channel=channel,
+                    thread_ts=thread,
+                    text=f"🎫 Jira ticket opened: {jira_url}",
+                )
+            if isinstance(pd_url, str):
+                await client.chat_postMessage(
+                    channel=channel,
+                    thread_ts=thread,
+                    text=f"📟 On-call paged via PagerDuty: {pd_url}",
+                )
 
-        if settings.pagemenot_oncall_channel:
-            pd_line = f"\n📟 PagerDuty: {pd_url}" if isinstance(pd_url, str) else ""
-            await client.chat_postMessage(
-                channel=settings.pagemenot_oncall_channel,
-                text=(
-                    f"{sev} *ESCALATION:* {result.alert_title} ({result.service})\n"
-                    f"Confidence: {conf} {result.confidence} — runbook could not resolve — see #{channel}"
-                    f"{pd_line}"
-                ),
-            )
+            if settings.pagemenot_oncall_channel:
+                pd_line = f"\n📟 PagerDuty: {pd_url}" if isinstance(pd_url, str) else ""
+                await client.chat_postMessage(
+                    channel=settings.pagemenot_oncall_channel,
+                    text=(
+                        f"{sev} *ESCALATION:* {result.alert_title} ({result.service})\n"
+                        f"Confidence: {conf} {result.confidence} — could not auto-resolve — see #{channel}"
+                        f"{pd_line}"
+                    ),
+                )
 
     except Exception as e:
         logger.error(f"Auto-triage failed: {e}", exc_info=True)
