@@ -266,7 +266,7 @@ def send_alert(scenario_name: str):
     payloads = {
         "pagerduty": (
             "/webhooks/pagerduty",
-            {"messages": [{"event": "incident.trigger", "incident": {
+            {"messages": [{"event": "incident.triggered", "incident": {
                 **pd,
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "assignments": [{"summary": "oncall-sre"}],

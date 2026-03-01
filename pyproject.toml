@@ -7,7 +7,7 @@ license = { text = "MIT" }
 
 dependencies = [
     # CrewAI core
-    "crewai[tools]>=0.105",
+    "crewai[tools,google-genai]>=0.105",
 
     # Slack
     "slack-bolt>=1.20",
@@ -43,8 +43,8 @@ dev = [
 ]
 
 [build-system]
-requires = ["setuptools>=68"]
-build-backend = "setuptools.backends._legacy:_Backend"
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
 
 [tool.ruff]
 target-version = "py312"
