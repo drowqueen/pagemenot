@@ -230,19 +230,21 @@ async def _page_pagerduty(result) -> Optional[str]:
         return None
     import httpx
 
-    # Resolve the requester: fetch first user from account
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.get(
-                "https://api.pagerduty.com/users?limit=1",
-                headers={
-                    "Authorization": f"Token token={settings.pagerduty_api_key}",
-                    "Accept": "application/vnd.pagerduty+json;version=2",
-                },
-            )
-            from_email = r.json()["users"][0]["email"] if r.status_code == 200 else None
-    except Exception:
-        from_email = None
+    # Resolve the requester email (explicit config takes priority)
+    from_email = settings.pagerduty_from_email
+    if not from_email:
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                r = await client.get(
+                    "https://api.pagerduty.com/users?limit=1",
+                    headers={
+                        "Authorization": f"Token token={settings.pagerduty_api_key}",
+                        "Accept": "application/vnd.pagerduty+json;version=2",
+                    },
+                )
+                from_email = r.json()["users"][0]["email"] if r.status_code == 200 else None
+        except Exception:
+            from_email = None
 
     if not from_email:
         logger.warning("PagerDuty escalation skipped — could not resolve requester email")

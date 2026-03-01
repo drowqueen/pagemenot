@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     newrelic_account_id: Optional[str] = None
     # Alerting / on-call
     pagerduty_api_key: Optional[str] = None
+    pagerduty_from_email: Optional[str] = None  # requester email for PD API; auto-discovered if unset
     opsgenie_api_key: Optional[str] = None
     # Jira Service Management
     jira_sm_url: Optional[str] = None
