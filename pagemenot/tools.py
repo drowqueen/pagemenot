@@ -15,6 +15,7 @@ import shlex
 import subprocess
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import httpx
 from crewai.tools import tool
@@ -477,36 +478,45 @@ def query_newrelic_metrics(service_name: str) -> str:
 # DIAGNOSER TOOLS
 # ══════════════════════════════════════════════════════════════
 
+_SERVICES_PATH = Path(__file__).parent.parent / "config" / "services.yaml"
+_SERVICES_CACHE: dict = {}
+_SERVICES_MTIME: float = 0.0
+
+
+def _load_services() -> dict:
+    """Hot-reload config/services.yaml when the file changes."""
+    global _SERVICES_CACHE, _SERVICES_MTIME
+    if not _SERVICES_PATH.exists():
+        return {}
+    mtime = _SERVICES_PATH.stat().st_mtime
+    if mtime != _SERVICES_MTIME:
+        import yaml
+        with open(_SERVICES_PATH) as f:
+            _SERVICES_CACHE = yaml.safe_load(f) or {}
+        _SERVICES_MTIME = mtime
+        logger.info("config/services.yaml reloaded")
+    return _SERVICES_CACHE
+
+
 def _resolve_repos(service: str) -> list[tuple[str, list[str]]]:
-    """Return [(org/repo, [path_prefixes]), ...] for a service name.
+    """Return [(org/repo, [path_prefixes]), ...] for a service.
 
-    Reads PAGEMENOT_SERVICE_REPOS from config. Format (comma-separated):
-        service:org/repo
-        service:org/repo:path/prefix/   ← monorepo with path filter
-    Multiple entries for the same service = multi-repo.
-
-    Falls back to GITHUB_ORG/service-name if no entry found.
+    Reads config/services.yaml. Falls back to GITHUB_ORG/service-name.
     """
     org = settings.github_org or ""
-    mapping: dict[str, list[tuple[str, list[str]]]] = {}
+    entry = _load_services().get(service)
 
-    raw = (settings.pagemenot_service_repos or "").strip()
-    for entry in (e.strip() for e in raw.split(",") if e.strip()):
-        parts = entry.split(":", 2)
-        if len(parts) < 2:
-            continue
-        svc, repo = parts[0].strip(), parts[1].strip()
-        path_prefix = parts[2].strip() if len(parts) == 3 else ""
-        if "/" not in repo and org:
-            repo = f"{org}/{repo}"
-        mapping.setdefault(svc, []).append((repo, [path_prefix] if path_prefix else []))
+    if not entry:
+        repo = service if "/" in service else f"{org}/{service}" if org else service
+        return [(repo, [])]
 
-    if service in mapping:
-        return mapping[service]
-
-    # Zero-config fallback: service name == repo name
-    repo = service if "/" in service else f"{org}/{service}" if org else service
-    return [(repo, [])]
+    repos = entry.get("repos", [])
+    path_prefix = entry.get("path_prefix", "")
+    paths = [path_prefix] if path_prefix else []
+    return [
+        (r if "/" in r else f"{org}/{r}", paths)
+        for r in repos
+    ]
 
 
 _GH_HEADERS = {

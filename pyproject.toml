@@ -31,6 +31,9 @@ dependencies = [
     # Vector store
     "chromadb>=0.5",
 
+    # Service registry
+    "pyyaml>=6.0",
+
     # LLM providers
     "openai>=1.40",
     "anthropic>=0.34",
