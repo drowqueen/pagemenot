@@ -1,11 +1,74 @@
+# ── Credentials / secrets ─────────────────────────────────────────────────────
 .env
-*.pyc
+.env.*
+!.env.example
+
+# ── Local notes ───────────────────────────────────────────────────────────────
+TODO.md
+
+# ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
-.DS_Store
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+site-packages/
+wheels/
+MANIFEST
+
+# ── Virtual environments ───────────────────────────────────────────────────────
 .venv/
 venv/
-dist/
-*.egg-info/
-logs/
+env/
+ENV/
+
+# ── Testing / coverage ────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+
+# ── Type checking ─────────────────────────────────────────────────────────────
+.mypy_cache/
+.pyright/
+.ruff_cache/
+
+# ── Data / vector store ───────────────────────────────────────────────────────
+data/
 chroma_db/
-.claude/settings.local.json
+*.db
+*.sqlite
+*.sqlite3
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+logs/
+*.log
+
+# ── Docker ────────────────────────────────────────────────────────────────────
+.docker/
+
+# ── Kubernetes ────────────────────────────────────────────────────────────────
+*.kubeconfig
+kubeconfig
+kubeconfig-*.yaml
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── IDE ───────────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ── Claude Code / Serena ──────────────────────────────────────────────────────
+.claude/
+.serena/
+CLAUDE.md

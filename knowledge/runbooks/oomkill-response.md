@@ -6,14 +6,10 @@
 ## Diagnosis
 
 1. Confirm OOMKill:
-   ```
-   kubectl describe pod <pod-name> -n production | grep -A5 "Last State"
-   ```
+   <!-- exec: kubectl describe pods -n {{ namespace }} -l app={{ service }} -->
 
 2. Check memory usage trend:
-   ```
-   kubectl top pods -n production | grep <service>
-   ```
+   <!-- exec: kubectl get pods -n {{ namespace }} -l app={{ service }} --sort-by=.status.startTime -->
 
 3. Check if correlated with traffic spike or recent deploy
 
@@ -21,15 +17,12 @@
 
 1. If traffic spike: increase memory limits temporarily
    ```
-   kubectl set resources deployment/<service> -n production --limits=memory=4Gi
+   kubectl set resources deployment/<service> -n {{ namespace }} --limits=memory=4Gi
    ```
 
 2. If deploy-related: rollback (see rollback-procedure.md)
 
-3. If memory leak: restart pods to buy time, then investigate
-   ```
-   kubectl rollout restart deployment/<service> -n production
-   ```
+3. If memory leak: investigate, then escalate — do not restart automatically
 
 ## Root Cause Investigation
 

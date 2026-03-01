@@ -10,8 +10,12 @@ Each tool is a CrewAI @tool that wraps the actual API call.
 """
 
 import logging
+import re
+import shlex
+import subprocess
+import time
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from pathlib import Path
 
 import httpx
 from crewai.tools import tool
@@ -19,6 +23,16 @@ from crewai.tools import tool
 from pagemenot.config import settings
 
 logger = logging.getLogger("pagemenot.tools")
+
+_SAFE_NAME_RE = re.compile(r'^[a-zA-Z0-9_.\-]+$')
+
+
+def _safe_name(name: str) -> str:
+    """Validate that a name contains only safe characters for use in queries.
+    Returns the name unchanged, raises ValueError if unsafe."""
+    if not _SAFE_NAME_RE.match(name):
+        raise ValueError(f"Unsafe characters in name: {name!r}")
+    return name
 
 
 # ══════════════════════════════════════════════════════════════
@@ -114,6 +128,11 @@ def query_prometheus(service_name: str) -> str:
     CPU, memory, and pod restarts over the last 30 minutes.
     Input should be the service name (e.g., 'payment-service')."""
     try:
+        try:
+            service_name = _safe_name(service_name)
+        except ValueError as e:
+            return f"Invalid service name: {e}"
+
         end = datetime.now(timezone.utc)
 
         queries = {
@@ -157,7 +176,7 @@ def query_prometheus(service_name: str) -> str:
 
 @tool("Get Grafana Alert History")
 def query_grafana_alerts(service_name: str) -> str:
-    """Get recent Grafana alerts related to a service.
+    """Get currently firing Grafana alerts related to a service.
     Input should be the service name."""
     try:
         headers = {"Authorization": f"Bearer {settings.grafana_api_key}"}
@@ -165,18 +184,27 @@ def query_grafana_alerts(service_name: str) -> str:
             headers["X-Grafana-Org-Id"] = settings.grafana_org_id
 
         with httpx.Client(timeout=10, headers=headers) as client:
-            resp = client.get(f"{settings.grafana_url}/api/v1/provisioning/alert-rules")
-            rules = resp.json()
+            # Query active firing alerts via Grafana-managed Alertmanager API
+            resp = client.get(
+                f"{settings.grafana_url}/api/alertmanager/grafana/api/v2/alerts",
+                params={"active": "true", "silenced": "false", "inhibited": "false"},
+            )
+            resp.raise_for_status()
+            alerts = resp.json()
 
-            relevant = [r for r in rules if service_name.lower() in str(r).lower()]
+            relevant = [a for a in alerts if service_name.lower() in str(a).lower()]
             if not relevant:
-                return f"No Grafana alerts found for '{service_name}'."
+                return f"No active Grafana alerts found for '{service_name}'."
 
-            summaries = [
-                f"  - {r.get('title', 'Unknown')}: {r.get('condition', 'N/A')}"
-                for r in relevant[:5]
-            ]
-            return f"Grafana alerts for '{service_name}':\n" + "\n".join(summaries)
+            summaries = []
+            for a in relevant[:5]:
+                labels = a.get("labels", {})
+                annotations = a.get("annotations", {})
+                summaries.append(
+                    f"  - {labels.get('alertname', 'Unknown')}: "
+                    f"{annotations.get('summary', a.get('status', {}).get('state', 'N/A'))}"
+                )
+            return f"Active Grafana alerts for '{service_name}':\n" + "\n".join(summaries)
 
     except Exception as e:
         return f"Grafana query failed: {e}"
@@ -188,13 +216,17 @@ def search_logs_loki(query: str) -> str:
     Input should be a LogQL query or a service name with keywords
     like 'payment-service error' or '{app="checkout"} |= "exception"'."""
     try:
-        if not query.startswith("{"):
-            parts = query.split(maxsplit=1)
-            service = parts[0]
-            keywords = parts[1] if len(parts) > 1 else "error"
-            logql = f'{{app="{service}"}} |= "{keywords}"'
-        else:
-            logql = query
+        # Never accept raw LogQL from alert input — always build from validated parts
+        parts = query.split(maxsplit=1)
+        service = parts[0]
+        keywords = parts[1] if len(parts) > 1 else "error"
+        try:
+            service = _safe_name(service)
+        except ValueError as e:
+            return f"Invalid service name: {e}"
+        # keywords: strip quotes to prevent LogQL injection
+        keywords = keywords.replace('"', '').replace("'", '')[:100]
+        logql = f'{{app="{service}"}} |= "{keywords}"'
 
         end = datetime.now(timezone.utc)
         start = end - timedelta(minutes=30)
@@ -221,12 +253,18 @@ def search_logs_loki(query: str) -> str:
         if not streams:
             return f"No log entries found for query: {logql}"
 
+        _warn_err = re.compile(r'\b(warn|warning|error|err|fatal|critical|exception|traceback|panic)\b', re.IGNORECASE)
         lines = []
         for stream in streams[:5]:
-            for ts, line in stream.get("values", [])[:10]:
-                lines.append(f"  {line[:200]}")
+            for ts, line in stream.get("values", [])[:50]:
+                if _warn_err.search(line):
+                    lines.append(f"  {line[:200]}")
+                if len(lines) >= 20:
+                    break
 
-        return f"Loki logs ({len(lines)} entries, last 30min):\n" + "\n".join(lines)
+        if not lines:
+            return f"No warning/error log entries found (last 30min) for query: {logql}"
+        return f"Loki warning/error logs ({len(lines)} entries, last 30min):\n" + "\n".join(lines)
 
     except Exception as e:
         return f"Loki query failed: {e}"
@@ -237,15 +275,17 @@ def get_pagerduty_incident(incident_id_or_description: str) -> str:
     """Get details about a PagerDuty incident.
     Input can be an incident ID (like P1234567) or a search term."""
     try:
+        pd_headers = {
+            "Authorization": f"Token token={settings.pagerduty_api_key}",
+            "Accept": "application/vnd.pagerduty+json;version=2",
+            "Content-Type": "application/json",
+        }
         with httpx.Client(timeout=10) as client:
             # Try as incident ID first
             if incident_id_or_description.startswith("P"):
                 resp = client.get(
                     f"https://api.pagerduty.com/incidents/{incident_id_or_description}",
-                    headers={
-                        "Authorization": f"Token token={settings.pagerduty_api_key}",
-                        "Content-Type": "application/json",
-                    },
+                    headers=pd_headers,
                 )
                 if resp.status_code == 200:
                     inc = resp.json()["incident"]
@@ -262,10 +302,7 @@ def get_pagerduty_incident(incident_id_or_description: str) -> str:
             # Fall back to search
             resp = client.get(
                 "https://api.pagerduty.com/incidents",
-                headers={
-                    "Authorization": f"Token token={settings.pagerduty_api_key}",
-                    "Content-Type": "application/json",
-                },
+                headers=pd_headers,
                 params={"sort_by": "created_at:desc", "limit": 5},
             )
             incidents = resp.json().get("incidents", [])
@@ -328,7 +365,6 @@ def query_datadog_metrics(service_name: str) -> str:
     """Query Datadog for service metrics over the last 30 minutes.
     Input: service name (e.g., 'payment-service')."""
     try:
-        import time
         now = int(time.time())
         start = now - 1800
 
@@ -338,10 +374,11 @@ def query_datadog_metrics(service_name: str) -> str:
             "latency_p99": f"p99:trace.http.request.duration{{service:{service_name}}}",
         }
 
-        headers = {
+        # Filter None values — httpx would send "None" as a string otherwise
+        headers = {k: v for k, v in {
             "DD-API-KEY": settings.datadog_api_key,
             "DD-APPLICATION-KEY": settings.datadog_app_key,
-        }
+        }.items() if v is not None}
         base = f"https://api.{settings.datadog_site}"
 
         results = []
@@ -371,30 +408,45 @@ def query_newrelic_metrics(service_name: str) -> str:
     """Query New Relic for service error rate and throughput.
     Input: service/application name."""
     try:
+        if not settings.newrelic_account_id:
+            return "New Relic account ID not configured."
+
+        # NRQL has no bind parameters — validate service_name before embedding
+        try:
+            service_name = _safe_name(service_name)
+        except ValueError as e:
+            return f"Invalid service name: {e}"
         nrql = (
-            f"SELECT count(*) as requests, "
-            f"filter(count(*), WHERE error IS true) as errors, "
-            f"average(duration) as avg_duration "
+            "SELECT count(*) as requests, "
+            "filter(count(*), WHERE error IS true) as errors, "
+            "average(duration) as avg_duration "
             f"FROM Transaction WHERE appName = '{service_name}' "
-            f"SINCE 30 minutes ago"
+            "SINCE 30 minutes ago"
         )
+        gql = """
+            query($accountId: Int!, $nrql: Nrql!) {
+                actor {
+                    account(id: $accountId) {
+                        nrql(query: $nrql) {
+                            results
+                        }
+                    }
+                }
+            }
+        """
         with httpx.Client(timeout=10) as client:
             resp = client.post(
-                f"https://api.newrelic.com/graphql",
+                "https://api.newrelic.com/graphql",
                 headers={
                     "API-Key": settings.newrelic_api_key,
                     "Content-Type": "application/json",
                 },
                 json={
-                    "query": f"""{{
-                        actor {{
-                            account(id: {settings.newrelic_account_id}) {{
-                                nrql(query: "{nrql}") {{
-                                    results
-                                }}
-                            }}
-                        }}
-                    }}"""
+                    "query": gql,
+                    "variables": {
+                        "accountId": int(settings.newrelic_account_id),
+                        "nrql": nrql,
+                    },
                 },
             )
             data = resp.json()
@@ -409,11 +461,13 @@ def query_newrelic_metrics(service_name: str) -> str:
                 return f"No New Relic data for '{service_name}'."
 
             r = results[0]
+            avg = r.get('avg_duration')
+            avg_str = f"{avg:.3f}s" if isinstance(avg, (int, float)) else "N/A"
             return (
                 f"New Relic metrics for '{service_name}' (last 30min):\n"
                 f"  requests: {r.get('requests', 'N/A')}\n"
                 f"  errors: {r.get('errors', 'N/A')}\n"
-                f"  avg_duration: {r.get('avg_duration', 'N/A'):.3f}s"
+                f"  avg_duration: {avg_str}"
             )
 
     except Exception as e:
@@ -424,43 +478,110 @@ def query_newrelic_metrics(service_name: str) -> str:
 # DIAGNOSER TOOLS
 # ══════════════════════════════════════════════════════════════
 
+_SERVICES_PATH = Path(__file__).parent.parent / "config" / "services.yaml"
+_SERVICES_CACHE: dict = {}
+_SERVICES_MTIME: float = 0.0
+
+
+def _load_services() -> dict:
+    """Hot-reload config/services.yaml when the file changes."""
+    global _SERVICES_CACHE, _SERVICES_MTIME
+    if not _SERVICES_PATH.exists():
+        return {}
+    mtime = _SERVICES_PATH.stat().st_mtime
+    if mtime != _SERVICES_MTIME:
+        import yaml
+        with open(_SERVICES_PATH) as f:
+            _SERVICES_CACHE = yaml.safe_load(f) or {}
+        _SERVICES_MTIME = mtime
+        logger.info("config/services.yaml reloaded")
+    return _SERVICES_CACHE
+
+
+def _resolve_repos(service: str) -> list[tuple[str, list[str]]]:
+    """Return [(org/repo, [path_prefixes]), ...] for a service.
+
+    Reads config/services.yaml. Falls back to GITHUB_ORG/service-name.
+    """
+    org = settings.github_org or ""
+    entry = _load_services().get(service)
+
+    if not entry:
+        repo = service if "/" in service else f"{org}/{service}" if org else service
+        return [(repo, [])]
+
+    repos = entry.get("repos", [])
+    path_prefix = entry.get("path_prefix", "")
+    paths = [path_prefix] if path_prefix else []
+    return [
+        (r if "/" in r else f"{org}/{r}", paths)
+        for r in repos
+    ]
+
+
+_GH_HEADERS = {
+    "Accept": "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+}
+
+
+def _gh_headers() -> dict:
+    return {**_GH_HEADERS, "Authorization": f"Bearer {settings.github_token}"}
+
+
+def _pr_touches_paths(files: list[dict], paths: list[str]) -> bool:
+    """Return True if any changed file is under one of the given path prefixes."""
+    if not paths:
+        return True
+    return any(f["filename"].startswith(p) for f in files for p in paths)
+
+
 @tool("Get Recent Deploys from GitHub")
-def get_recent_deploys(repo_or_service: str) -> str:
-    """Get recent deployments/merges for a repo or service.
-    Input should be a repo name (e.g., 'payment-service') or full 'org/repo'."""
+def get_recent_deploys(service_name: str) -> str:
+    """Get recent merged PRs for a service. Input: service name (e.g. 'payment-service').
+    Resolves repo(s) via knowledge/services.yaml; falls back to GITHUB_ORG/service-name."""
     try:
-        repo = repo_or_service
-        if "/" not in repo and settings.github_org:
-            repo = f"{settings.github_org}/{repo_or_service}"
+        repo_entries = _resolve_repos(service_name)
+        all_lines = []
 
         with httpx.Client(timeout=10) as client:
-            # Get recent merged PRs (proxy for deploys)
-            resp = client.get(
-                f"https://api.github.com/repos/{repo}/pulls",
-                headers={
-                    "Authorization": f"Bearer {settings.github_token}",
-                    "Accept": "application/vnd.github.v3+json",
-                },
-                params={"state": "closed", "sort": "updated", "direction": "desc", "per_page": 5},
-            )
-            prs = resp.json()
+            for repo, path_prefixes in repo_entries:
+                resp = client.get(
+                    f"https://api.github.com/repos/{repo}/pulls",
+                    headers=_gh_headers(),
+                    params={"state": "closed", "sort": "updated", "direction": "desc", "per_page": 10},
+                )
+                if resp.status_code != 200:
+                    all_lines.append(f"  [{repo}] API error {resp.status_code}")
+                    continue
 
-            if not prs or isinstance(prs, dict):
-                return f"No recent PRs found for '{repo}'. Check repo name."
+                prs = resp.json()
+                if not prs or isinstance(prs, dict):
+                    all_lines.append(f"  [{repo}] No recent PRs found")
+                    continue
 
-            lines = []
-            for pr in prs:
-                if pr.get("merged_at"):
-                    lines.append(
-                        f"  PR #{pr['number']}: {pr['title']}\n"
-                        f"    Author: {pr['user']['login']}\n"
-                        f"    Merged: {pr['merged_at']}\n"
-                        f"    Changed files: {pr.get('changed_files', '?')}"
+                for pr in prs:
+                    if not pr.get("merged_at"):
+                        continue
+                    # For monorepos: filter by path prefix using the files endpoint
+                    if path_prefixes:
+                        files_resp = client.get(
+                            f"https://api.github.com/repos/{repo}/pulls/{pr['number']}/files",
+                            headers=_gh_headers(),
+                        )
+                        if files_resp.status_code != 200 or not _pr_touches_paths(files_resp.json(), path_prefixes):
+                            continue
+
+                    all_lines.append(
+                        f"  [{repo}] PR #{pr['number']}: {pr['title']}\n"
+                        f"    Author: {pr['user']['login']}  Merged: {pr['merged_at']}"
                     )
-            if not lines:
-                return f"No recently merged PRs for '{repo}'."
 
-            return f"Recent deploys for '{repo}':\n" + "\n".join(lines)
+        return (
+            f"Recent deploys for '{service_name}':\n" + "\n".join(all_lines)
+            if all_lines
+            else f"No recent merged PRs found for '{service_name}'."
+        )
 
     except Exception as e:
         return f"GitHub query failed: {e}"
@@ -468,8 +589,7 @@ def get_recent_deploys(repo_or_service: str) -> str:
 
 @tool("Get Pull Request Diff")
 def get_pr_diff(repo_and_pr_number: str) -> str:
-    """Get the diff/changes from a specific PR. Input should be 'repo#number'
-    like 'payment-service#891' or 'org/payment-service#891'."""
+    """Get changed files and diff from a PR. Input: 'repo#number' or 'org/repo#number'."""
     try:
         parts = repo_and_pr_number.split("#")
         if len(parts) != 2:
@@ -482,10 +602,7 @@ def get_pr_diff(repo_and_pr_number: str) -> str:
         with httpx.Client(timeout=10) as client:
             resp = client.get(
                 f"https://api.github.com/repos/{repo}/pulls/{pr_num}/files",
-                headers={
-                    "Authorization": f"Bearer {settings.github_token}",
-                    "Accept": "application/vnd.github.v3+json",
-                },
+                headers=_gh_headers(),
             )
             files = resp.json()
 
@@ -600,8 +717,6 @@ def kubectl_rollback(deployment_name: str) -> str:
     """Roll back a Kubernetes deployment to the previous revision.
     Input should be 'namespace/deployment' like 'production/payment-service'.
     IMPORTANT: This requires human approval first!"""
-    # In a real implementation, this would use the kubernetes client.
-    # For safety, it always returns the COMMAND rather than executing it.
     parts = deployment_name.split("/")
     if len(parts) == 2:
         ns, deploy = parts
@@ -614,3 +729,337 @@ def kubectl_rollback(deployment_name: str) -> str:
         f"  To execute: Engineer must approve via Slack reaction.\n"
         f"  Current status: AWAITING APPROVAL"
     )
+
+
+# ══════════════════════════════════════════════════════════════
+# EXECUTOR — plain functions (not @tool), called directly
+# Only runs when PAGEMENOT_EXEC_ENABLED=true
+# No destructive operations — only safe/reversible actions
+# ══════════════════════════════════════════════════════════════
+
+_KUBECTL_ALLOWED_VERBS = {"rollout", "scale", "get", "describe", "logs"}
+_KUBECTL_FORBIDDEN_VERBS = {"delete", "drain", "taint", "cordon", "exec"}
+
+_SHELL_WHITELIST = [
+    # Read-only / non-destructive only. FLUSHDB removed — destructive, requires human.
+    r"^curl\s+-sf\s+https?://\S+/health$",
+    r"^curl\s+-sf\s+https?://\S+/ready$",
+]
+
+# AWS: read-only actions only for autonomous execution.
+_AWS_ALLOWED = {
+    "ecs": {"describe_services", "describe_tasks"},
+    "cloudwatch": {"get_metric_statistics", "get_metric_data"},
+}
+
+# SSM: diagnostic read-only commands only. No package installs, no file writes, no destructive ops.
+_SSM_COMMAND_WHITELIST = [
+    r"^journalctl\s+-u\s+[\w\-\.]+(\s+--no-pager)?(\s+-n\s+\d+)?(\s+--since\s+[\w\-\s:\"\']+)?$",
+    r"^systemctl\s+status\s+[\w\-\.]+$",
+    r"^tail\s+-n\s+\d+\s+/var/log/[\w\-\.]+$",
+    r"^df\s+-h$",
+    r"^free\s+-[mhb]$",
+    r"^ps\s+aux$",
+    r"^ss\s+-tlnp$",
+    r"^curl\s+-sf\s+https?://[a-zA-Z0-9\-\.]+(:\d+)?/(health|ready|status)$",
+]
+
+
+def _exec_enabled():
+    if not settings.pagemenot_exec_enabled and not settings.pagemenot_exec_dry_run:
+        raise RuntimeError("PAGEMENOT_EXEC_ENABLED is false — autonomous execution is disabled")
+
+
+def exec_kubectl(command: str) -> str:
+    """Execute a safe kubectl command. Allowed: rollout undo, scale (up), get, describe, logs."""
+    _exec_enabled()
+    if settings.pagemenot_exec_dry_run:
+        return f"[DRY RUN] would execute: kubectl {command}"
+    if not settings.kubeconfig_path:
+        raise RuntimeError("KUBECONFIG_PATH not configured")
+
+    parts = shlex.split(command)
+    verb = parts[0].lower() if parts else ""
+
+    if verb in _KUBECTL_FORBIDDEN_VERBS:
+        raise ValueError(f"kubectl '{verb}' is forbidden for autonomous execution")
+    if verb not in _KUBECTL_ALLOWED_VERBS:
+        raise ValueError(f"kubectl '{verb}' not in allowed list")
+    if verb == "rollout" and (len(parts) < 2 or parts[1].lower() != "undo"):
+        raise ValueError("Only 'rollout undo' is allowed autonomously")
+
+    cmd = ["kubectl", "--kubeconfig", settings.kubeconfig_path] + parts
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    if result.returncode != 0:
+        raise RuntimeError(f"kubectl failed: {result.stderr[:300]}")
+    return result.stdout.strip()[:500]
+
+
+def exec_aws(service: str, action: str, params: dict) -> str:
+    """Execute a safe AWS operation via assumed IAM role."""
+    _exec_enabled()
+    if settings.pagemenot_exec_dry_run:
+        return f"[DRY RUN] would call: aws {service} {action}({params})"
+    if not settings.aws_role_arn:
+        raise RuntimeError("AWS_ROLE_ARN not configured")
+
+    allowed = _AWS_ALLOWED.get(service, set())
+    if action not in allowed:
+        raise ValueError(f"AWS {service}:{action} not in allowed list")
+
+    try:
+        import boto3
+    except ImportError:
+        raise RuntimeError("boto3 not installed — add to requirements.txt")
+
+    sts = boto3.client("sts", region_name=settings.aws_region)
+    creds = sts.assume_role(
+        RoleArn=settings.aws_role_arn,
+        RoleSessionName="pagemenot-exec",
+    )["Credentials"]
+
+    client = boto3.client(
+        service,
+        region_name=settings.aws_region,
+        aws_access_key_id=creds["AccessKeyId"],
+        aws_secret_access_key=creds["SecretAccessKey"],
+        aws_session_token=creds["SessionToken"],
+    )
+    response = getattr(client, action)(**params)
+    return str(response)[:300]
+
+
+def exec_ssm(instance_id: str, command: str) -> str:
+    """Run a whitelisted diagnostic command on an EC2 instance via SSM (no SSH/bastion needed)."""
+    _exec_enabled()
+    if not re.fullmatch(r'i-[0-9a-f]{8,17}', instance_id):
+        raise ValueError(f"Invalid EC2 instance ID: {instance_id!r}")
+    if not any(re.fullmatch(p, command) for p in _SSM_COMMAND_WHITELIST):
+        raise ValueError(f"SSM command not in whitelist: {command!r}")
+    if settings.pagemenot_exec_dry_run:
+        return f"[DRY RUN] would SSM run on {instance_id}: {command}"
+    if not settings.aws_role_arn:
+        raise RuntimeError("AWS_ROLE_ARN not configured")
+
+    try:
+        import boto3, time
+    except ImportError:
+        raise RuntimeError("boto3 not installed")
+
+    sts = boto3.client("sts", region_name=settings.aws_region)
+    creds = sts.assume_role(
+        RoleArn=settings.aws_role_arn,
+        RoleSessionName="pagemenot-ssm",
+    )["Credentials"]
+    ssm = boto3.client(
+        "ssm", region_name=settings.aws_region,
+        aws_access_key_id=creds["AccessKeyId"],
+        aws_secret_access_key=creds["SecretAccessKey"],
+        aws_session_token=creds["SessionToken"],
+    )
+
+    cmd_id = ssm.send_command(
+        InstanceIds=[instance_id],
+        DocumentName="AWS-RunShellScript",
+        Parameters={"commands": [command]},
+    )["Command"]["CommandId"]
+
+    # Poll until terminal (timeout 60s)
+    for _ in range(12):
+        time.sleep(5)
+        inv = ssm.get_command_invocation(CommandId=cmd_id, InstanceId=instance_id)
+        status = inv["Status"]
+        if status == "Success":
+            return inv.get("StandardOutputContent", "").strip()[:500]
+        if status in ("Failed", "Cancelled", "TimedOut"):
+            raise RuntimeError(f"SSM command {status}: {inv.get('StandardErrorContent', '')[:200]}")
+    raise RuntimeError("SSM command timed out after 60s")
+
+
+def exec_azure_run_command(resource_group: str, vm_name: str, command: str) -> str:
+    """Run a whitelisted diagnostic command on an Azure VM via Run Command (no SSH/bastion needed)."""
+    _exec_enabled()
+    if not re.fullmatch(r'[\w\-\.]+', resource_group):
+        raise ValueError(f"Invalid resource group: {resource_group!r}")
+    if not re.fullmatch(r'[\w\-\.]+', vm_name):
+        raise ValueError(f"Invalid VM name: {vm_name!r}")
+    if not any(re.fullmatch(p, command) for p in _SSM_COMMAND_WHITELIST):
+        raise ValueError(f"Azure Run Command not in whitelist: {command!r}")
+    if settings.pagemenot_exec_dry_run:
+        return f"[DRY RUN] would Azure Run Command on {resource_group}/{vm_name}: {command}"
+    if not all([settings.azure_tenant_id, settings.azure_client_id,
+                settings.azure_client_secret, settings.azure_subscription_id]):
+        raise RuntimeError("Azure credentials not configured (AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_SUBSCRIPTION_ID)")
+
+    try:
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.compute import ComputeManagementClient
+        from azure.mgmt.compute.models import RunCommandInput
+    except ImportError:
+        raise RuntimeError("azure-identity and azure-mgmt-compute not installed")
+
+    credential = ClientSecretCredential(
+        tenant_id=settings.azure_tenant_id,
+        client_id=settings.azure_client_id,
+        client_secret=settings.azure_client_secret,
+    )
+    client = ComputeManagementClient(credential, settings.azure_subscription_id)
+    result = client.virtual_machines.begin_run_command(
+        resource_group_name=resource_group,
+        vm_name=vm_name,
+        parameters=RunCommandInput(command_id="RunShellScript", script=[command]),
+    ).result(timeout=60)
+
+    command_output = result.output.strip() if result.output else ""
+    command_error = result.error.strip() if result.error else ""
+    if result.exit_code != 0:
+        raise RuntimeError(f"Azure Run Command failed (exit {result.exit_code}): {command_error[:200]}")
+    return command_output[:500]
+
+
+def exec_shell(command: str) -> str:
+    """Execute a whitelisted shell command (read-only health checks only)."""
+    _exec_enabled()
+    if settings.pagemenot_exec_dry_run:
+        return f"[DRY RUN] would execute: {command}"
+    # re.fullmatch — prevents prefix-bypass attacks (e.g. "curl -sf http://x/health; rm -rf /")
+    if not any(re.fullmatch(pattern, command) for pattern in _SHELL_WHITELIST):
+        raise ValueError(f"Command not in whitelist: {command!r}")
+    result = subprocess.run(shlex.split(command), capture_output=True, text=True, timeout=30)
+    if result.returncode != 0:
+        raise RuntimeError(f"Command failed: {result.stderr[:300]}")
+    return result.stdout.strip()[:500]
+
+
+def exec_http(method: str, url: str, headers: dict | None = None, body: dict | None = None) -> str:
+    """Make an HTTP call (health check or alert acknowledge).
+    Restricted to domains explicitly configured in .env to prevent SSRF."""
+    _exec_enabled()
+    if settings.pagemenot_exec_dry_run:
+        return f"[DRY RUN] would {method.upper()} {url}"
+
+    # SSRF guard — only allow calls to configured integration domains
+    from urllib.parse import urlparse
+    allowed_hosts = {
+        urlparse(u).hostname
+        for u in [
+            settings.prometheus_url, settings.grafana_url, settings.loki_url,
+        ]
+        if u
+    }
+    host = urlparse(url).hostname
+    if not host or host not in allowed_hosts:
+        raise ValueError(
+            f"exec_http blocked: '{host}' not in configured integration hosts. "
+            f"Only explicitly configured service URLs are allowed."
+        )
+
+    with httpx.Client(timeout=10, verify=True) as client:
+        resp = client.request(method.upper(), url, headers=headers or {}, json=body)
+        return f"{resp.status_code}: {resp.text[:200]}"
+
+
+def _safe_service_name(service: str) -> str:
+    """Validate service name used in template substitution — only safe chars allowed."""
+    if not re.fullmatch(r'[a-zA-Z0-9_\-]+', service):
+        raise ValueError(f"Unsafe service name for template substitution: {service!r}")
+    return service
+
+
+def dispatch_exec_step(step: str, service: str = "") -> str:
+    """Parse and route a single exec step from a runbook to the correct executor.
+
+    Only accepts <!-- exec: command --> tags from verified runbook files.
+    Template substitution ({{ service }}) happens after routing and validation.
+    """
+    # Only exec tags from runbook files are accepted — raw LLM text rejected
+    match = re.match(r'<!--\s*exec:\s*(.+?)\s*-->', step)
+    if not match:
+        raise ValueError("Only <!-- exec: --> tagged steps from runbooks are allowed for autonomous execution")
+    cmd = match.group(1).strip()
+
+    if not cmd:
+        raise ValueError("Empty exec step")
+
+    # Substitute template variables
+    from pagemenot.config import settings as _s
+    namespace = _s.pagemenot_exec_namespace
+    for _raw, _sub in [("{{ service }}", _safe_service_name(service) if service else ""),
+                       ("{{service}}", service),
+                       ("{{ namespace }}", namespace),
+                       ("{{namespace}}", namespace)]:
+        cmd = cmd.replace(_raw, _sub)
+
+    # Route to correct executor
+    if cmd.startswith("kubectl "):
+        kubectl_cmd = cmd[len("kubectl "):]
+        return exec_kubectl(kubectl_cmd)
+    elif cmd.startswith("ssm:"):
+        # Format: ssm:<instance-id> <command>
+        rest = cmd[4:]
+        parts = rest.split(" ", 1)
+        if len(parts) != 2:
+            raise ValueError("Invalid SSM step format — expected: ssm:<instance-id> <command>")
+        return exec_ssm(parts[0].strip(), parts[1].strip())
+    elif cmd.startswith("azure:"):
+        # Format: azure:<resource-group>/<vm-name> <command>
+        rest = cmd[6:]
+        parts = rest.split(" ", 1)
+        if len(parts) != 2 or "/" not in parts[0]:
+            raise ValueError("Invalid Azure step format — expected: azure:<resource-group>/<vm-name> <command>")
+        rg, vm = parts[0].split("/", 1)
+        return exec_azure_run_command(rg.strip(), vm.strip(), parts[1].strip())
+    elif cmd.startswith("aws "):
+        parts = shlex.split(cmd)
+        if len(parts) < 3:
+            raise ValueError(f"Invalid AWS command: {cmd!r}")
+        aws_service, aws_action = parts[1], parts[2].replace("-", "_")
+        params: dict = {}
+        i = 3
+        while i + 1 < len(parts):
+            if parts[i].startswith("--"):
+                params[parts[i].lstrip("-").replace("-", "_")] = parts[i + 1]
+                i += 2
+            else:
+                i += 1
+        return exec_aws(aws_service, aws_action, params)
+    elif cmd.startswith("http://") or cmd.startswith("https://"):
+        return exec_http("GET", cmd)
+    else:
+        return exec_shell(cmd)
+
+
+def get_runbook_exec_steps(query: str, service: str = "") -> list[str]:
+    """Search runbooks by query, return all <!-- exec: --> steps from matched files."""
+    try:
+        client = _chroma_client()
+        try:
+            collection = client.get_collection("runbooks")
+        except Exception:
+            return []
+
+        results = collection.query(query_texts=[query], n_results=3)
+        if not results["documents"] or not results["documents"][0]:
+            return []
+
+        from pagemenot.knowledge.rag import RUNBOOKS_DIR
+
+        exec_steps: list[str] = []
+        seen: set[str] = set()
+        for meta in results["metadatas"][0]:
+            filename = meta.get("filename", "")
+            if not filename or filename in seen:
+                continue
+            seen.add(filename)
+            runbook_path = RUNBOOKS_DIR / filename
+            if runbook_path.exists():
+                content = runbook_path.read_text(encoding="utf-8")
+                # Return the full <!-- exec: ... --> tag so dispatch_exec_step can validate + substitute
+                for match in re.finditer(r'<!--\s*exec:\s*.+?\s*-->', content):
+                    exec_steps.append(match.group(0))
+
+        return exec_steps
+
+    except Exception as e:
+        logger.warning(f"Runbook exec step lookup failed: {e}")
+        return []

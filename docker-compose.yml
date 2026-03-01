@@ -12,6 +12,7 @@ services:
       - ./knowledge/postmortems:/app/knowledge/postmortems:ro
       - ./knowledge/runbooks:/app/knowledge/runbooks:ro
       - chromadata:/app/data/chroma
+      - ./kubeconfig-minikube.yaml:/app/kubeconfig:ro
 
 volumes:
   chromadata:

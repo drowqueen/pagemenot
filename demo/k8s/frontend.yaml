@@ -1,0 +1,112 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: frontend-html
+  namespace: demo
+data:
+  index.html: |
+    <!DOCTYPE html>
+    <html>
+    <head><title>Demo Shop</title></head>
+    <body>
+      <h1>Demo Shop</h1>
+      <p>Backend: <a href="/api/orders">/api/orders</a></p>
+    </body>
+    </html>
+  default.conf: |
+    log_format json_log '{"time":"$time_iso8601","remote_addr":"$remote_addr",'
+      '"method":"$request_method","uri":"$request_uri","status":$status,'
+      '"bytes":$body_bytes_sent,"service":"frontend","pod":"$hostname"}';
+    access_log /dev/stdout json_log;
+    error_log  /dev/stderr;
+
+    upstream backend { server backend:8000; }
+
+    server {
+      listen 80;
+
+      location /api/ {
+        proxy_pass http://backend;
+        proxy_set_header Host $host;
+      }
+
+      location /health {
+        return 200 '{"status":"ok"}';
+        add_header Content-Type application/json;
+      }
+
+      location / {
+        root /usr/share/nginx/html;
+        index index.html;
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: demo
+  labels:
+    app: frontend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+    spec:
+      containers:
+        - name: frontend
+          image: nginx:1.25-alpine
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - name: html
+              mountPath: /usr/share/nginx/html
+            - name: conf
+              mountPath: /etc/nginx/conf.d/default.conf
+              subPath: default.conf
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+      volumes:
+        - name: html
+          configMap:
+            name: frontend-html
+            items:
+              - key: index.html
+                path: index.html
+        - name: conf
+          configMap:
+            name: frontend-html
+            items:
+              - key: default.conf
+                path: default.conf
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: demo
+  labels:
+    app: frontend
+spec:
+  selector:
+    app: frontend
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80

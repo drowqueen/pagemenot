@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loadgen
+  namespace: demo
+  labels:
+    app: loadgen
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: loadgen
+  template:
+    metadata:
+      labels:
+        app: loadgen
+    spec:
+      containers:
+        - name: loadgen
+          image: curlimages/curl:8.5.0
+          command:
+            - sh
+            - -c
+            - |
+              ENDPOINTS="
+              GET http://frontend/api/orders
+              GET http://frontend/api/payments
+              GET http://frontend/api/inventory
+              POST http://frontend/api/orders
+              GET http://frontend/health
+              "
+              while true; do
+                METHOD=$(echo "$ENDPOINTS" | grep -v '^$' | shuf -n1 | awk '{print $1}')
+                URL=$(echo "$ENDPOINTS"    | grep -v '^$' | shuf -n1 | awk '{print $2}')
+                if [ "$METHOD" = "POST" ]; then
+                  curl -sf -X POST "$URL" -H "Content-Type: application/json" -d '{}' -o /dev/null || true
+                else
+                  curl -sf "$URL" -o /dev/null || true
+                fi
+                sleep $(awk 'BEGIN{srand(); printf "%.2f", 0.2 + rand()*0.8}')
+              done
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi

@@ -20,14 +20,17 @@ def _build_llm() -> LLM:
         return LLM(model=f"ollama/{settings.llm_model}", base_url=settings.ollama_url)
     elif settings.llm_provider == "anthropic":
         return LLM(model=f"anthropic/{settings.llm_model}", api_key=settings.anthropic_api_key)
+    elif settings.llm_provider == "gemini":
+        return LLM(model=f"gemini/{settings.llm_model}", api_key=settings.gemini_api_key)
     else:
         return LLM(model=f"openai/{settings.llm_model}", api_key=settings.openai_api_key)
 
 
-def build_crew() -> Crew:
-    """Auto-build triage crew from whatever integrations are available."""
+def build_triage_crew(alert_summary: str) -> Crew:
+    """Build a complete triage crew for a specific incident and return it ready to kickoff."""
     llm = _build_llm()
     available = get_available_tools()
+    _verbose = logger.isEnabledFor(logging.DEBUG)
 
     monitor = Agent(
         role="Senior SRE Monitoring Specialist",
@@ -43,7 +46,7 @@ def build_crew() -> Crew:
         ),
         tools=available["monitor"],
         llm=llm,
-        verbose=True,
+        verbose=_verbose,
         max_iter=10,
         allow_delegation=False,
     )
@@ -63,7 +66,7 @@ def build_crew() -> Crew:
         ),
         tools=available["diagnoser"],
         llm=llm,
-        verbose=True,
+        verbose=_verbose,
         max_iter=10,
         allow_delegation=False,
     )
@@ -83,26 +86,10 @@ def build_crew() -> Crew:
         ),
         tools=available["remediator"],
         llm=llm,
-        verbose=True,
+        verbose=_verbose,
         max_iter=8,
         allow_delegation=False,
     )
-
-    return Crew(
-        agents=[monitor, diagnoser, remediator],
-        process=Process.sequential,
-        verbose=True,
-        memory=True,
-    )
-
-
-def build_triage_tasks(
-    alert_summary: str,
-    monitor_agent: Agent,
-    diagnoser_agent: Agent,
-    remediator_agent: Agent,
-) -> list[Task]:
-    """Build triage tasks for a specific incident."""
 
     monitor_task = Task(
         description=(
@@ -121,7 +108,7 @@ def build_triage_tasks(
             "- Alert context\n"
             "- Pre-incident anomalies"
         ),
-        agent=monitor_agent,
+        agent=monitor,
     )
 
     diagnose_task = Task(
@@ -142,7 +129,7 @@ def build_triage_tasks(
             "- Similar past incidents (if found)\n"
             "- What changed (deploy, config, traffic)"
         ),
-        agent=diagnoser_agent,
+        agent=diagnoser,
         context=[monitor_task],
     )
 
@@ -164,8 +151,37 @@ def build_triage_tasks(
             "- Postmortem draft (3 sentences)\n"
             "- Estimated time to resolution"
         ),
-        agent=remediator_agent,
+        agent=remediator,
         context=[monitor_task, diagnose_task],
     )
 
-    return [monitor_task, diagnose_task, remediate_task]
+    # Configure memory embedder per provider.
+    # Grok/Ollama have no embedding API — memory disabled for those.
+    embedder_config = None
+    if settings.llm_provider == "openai" and settings.openai_api_key:
+        embedder_config = {
+            "provider": "openai",
+            "config": {"model": "text-embedding-3-small", "api_key": settings.openai_api_key},
+        }
+    elif settings.llm_provider == "anthropic" and settings.anthropic_api_key:
+        # Anthropic has no embedding API — fall back to OpenAI if key available, else skip
+        if settings.openai_api_key:
+            embedder_config = {
+                "provider": "openai",
+                "config": {"model": "text-embedding-3-small", "api_key": settings.openai_api_key},
+            }
+    # gemini/ollama: no ChromaDB-compatible embedding API — memory stays disabled
+
+    memory_enabled = embedder_config is not None
+
+    crew_kwargs: dict = {
+        "agents": [monitor, diagnoser, remediator],
+        "tasks": [monitor_task, diagnose_task, remediate_task],
+        "process": Process.sequential,
+        "verbose": _verbose,
+        "memory": memory_enabled,
+    }
+    if embedder_config:
+        crew_kwargs["embedder"] = embedder_config
+
+    return Crew(**crew_kwargs)

@@ -15,13 +15,57 @@ Usage:
   python scripts/simulate_incident.py --random
 """
 
-import sys
+import hashlib
+import hmac
 import json
+import os
 import random
+import sys
 import httpx
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
+
+# Load .env so webhook secrets are available without exporting to shell
+_env_file = Path(__file__).parent.parent / ".env"
+if _env_file.exists():
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(_env_file, override=False)
+    except ImportError:
+        pass
 
 PAGEMENOT_URL = "http://localhost:8080"
+
+# Webhook HMAC secrets — read from env (same vars as pagemenot config)
+_SECRETS = {
+    "pagerduty":    os.getenv("WEBHOOK_SECRET_PAGERDUTY", ""),
+    "grafana":      os.getenv("WEBHOOK_SECRET_GRAFANA", ""),
+    "alertmanager": os.getenv("WEBHOOK_SECRET_ALERTMANAGER", ""),
+    "datadog":      os.getenv("WEBHOOK_SECRET_DATADOG", ""),
+    "newrelic":     os.getenv("WEBHOOK_SECRET_NEWRELIC", ""),
+    "generic":      os.getenv("WEBHOOK_SECRET_GENERIC", ""),
+}
+
+_SIG_HEADERS = {
+    "pagerduty":    ("X-PagerDuty-Signature", "v1="),
+    "grafana":      ("X-Grafana-Signature", ""),
+    "alertmanager": ("X-Alertmanager-Token", ""),
+    "datadog":      ("X-Datadog-Signature", ""),
+    "newrelic":     ("X-NR-Webhook-Token", ""),
+    "generic":      ("X-Pagemenot-Signature", "sha256="),
+}
+
+
+def _sign(source: str, body: bytes) -> dict:
+    """Return extra headers with HMAC signature if secret is configured."""
+    secret = _SECRETS.get(source, "")
+    if not secret:
+        return {}
+    header_name, prefix = _SIG_HEADERS.get(source, ("", ""))
+    if not header_name:
+        return {}
+    sig = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    return {header_name: f"{prefix}{sig}"}
 
 
 # ══════════════════════════════════════════════════════════════
@@ -266,7 +310,7 @@ def send_alert(scenario_name: str):
     payloads = {
         "pagerduty": (
             "/webhooks/pagerduty",
-            {"messages": [{"event": "incident.trigger", "incident": {
+            {"messages": [{"event": "incident.triggered", "incident": {
                 **pd,
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "assignments": [{"summary": "oncall-sre"}],
@@ -323,7 +367,13 @@ def send_alert(scenario_name: str):
     print(f"  → POST {PAGEMENOT_URL}{path}")
 
     try:
-        resp = httpx.post(f"{PAGEMENOT_URL}{path}", json=payload, timeout=5.0)
+        body = json.dumps(payload).encode()
+        resp = httpx.post(
+            f"{PAGEMENOT_URL}{path}",
+            content=body,
+            headers={"Content-Type": "application/json", **_sign(source, body)},
+            timeout=5.0,
+        )
         print(f"\nAccepted ({resp.status_code}) — check Slack")
     except httpx.ConnectError:
         print(f"\nCannot reach Pagemenot at {PAGEMENOT_URL}")

@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     llm_model: str = "gpt-4o"
     openai_api_key: Optional[str] = None
     anthropic_api_key: Optional[str] = None
+    gemini_api_key: Optional[str] = None
     ollama_url: Optional[str] = None
 
     # ── Vector store (embedded ChromaDB) ──────────────────
@@ -44,25 +45,54 @@ class Settings(BaseSettings):
     newrelic_account_id: Optional[str] = None
     # Alerting / on-call
     pagerduty_api_key: Optional[str] = None
+    pagerduty_from_email: Optional[str] = None  # requester email for PD API; auto-discovered if unset
     opsgenie_api_key: Optional[str] = None
+    # Jira Service Management
+    jira_sm_url: Optional[str] = None
+    jira_sm_email: Optional[str] = None
+    jira_sm_api_token: Optional[str] = None
+    jira_sm_project_key: Optional[str] = None
+    jira_sm_issue_type: str = "Service Request"  # fallback, not used when service desk API is available
+    jira_sm_service_desk_id: Optional[str] = None   # auto-discovered if not set
+    jira_sm_request_type_id: Optional[str] = None   # auto-discovered if not set
     # Source control / deploys
     github_token: Optional[str] = None
     github_org: Optional[str] = None
     # Execution
     kubeconfig_path: Optional[str] = None
+    pagemenot_exec_namespace: str = "production"  # default k8s namespace for runbook {{ namespace }}
+    pagemenot_webhook_rate_limit: str = "60/minute"  # slowapi rate limit string for all webhook endpoints
+    pagemenot_exec_enabled: bool = True         # master switch for autonomous execution
+    pagemenot_exec_dry_run: bool = True         # dry run by default — set false for real execution
+    pagemenot_approval_gate: bool = False       # require human approval for [NEEDS APPROVAL] steps; false = execute automatically
+    pagemenot_oncall_channel: Optional[str] = None  # channel to ping on critical escalations
+    pagemenot_autoapprove_delay: int = 900      # seconds before auto-executing [AUTO-SAFE] steps
+    pagemenot_dedup_ttl_short: int = 600        # dedup window for critical/high (seconds)
+    pagemenot_dedup_ttl_long: int = 1800        # dedup window for medium/low (seconds)
+    # Approval state store
+    redis_url: Optional[str] = None  # e.g. redis://localhost:6379/0 — for approval state persistence across restarts
+
+    # Webhook HMAC secrets (optional — skip verification if not set, warn at startup)
+    webhook_secret_pagerduty: Optional[str] = None
+    webhook_secret_grafana: Optional[str] = None
+    webhook_secret_alertmanager: Optional[str] = None
+    webhook_secret_datadog: Optional[str] = None
+    webhook_secret_opsgenie: Optional[str] = None
+    webhook_secret_newrelic: Optional[str] = None
+    webhook_secret_generic: Optional[str] = None
+
+    # External LLM compliance gate
+    llm_external_enterprise_confirmed: bool = False  # must be true to use non-Ollama LLMs
+    # Cloud execution credentials
+    aws_role_arn: Optional[str] = None                    # IAM role pagemenot assumes for AWS ops
+    aws_region: str = "us-east-1"
+    google_application_credentials: Optional[str] = None  # path to GCP service account JSON
+    azure_tenant_id: Optional[str] = None
+    azure_client_id: Optional[str] = None
+    azure_client_secret: Optional[str] = None
+    azure_subscription_id: Optional[str] = None
 
     log_level: str = "INFO"
-
-    @property
-    def crewai_llm_string(self) -> str:
-        """Return CrewAI-compatible LLM string."""
-        if self.llm_provider == "openai":
-            return f"openai/{self.llm_model}"
-        elif self.llm_provider == "anthropic":
-            return f"anthropic/{self.llm_model}"
-        elif self.llm_provider == "ollama":
-            return f"ollama/{self.llm_model}"
-        return self.llm_model
 
     @property
     def enabled_integrations(self) -> list[str]:

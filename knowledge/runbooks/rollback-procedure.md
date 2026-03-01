@@ -6,18 +6,14 @@
 ## Steps
 
 1. Confirm the issue correlates with a recent deploy:
-   - Check deploy history: `kubectl rollout history deployment/<service> -n production`
+   - Check deploy history: `kubectl rollout history deployment/<service> -n {{ namespace }}`
    - Compare error start time with deploy time
 
 2. Initiate rollback:
-   ```
-   kubectl rollout undo deployment/<service> -n production
-   ```
+   <!-- exec: kubectl rollout undo deployment/{{ service }} -n {{ namespace }} -->
 
 3. Verify rollback:
-   ```
-   kubectl rollout status deployment/<service> -n production
-   ```
+   <!-- exec: kubectl rollout status deployment/{{ service }} -n {{ namespace }} -->
 
 4. Confirm error rate returns to baseline in monitoring
 
