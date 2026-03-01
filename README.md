@@ -124,7 +124,7 @@ Set vars in `.env` → integration activates. Unset → mock fallback.
 | Deploys | GitHub | `GITHUB_TOKEN` + `GITHUB_ORG` |
 | Execution | Kubernetes | `KUBECONFIG_PATH` |
 | Ticketing | Jira Service Management | `JIRA_SM_URL` + `JIRA_SM_EMAIL` + `JIRA_SM_API_TOKEN` |
-| Metrics / Logs | Azure Monitor / Log Analytics | Not yet implemented — requires Azure SDK + service principal |
+| Alerts | Azure Monitor | Action Group → Webhook → `/webhooks/generic` |
 
 ---
 
@@ -137,8 +137,8 @@ Set vars in `.env` → integration activates. Unset → mock fallback.
 | Datadog | `POST /webhooks/datadog` |
 | New Relic | `POST /webhooks/newrelic` |
 | PagerDuty | `POST /webhooks/pagerduty` |
-| AWS CloudWatch | SNS → Lambda → `POST /webhooks/generic` |
-| GCP Alerting | Pub/Sub → Cloud Run → `POST /webhooks/generic` |
+| AWS CloudWatch | SNS → `POST /webhooks/generic` (via Lambda or SNS HTTP subscription) |
+| GCP Alerting | Alerting policy → Webhook notification channel → `POST /webhooks/generic` |
 | Azure Monitor | Action Group → Webhook → `POST /webhooks/generic` |
 | OpsGenie / anything else | `POST /webhooks/generic` |
 
