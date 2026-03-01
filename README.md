@@ -25,25 +25,34 @@ Self-hosted AI SRE. Alert fires → 3-agent crew triages → root cause + remedi
 ## How it works
 
 ```
-Alert (PagerDuty / Grafana / Datadog / New Relic / Alertmanager / Slack)
+Alert (Grafana / Alertmanager / PagerDuty / Datadog / New Relic / Slack)
   │
   ▼
-Dedup + severity gate
+Dedup + severity gate  ──── duplicate or low severity? → suppress (1-line note)
   │
   ▼
-┌─────────────────────────────────────────────┐
-│  MonitorAgent      DiagnoserAgent     RemediatorAgent  │
-│  Prometheus        GitHub deploys     Runbook RAG       │
-│  Grafana           PR diffs           kubectl / AWS     │
-│  Loki              Past incidents     ⚠ Human gate      │
-│  Datadog / NR      (ChromaDB)                           │
-└─────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│  MonitorAgent         DiagnoserAgent      RemediatorAgent │
+│  Prometheus metrics   GitHub PR diffs     Runbook RAG     │
+│  Grafana dashboards   Deploy history      kubectl exec    │
+│  Loki logs            Past incidents      AWS read APIs   │
+│  Datadog / NR         (ChromaDB)          Human gate      │
+└─────────────────────────────────────────────────────────┘
   │
-  ├─ Runbook match + exec enabled → execute steps → ✅ auto-resolved → Slack
-  └─ No match / exec disabled    → escalate → Slack thread + on-call ping
+  ▼
+Runbook matched + exec enabled?
+  │
+  ├─ YES → execute <!-- exec: --> steps against real cluster
+  │           all succeed? → ✅ auto-resolved → Slack only, done
+  │           any fail?    → escalate with execution log
+  │
+  └─ NO  → escalate
+             #alerts channel  — triage thread + root cause + Jira ticket
+             #escalated channel — loud ping + PagerDuty incident URL
+             PagerDuty — pages on-call human (last resort)
 ```
 
-No integrations configured → mock layer activates. Crew still runs.
+No integrations configured → mock layer activates. Crew still runs end-to-end.
 
 ---
 
@@ -169,17 +178,40 @@ Restart the container → auto-ingested into ChromaDB. No reindex command needed
 
 The crew searches both collections during every triage. More runbooks = better remediation suggestions.
 
-**Runbook exec tags** — mark safe steps for autonomous execution:
+**Runbook format** — drop any markdown file with this structure:
 
 ```markdown
-## Steps
-1. Check pod status:
-   <!-- exec: kubectl get pods -n production -l app={{ service }} -->
-2. Roll back last deploy:
-   <!-- exec: kubectl rollout undo deployment/{{ service }} -n production -->
+# Service Name Issue Title
+
+## Symptoms
+- What firing alerts look like
+
+## Diagnosis
+1. What to check first
+
+## Remediation
+
+### Step 1 — Check pods
+<!-- exec: kubectl get pods -n {{ namespace }} -l app={{ service }} -->
+
+### Step 2 — Roll back
+<!-- exec: kubectl rollout undo deployment/{{ service }} -n {{ namespace }} -->
+
+### Step 3 — Verify
+<!-- exec: kubectl rollout status deployment/{{ service }} -n {{ namespace }} -->
+
+## Escalate if
+- Conditions that require human intervention
 ```
 
-`{{ service }}` is replaced with the detected service name at runtime. Only `<!-- exec: -->` tags run — never free-form LLM text.
+**Template variables** substituted at runtime:
+
+| Variable | Value |
+|----------|-------|
+| `{{ service }}` | detected service name from the alert |
+| `{{ namespace }}` | `PAGEMENOT_EXEC_NAMESPACE` (default: `production`) |
+
+Only `<!-- exec: -->` tags run — never free-form LLM text. Tags are extracted from runbook files before any LLM sees them.
 
 ---
 
