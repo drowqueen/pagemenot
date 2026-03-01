@@ -98,11 +98,11 @@ python scripts/simulate_incident.py payment-500s
 
 | Provider | `.env` vars | Notes |
 |----------|------------|-------|
-| Ollama (self-hosted) | `OLLAMA_URL` | Nothing leaves your network |
+| [Ollama](https://ollama.com) (self-hosted) | `OLLAMA_URL` | Nothing leaves your network |
 | OpenAI Enterprise | `OPENAI_API_KEY` + `LLM_EXTERNAL_ENTERPRISE_CONFIRMED=true` | Requires signed DPA |
 | Anthropic / Gemini / OpenAI (standard) | API key + `LLM_EXTERNAL_ENTERPRISE_CONFIRMED=true` | Dev/test only |
 
-> **⛔ DATA PRIVACY** — Agents send metrics, log snippets, PR diffs, and runbook text to the LLM. Standard API tiers may use your data for training. Use Ollama for production or confirm a zero-retention DPA with your provider.
+> **⛔ DATA PRIVACY** — Agents send metrics, log snippets, PR diffs, and runbook text to the LLM. Standard API tiers may use your data for training. Use local Ollama for production or confirm a zero-retention DPA with your provider.
 
 ---
 
@@ -124,6 +124,7 @@ Set vars in `.env` → integration activates. Unset → mock fallback.
 | Deploys | GitHub | `GITHUB_TOKEN` + `GITHUB_ORG` |
 | Execution | Kubernetes | `KUBECONFIG_PATH` |
 | Ticketing | Jira Service Management | `JIRA_SM_URL` + `JIRA_SM_EMAIL` + `JIRA_SM_API_TOKEN` |
+| Metrics / Logs | Azure Monitor / Log Analytics | Not yet implemented — requires Azure SDK + service principal |
 
 ---
 
@@ -138,6 +139,7 @@ Set vars in `.env` → integration activates. Unset → mock fallback.
 | PagerDuty | `POST /webhooks/pagerduty` |
 | AWS CloudWatch | SNS → Lambda → `POST /webhooks/generic` |
 | GCP Alerting | Pub/Sub → Cloud Run → `POST /webhooks/generic` |
+| Azure Monitor | Action Group → Webhook → `POST /webhooks/generic` |
 | OpsGenie / anything else | `POST /webhooks/generic` |
 
 Set `WEBHOOK_SECRET_<SOURCE>` to enable HMAC verification per source. Unset = warn and accept.
