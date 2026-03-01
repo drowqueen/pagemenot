@@ -132,28 +132,7 @@ Set vars in `.env` → integration activates. Unset → mock fallback.
 
 ### `config/services.yaml`
 
-Maps service names to GitHub repos. Safe to commit — no secrets. Hot-reloaded on change.
-
-Default (no entry needed): `GITHUB_ORG/service-name`.
-
-```yaml
-# Repo name differs from service name
-payment-service:
-  repos:
-    - myorg/payments
-
-# Monorepo — only PRs touching this path are included
-checkout-service:
-  repos:
-    - myorg/platform
-  path_prefix: services/checkout/
-
-# Multiple repos
-api-gateway:
-  repos:
-    - myorg/api-gateway
-    - myorg/gateway-plugins
-```
+Maps service names to GitHub repos for deploy correlation. Safe to commit — no secrets. Hot-reloaded on change. See the file for annotated examples (name mismatch, monorepo, multi-repo).
 
 ---
 
