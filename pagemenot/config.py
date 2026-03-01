@@ -46,6 +46,11 @@ class Settings(BaseSettings):
     # Alerting / on-call
     pagerduty_api_key: Optional[str] = None
     opsgenie_api_key: Optional[str] = None
+    # Jira Service Management
+    jira_sm_url: Optional[str] = None
+    jira_sm_email: Optional[str] = None
+    jira_sm_api_token: Optional[str] = None
+    jira_sm_project_key: Optional[str] = None
     # Source control / deploys
     github_token: Optional[str] = None
     github_org: Optional[str] = None
