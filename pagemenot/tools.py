@@ -478,19 +478,23 @@ def query_newrelic_metrics(service_name: str) -> str:
 # DIAGNOSER TOOLS
 # ══════════════════════════════════════════════════════════════
 
-_SERVICES_REGISTRY: dict | None = None
+_SERVICES_REGISTRY: dict = {}
+_SERVICES_REGISTRY_MTIME: float = 0.0
 _SERVICES_REGISTRY_PATH = Path(__file__).parent.parent / "knowledge" / "services.yaml"
 
 
 def _load_services_registry() -> dict:
-    global _SERVICES_REGISTRY
-    if _SERVICES_REGISTRY is None:
-        if _SERVICES_REGISTRY_PATH.exists():
-            import yaml
-            with open(_SERVICES_REGISTRY_PATH) as f:
-                _SERVICES_REGISTRY = yaml.safe_load(f) or {}
-        else:
-            _SERVICES_REGISTRY = {}
+    """Load (or hot-reload) knowledge/services.yaml. Re-reads only when file changes."""
+    global _SERVICES_REGISTRY, _SERVICES_REGISTRY_MTIME
+    if not _SERVICES_REGISTRY_PATH.exists():
+        return {}
+    mtime = _SERVICES_REGISTRY_PATH.stat().st_mtime
+    if mtime != _SERVICES_REGISTRY_MTIME:
+        import yaml
+        with open(_SERVICES_REGISTRY_PATH) as f:
+            _SERVICES_REGISTRY = yaml.safe_load(f) or {}
+        _SERVICES_REGISTRY_MTIME = mtime
+        logger.info("services.yaml reloaded (%d entries)", len(_SERVICES_REGISTRY.get("services", {})))
     return _SERVICES_REGISTRY
 
 
@@ -498,20 +502,27 @@ def _resolve_repos(service: str) -> list[tuple[str, list[str]]]:
     """Return [(org/repo, [path_prefixes]), ...] for a service name.
 
     Lookup order:
-    1. knowledge/services.yaml entry
-    2. GITHUB_ORG/service-name fallback
+    1. knowledge/services.yaml services.<name> entry
+    2. GITHUB_ORG/service-name fallback (default_github_org in yaml takes priority over env)
     """
     registry = _load_services_registry()
-    entry = registry.get(service, {})
-    repos = entry.get("repos", [])
-    paths = entry.get("paths", [])
+    org = registry.get("default_github_org") or settings.github_org or ""
+    services = registry.get("services", {})
+    entries = services.get(service, [])
 
-    if not repos:
-        # Fallback: assume repo name matches service name
-        repo = service if "/" in service else f"{settings.github_org}/{service}" if settings.github_org else service
+    if not entries:
+        # Zero-config fallback: service name == repo name
+        repo = service if "/" in service else f"{org}/{service}" if org else service
         return [(repo, [])]
 
-    return [(r if "/" in r else f"{settings.github_org}/{r}", paths) for r in repos]
+    result = []
+    for entry in entries:
+        repo = entry.get("repo", "")
+        if "/" not in repo and org:
+            repo = f"{org}/{repo}"
+        paths = [entry["path_prefix"]] if "path_prefix" in entry else []
+        result.append((repo, paths))
+    return result
 
 
 _GH_HEADERS = {

@@ -1,34 +1,29 @@
-# Service → GitHub repo mapping
+# Service → GitHub repo mapping for DiagnoserAgent deploy correlation.
 #
-# Used by DiagnoserAgent to find recent deploys and PR diffs.
-# Without this file, pagemenot falls back to GITHUB_ORG/service-name.
+# Hot-reloaded on change — no restart required.
+# Without an entry, pagemenot falls back to: default_github_org/service-name
 #
-# Fields:
-#   repos:  list of org/repo strings (required)
-#   paths:  path prefixes to filter PRs in a monorepo (optional)
-#           Only PRs touching files under these paths are included.
-#
-# Examples:
+# default_github_org: myorg   # overrides GITHUB_ORG env var if set
 
-# Service with its own repo (name matches)
-# payment-service:
-#   repos:
-#     - myorg/payment-service
+services:
+  # Repo name matches service name → no entry needed (zero config)
 
-# Service in a monorepo
-# checkout-service:
-#   repos:
-#     - myorg/platform
-#   paths:
-#     - services/checkout/
+  # Repo name differs from service name:
+  # payment-service:
+  #   - repo: myorg/payments-gateway
 
-# Service spread across multiple repos
-# api-gateway:
-#   repos:
-#     - myorg/api-gateway
-#     - myorg/gateway-plugins
+  # Monorepo — filter PRs to files under path_prefix:
+  # checkout-service:
+  #   - repo: myorg/platform
+  #     path_prefix: services/checkout/
 
-# Service with its own repo (name doesn't match)
-# auth-service:
-#   repos:
-#     - myorg/identity-platform
+  # Multiple repos:
+  # api-gateway:
+  #   - repo: myorg/api-gateway
+  #   - repo: myorg/gateway-plugins
+
+  # Monorepo + standalone repo combined:
+  # notification-service:
+  #   - repo: myorg/platform
+  #     path_prefix: packages/notifications/
+  #   - repo: myorg/notification-workers
