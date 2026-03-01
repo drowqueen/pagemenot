@@ -156,7 +156,7 @@ Set `WEBHOOK_SECRET_<SOURCE>` to enable HMAC verification per source. Unset = wa
 
 Set `PAGEMENOT_EXEC_DRY_RUN=false` for live execution. Execution is gated to `<!-- exec: -->` tags in runbook files — LLM output never triggers commands directly.
 
-Allowed: `kubectl rollout undo`, `kubectl scale`, `kubectl get/describe/logs`, AWS read-only APIs, HTTP health checks.
+Allowed: `kubectl rollout undo`, `kubectl scale`, `kubectl get/describe/logs`, AWS SSM diagnostic commands, AWS read-only APIs, HTTP health checks.
 
 ---
 
@@ -213,6 +213,16 @@ Restart → auto-ingested into ChromaDB.
 |-------------|-------|
 | `{{ service }}` | service name detected from the alert |
 | `{{ namespace }}` | `PAGEMENOT_EXEC_NAMESPACE` |
+
+**SSM exec tags** — run diagnostic commands on EC2 instances without SSH or a bastion:
+
+```
+<!-- exec: ssm:i-1234567890abcdef0 journalctl -u {{ service }} --no-pager -n 100 -->
+<!-- exec: ssm:i-1234567890abcdef0 systemctl status {{ service }} -->
+<!-- exec: ssm:i-1234567890abcdef0 df -h -->
+```
+
+Requires `AWS_ROLE_ARN` with SSM permissions. SSM agent must be running on the instance.
 
 Only `<!-- exec: -->` tags execute — never free-form LLM output.
 
@@ -295,7 +305,9 @@ aws iam put-role-policy --role-name pagemenot-exec \
           "cloudwatch:GetMetricStatistics", "cloudwatch:GetMetricData",
           "cloudwatch:ListMetrics", "cloudwatch:DescribeAlarms",
           "logs:GetLogEvents", "logs:FilterLogEvents",
-          "logs:DescribeLogGroups", "logs:DescribeLogStreams"
+          "logs:DescribeLogGroups", "logs:DescribeLogStreams",
+          "ssm:SendCommand", "ssm:GetCommandInvocation",
+          "ssm:DescribeInstanceInformation"
         ],
         "Resource": "*"
       }

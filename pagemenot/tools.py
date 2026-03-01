@@ -685,13 +685,22 @@ _SHELL_WHITELIST = [
 ]
 
 # AWS: read-only actions only for autonomous execution.
-# update_service and set_desired_capacity removed — require human approval.
 _AWS_ALLOWED = {
     "ecs": {"describe_services", "describe_tasks"},
-    "autoscaling": {"describe_auto_scaling_groups"},
-    "elasticache": {"describe_cache_clusters"},
     "cloudwatch": {"get_metric_statistics", "get_metric_data"},
 }
+
+# SSM: diagnostic read-only commands only. No package installs, no file writes, no destructive ops.
+_SSM_COMMAND_WHITELIST = [
+    r"^journalctl\s+-u\s+[\w\-\.]+(\s+--no-pager)?(\s+-n\s+\d+)?(\s+--since\s+[\w\-\s:\"\']+)?$",
+    r"^systemctl\s+status\s+[\w\-\.]+$",
+    r"^tail\s+-n\s+\d+\s+/var/log/[\w\-\./]+$",
+    r"^df\s+-h$",
+    r"^free\s+-[mhb]$",
+    r"^ps\s+aux$",
+    r"^ss\s+-tlnp$",
+    r"^curl\s+-sf\s+https?://\S+/(health|ready|status)$",
+]
 
 
 def _exec_enabled():
@@ -756,6 +765,53 @@ def exec_aws(service: str, action: str, params: dict) -> str:
     )
     response = getattr(client, action)(**params)
     return str(response)[:300]
+
+
+def exec_ssm(instance_id: str, command: str) -> str:
+    """Run a whitelisted diagnostic command on an EC2 instance via SSM (no SSH/bastion needed)."""
+    _exec_enabled()
+    if not re.fullmatch(r'i-[0-9a-f]{8,17}', instance_id):
+        raise ValueError(f"Invalid EC2 instance ID: {instance_id!r}")
+    if not any(re.fullmatch(p, command) for p in _SSM_COMMAND_WHITELIST):
+        raise ValueError(f"SSM command not in whitelist: {command!r}")
+    if settings.pagemenot_exec_dry_run:
+        return f"[DRY RUN] would SSM run on {instance_id}: {command}"
+    if not settings.aws_role_arn:
+        raise RuntimeError("AWS_ROLE_ARN not configured")
+
+    try:
+        import boto3, time
+    except ImportError:
+        raise RuntimeError("boto3 not installed")
+
+    sts = boto3.client("sts", region_name=settings.aws_region)
+    creds = sts.assume_role(
+        RoleArn=settings.aws_role_arn,
+        RoleSessionName="pagemenot-ssm",
+    )["Credentials"]
+    ssm = boto3.client(
+        "ssm", region_name=settings.aws_region,
+        aws_access_key_id=creds["AccessKeyId"],
+        aws_secret_access_key=creds["SecretAccessKey"],
+        aws_session_token=creds["SessionToken"],
+    )
+
+    cmd_id = ssm.send_command(
+        InstanceIds=[instance_id],
+        DocumentName="AWS-RunShellScript",
+        Parameters={"commands": [command]},
+    )["Command"]["CommandId"]
+
+    # Poll until terminal (timeout 60s)
+    for _ in range(12):
+        time.sleep(5)
+        inv = ssm.get_command_invocation(CommandId=cmd_id, InstanceId=instance_id)
+        status = inv["Status"]
+        if status == "Success":
+            return inv.get("StandardOutputContent", "").strip()[:500]
+        if status in ("Failed", "Cancelled", "TimedOut"):
+            raise RuntimeError(f"SSM command {status}: {inv.get('StandardErrorContent', '')[:200]}")
+    raise RuntimeError("SSM command timed out after 60s")
 
 
 def exec_shell(command: str) -> str:
@@ -835,6 +891,13 @@ def dispatch_exec_step(step: str, service: str = "") -> str:
     if cmd.startswith("kubectl "):
         kubectl_cmd = cmd[len("kubectl "):]
         return exec_kubectl(kubectl_cmd)
+    elif cmd.startswith("ssm:"):
+        # Format: ssm:<instance-id> <command>
+        rest = cmd[4:]
+        parts = rest.split(" ", 1)
+        if len(parts) != 2:
+            raise ValueError(f"Invalid SSM step format — expected: ssm:<instance-id> <command>")
+        return exec_ssm(parts[0].strip(), parts[1].strip())
     elif cmd.startswith("aws "):
         parts = shlex.split(cmd)
         if len(parts) < 3:
