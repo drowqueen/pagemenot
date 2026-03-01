@@ -14,15 +14,15 @@
 ## Remediation
 
 ### Step 1 — Identify blocking queries
-<!-- exec: kubectl logs -n production -l app={{ service }} --tail=100 -->
+<!-- exec: kubectl logs -n {{ namespace }} -l app={{ service }} --tail=100 -->
 
 ### Step 2 — Check pod count and health
-<!-- exec: kubectl get pods -n production -l app={{ service }} -->
+<!-- exec: kubectl get pods -n {{ namespace }} -l app={{ service }} -->
 
 ### Step 3 — Restart affected pods to release leaked connections
 This forces connection pool reset. Safe if DB is healthy.
-<!-- exec: kubectl rollout restart deployment/{{ service }} -n production -->
-<!-- exec: kubectl rollout status deployment/{{ service }} -n production -->
+<!-- exec: kubectl rollout restart deployment/{{ service }} -n {{ namespace }} -->
+<!-- exec: kubectl rollout status deployment/{{ service }} -n {{ namespace }} -->
 
 ### Step 4 — Verify recovery
 <!-- exec: curl -sf https://{{ service }}/health -->

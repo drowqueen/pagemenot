@@ -13,21 +13,21 @@
 ## Remediation
 
 ### Step 1 — Inspect pod state
-<!-- exec: kubectl get pods -n production -l app={{ service }} -->
-<!-- exec: kubectl describe pods -n production -l app={{ service }} -->
+<!-- exec: kubectl get pods -n {{ namespace }} -l app={{ service }} -->
+<!-- exec: kubectl describe pods -n {{ namespace }} -l app={{ service }} -->
 
 ### Step 2 — Read crash logs
-<!-- exec: kubectl logs -n production -l app={{ service }} --previous --tail=50 -->
+<!-- exec: kubectl logs -n {{ namespace }} -l app={{ service }} --previous --tail=50 -->
 
 ### Step 3a — If OOMKilled: check memory trend, consider temporary scale-out
-<!-- exec: kubectl get pods -n production -l app={{ service }} -o wide -->
+<!-- exec: kubectl get pods -n {{ namespace }} -l app={{ service }} -o wide -->
 
 ### Step 3b — If config error: roll back last deploy
-<!-- exec: kubectl rollout undo deployment/{{ service }} -n production -->
-<!-- exec: kubectl rollout status deployment/{{ service }} -n production -->
+<!-- exec: kubectl rollout undo deployment/{{ service }} -n {{ namespace }} -->
+<!-- exec: kubectl rollout status deployment/{{ service }} -n {{ namespace }} -->
 
 ### Step 4 — Verify pods stabilize
-<!-- exec: kubectl get pods -n production -l app={{ service }} -w -->
+<!-- exec: kubectl get pods -n {{ namespace }} -l app={{ service }} -w -->
 
 ## Escalate if
 - Exit code 137 (OOMKill) and memory limit is already at maximum

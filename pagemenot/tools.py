@@ -822,17 +822,20 @@ def dispatch_exec_step(step: str, service: str = "") -> str:
     if not cmd:
         raise ValueError("Empty exec step")
 
-    # Route first, then substitute service name after validation
+    # Substitute template variables
+    from pagemenot.config import settings as _s
+    namespace = _s.pagemenot_exec_namespace
+    for _raw, _sub in [("{{ service }}", _safe_service_name(service) if service else ""),
+                       ("{{service}}", service),
+                       ("{{ namespace }}", namespace),
+                       ("{{namespace}}", namespace)]:
+        cmd = cmd.replace(_raw, _sub)
+
+    # Route to correct executor
     if cmd.startswith("kubectl "):
         kubectl_cmd = cmd[len("kubectl "):]
-        if service:
-            kubectl_cmd = kubectl_cmd.replace("{{ service }}", _safe_service_name(service))
-            kubectl_cmd = kubectl_cmd.replace("{{service}}", service)
         return exec_kubectl(kubectl_cmd)
     elif cmd.startswith("aws "):
-        if service:
-            cmd = cmd.replace("{{ service }}", _safe_service_name(service))
-            cmd = cmd.replace("{{service}}", service)
         parts = shlex.split(cmd)
         if len(parts) < 3:
             raise ValueError(f"Invalid AWS command: {cmd!r}")
@@ -849,9 +852,6 @@ def dispatch_exec_step(step: str, service: str = "") -> str:
     elif cmd.startswith("http://") or cmd.startswith("https://"):
         return exec_http("GET", cmd)
     else:
-        if service:
-            cmd = cmd.replace("{{ service }}", _safe_service_name(service))
-            cmd = cmd.replace("{{service}}", service)
         return exec_shell(cmd)
 
 
@@ -880,9 +880,9 @@ def get_runbook_exec_steps(query: str, service: str = "") -> list[str]:
             runbook_path = RUNBOOKS_DIR / filename
             if runbook_path.exists():
                 content = runbook_path.read_text(encoding="utf-8")
-                for raw_step in re.findall(r'<!--\s*exec:\s*(.+?)\s*-->', content):
-                    resolved = raw_step.replace("{{ service }}", service).replace("{{service}}", service)
-                    exec_steps.append(resolved.strip())
+                # Return the full <!-- exec: ... --> tag so dispatch_exec_step can validate + substitute
+                for match in re.finditer(r'<!--\s*exec:\s*.+?\s*-->', content):
+                    exec_steps.append(match.group(0))
 
         return exec_steps
 

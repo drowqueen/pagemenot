@@ -13,20 +13,20 @@
 ## Remediation
 
 ### Step 1 — Check certificate status
-<!-- exec: kubectl get certificates -n production -->
-<!-- exec: kubectl describe certificate {{ service }}-tls -n production -->
+<!-- exec: kubectl get certificates -n {{ namespace }} -->
+<!-- exec: kubectl describe certificate {{ service }}-tls -n {{ namespace }} -->
 
 ### Step 2 — Check cert-manager logs for renewal errors
 <!-- exec: kubectl logs -n cert-manager -l app=cert-manager --tail=50 -->
 
 ### Step 3 — Trigger manual renewal if auto-renewal is stuck
-<!-- exec: kubectl delete secret {{ service }}-tls -n production -->
+<!-- exec: kubectl delete secret {{ service }}-tls -n {{ namespace }} -->
 
 cert-manager will recreate the secret and re-issue within 60–120 seconds.
 
 ### Step 4 — Verify new certificate issued
-<!-- exec: kubectl get certificates -n production -->
-<!-- exec: kubectl get secret {{ service }}-tls -n production -->
+<!-- exec: kubectl get certificates -n {{ namespace }} -->
+<!-- exec: kubectl get secret {{ service }}-tls -n {{ namespace }} -->
 
 ## Escalate if
 - cert-manager cannot reach the ACME issuer (Let's Encrypt rate limit or DNS issue)

@@ -15,18 +15,18 @@
 ## Remediation
 
 ### Step 1 — Check resource pressure
-<!-- exec: kubectl top pods -n production -l app={{ service }} -->
-<!-- exec: kubectl describe pods -n production -l app={{ service }} -->
+<!-- exec: kubectl top pods -n {{ namespace }} -l app={{ service }} -->
+<!-- exec: kubectl describe pods -n {{ namespace }} -l app={{ service }} -->
 
 ### Step 2 — Check if traffic spike is the cause — scale out if so
-<!-- exec: kubectl get hpa -n production -->
+<!-- exec: kubectl get hpa -n {{ namespace }} -->
 
 ### Step 3 — Verify downstream dependencies
 <!-- exec: curl -sf https://{{ service }}/health -->
 
 ### Step 4 — Roll back if latency began after a deploy
-<!-- exec: kubectl rollout undo deployment/{{ service }} -n production -->
-<!-- exec: kubectl rollout status deployment/{{ service }} -n production -->
+<!-- exec: kubectl rollout undo deployment/{{ service }} -n {{ namespace }} -->
+<!-- exec: kubectl rollout status deployment/{{ service }} -n {{ namespace }} -->
 
 ## Escalate if
 - Latency is in the database — requires query optimization

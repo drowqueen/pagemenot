@@ -13,15 +13,15 @@
 ## Remediation
 
 ### Step 1 — Verify the spike is real
-<!-- exec: kubectl get pods -n production -l app={{ service }} -->
+<!-- exec: kubectl get pods -n {{ namespace }} -l app={{ service }} -->
 <!-- exec: curl -sf https://{{ service }}/health -->
 
 ### Step 2 — Check recent deploy
-<!-- exec: kubectl rollout history deployment/{{ service }} -n production -->
+<!-- exec: kubectl rollout history deployment/{{ service }} -n {{ namespace }} -->
 
 ### Step 3 — Roll back if deploy correlates
-<!-- exec: kubectl rollout undo deployment/{{ service }} -n production -->
-<!-- exec: kubectl rollout status deployment/{{ service }} -n production -->
+<!-- exec: kubectl rollout undo deployment/{{ service }} -n {{ namespace }} -->
+<!-- exec: kubectl rollout status deployment/{{ service }} -n {{ namespace }} -->
 
 ### Step 4 — Verify recovery
 Wait 2 minutes and re-check error rate. If >5% persists after rollback, escalate — root cause is not the deploy.

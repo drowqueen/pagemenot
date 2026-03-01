@@ -17,13 +17,13 @@
 <!-- exec: kubectl describe nodes -->
 
 ### Step 2 — Check pod disk usage
-<!-- exec: kubectl get pods -n production -l app={{ service }} -->
+<!-- exec: kubectl get pods -n {{ namespace }} -l app={{ service }} -->
 
 ### Step 3 — Check for evicted pods
-<!-- exec: kubectl get pods -n production --field-selector=status.phase=Failed -->
+<!-- exec: kubectl get pods -n {{ namespace }} --field-selector=status.phase=Failed -->
 
 ### Step 4 — Delete completed/evicted pods to free metadata
-<!-- exec: kubectl delete pods -n production --field-selector=status.phase=Succeeded -->
+<!-- exec: kubectl delete pods -n {{ namespace }} --field-selector=status.phase=Succeeded -->
 
 ### Step 5 — Verify node pressure cleared
 <!-- exec: kubectl get nodes -->

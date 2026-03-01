@@ -59,6 +59,7 @@ class Settings(BaseSettings):
     github_org: Optional[str] = None
     # Execution
     kubeconfig_path: Optional[str] = None
+    pagemenot_exec_namespace: str = "production"  # default k8s namespace for runbook {{ namespace }}
     pagemenot_exec_enabled: bool = True         # master switch for autonomous execution
     pagemenot_exec_dry_run: bool = True         # dry run by default — set false for real execution
     pagemenot_oncall_channel: Optional[str] = None  # channel to ping on critical escalations
