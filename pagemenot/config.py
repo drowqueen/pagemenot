@@ -59,8 +59,8 @@ class Settings(BaseSettings):
     github_org: Optional[str] = None
     # Execution
     kubeconfig_path: Optional[str] = None
-    pagemenot_exec_enabled: bool = False        # master switch for autonomous execution
-    pagemenot_exec_dry_run: bool = False        # simulate exec, log steps, no real commands
+    pagemenot_exec_enabled: bool = True         # master switch for autonomous execution
+    pagemenot_exec_dry_run: bool = True         # dry run by default — set false for real execution
     pagemenot_oncall_channel: Optional[str] = None  # channel to ping on critical escalations
     pagemenot_autoapprove_delay: int = 900      # seconds before auto-executing [AUTO-SAFE] steps
     pagemenot_dedup_ttl_short: int = 600        # dedup window for critical/high (seconds)

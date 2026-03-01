@@ -441,6 +441,7 @@ async def _auto_triage(source: str, payload: dict):
                 )
 
         # Open Jira SM ticket + page PagerDuty for critical/high incidents
+        jira_url = pd_url = None
         if result.severity in ("critical", "high"):
             jira_url, pd_url = await asyncio.gather(
                 _open_jira_ticket(result),
@@ -462,11 +463,13 @@ async def _auto_triage(source: str, payload: dict):
 
         # Escalate critical/high to on-call channel
         if result.severity in ("critical", "high") and settings.pagemenot_oncall_channel:
+            pd_line = f"\n📟 PagerDuty: {pd_url}" if isinstance(pd_url, str) else ""
             await client.chat_postMessage(
                 channel=settings.pagemenot_oncall_channel,
                 text=(
                     f"{sev} *ESCALATION:* {result.alert_title} ({result.service})\n"
                     f"Confidence: {conf} {result.confidence} — see #{channel}"
+                    f"{pd_line}"
                 ),
             )
 
