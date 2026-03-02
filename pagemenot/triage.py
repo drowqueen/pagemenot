@@ -18,6 +18,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from concurrent.futures import ThreadPoolExecutor
 
@@ -311,6 +312,51 @@ def _try_runbook_exec(result: TriageResult):
         logger.info(f"Incident auto-resolved: {result.alert_title}")
 
 
+def _write_postmortem(result: TriageResult) -> None:
+    """Write an auto-generated postmortem MD and index it if confidence is high."""
+    from pagemenot.knowledge.rag import POSTMORTEMS_DIR, add_postmortem
+
+    if result.confidence == "high":
+        target_dir = POSTMORTEMS_DIR
+        index = True
+    elif result.confidence == "medium":
+        target_dir = POSTMORTEMS_DIR.parent / "pending_review"
+        index = False
+    else:
+        return
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    slug = re.sub(r"[^\w]+", "-", result.service.lower()).strip("-")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    filepath = target_dir / f"{slug}_{timestamp}.md"
+
+    evidence_md = "\n".join(f"- {e}" for e in result.evidence) if result.evidence else "- N/A"
+    remediation_md = "\n".join(f"- {s}" for s in result.remediation_steps) if result.remediation_steps else "- N/A"
+    similar_md = "\n".join(f"- {s}" for s in result.similar_incidents) if result.similar_incidents else "- N/A"
+
+    content = (
+        f"# Incident: {result.alert_title}\n\n"
+        f"**Service:** {result.service}\n"
+        f"**Severity:** {result.severity}\n"
+        f"**Date:** {datetime.now(timezone.utc).strftime('%Y-%m-%d')}\n"
+        f"**Resolved automatically:** {result.resolved_automatically}\n"
+        f"**Triage confidence:** {result.confidence}\n\n"
+        f"## Root Cause\n\n{result.root_cause}\n\n"
+        f"## Evidence\n\n{evidence_md}\n\n"
+        f"## Remediation\n\n{remediation_md}\n\n"
+        f"## Similar Incidents\n\n{similar_md}\n"
+    )
+
+    try:
+        filepath.write_text(content, encoding="utf-8")
+        logger.info(f"Postmortem written: {filepath.name}")
+        if index:
+            add_postmortem(filepath)
+    except Exception as e:
+        logger.warning(f"Postmortem write failed: {e}")
+
+
 async def run_triage(source: str, payload: dict[str, Any]) -> TriageResult:
     """The ONE entry point for all triage. Handles mock + real transparently."""
     start = datetime.now(timezone.utc)
@@ -361,7 +407,10 @@ async def run_triage(source: str, payload: dict[str, Any]) -> TriageResult:
     # 7. Parse output
     result = _parse_crew_output(raw, parsed)
 
-    # 8. Attempt runbook-driven resolution (only if exec is enabled)
+    # 8. Write postmortem (high confidence → index; medium → pending_review)
+    _write_postmortem(result)
+
+    # 9. Attempt runbook-driven resolution (only if exec is enabled)
     _try_runbook_exec(result)
 
     result.duration_seconds = (datetime.now(timezone.utc) - start).total_seconds()

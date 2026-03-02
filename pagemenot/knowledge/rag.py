@@ -98,6 +98,45 @@ def _ingest_directory(
         logger.info(f"Ingested {len(md_files)} {doc_type}s ({len(docs)} chunks) into '{collection_name}'")
 
 
+def add_postmortem(filepath: Path) -> None:
+    """Incrementally index a single postmortem file into ChromaDB. Non-blocking on error."""
+    try:
+        os.makedirs(settings.chroma_path, exist_ok=True)
+        client = chromadb.PersistentClient(path=settings.chroma_path)
+        collection = client.get_or_create_collection(
+            name="incidents",
+            metadata={"hnsw:space": "cosine"},
+        )
+        content = filepath.read_text(encoding="utf-8")
+        doc_id = f"postmortem_{filepath.stem}"
+
+        title = filepath.stem.replace("-", " ").replace("_", " ").title()
+        for line in content.split("\n"):
+            if line.startswith("# "):
+                title = line.lstrip("# ").strip()
+                break
+
+        meta = {
+            "type": "postmortem",
+            "title": title,
+            "filename": filepath.name,
+            "service": _extract_field(content, "service") or "general",
+            "root_cause": _extract_field(content, "root_cause") or _extract_field(content, "root cause") or "",
+            "resolution": _extract_field(content, "resolution") or "",
+            "date": _extract_field(content, "date") or "",
+        }
+
+        chunks = _chunk_document(content, max_chars=1500)
+        collection.upsert(
+            documents=chunks,
+            ids=[f"{doc_id}_chunk{i}" for i in range(len(chunks))],
+            metadatas=[meta] * len(chunks),
+        )
+        logger.info(f"Indexed postmortem: {filepath.name} ({len(chunks)} chunks)")
+    except Exception as e:
+        logger.warning(f"Failed to index postmortem {filepath.name}: {e}")
+
+
 def _extract_field(content: str, field: str) -> str | None:
     """Extract a field value from markdown-ish content."""
     for line in content.split("\n")[:20]:

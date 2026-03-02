@@ -67,6 +67,24 @@ No integrations configured → mock layer activates. Crew still runs end-to-end.
 
 ---
 
+## Requirements
+
+| Requirement | Version | Notes |
+|-------------|---------|-------|
+| Docker | 24+ | Compose v2 (`docker compose`) required |
+| Slack workspace | — | Bot token + app-level token (Socket Mode) |
+| LLM | — | One of: Ollama (local), OpenAI, Anthropic, Gemini |
+| **Ollama (local)** | 0.3+ | Models: `ollama pull llama3.1` + `ollama pull nomic-embed-text` |
+| **OpenAI** | — | `OPENAI_API_KEY` — requires signed enterprise DPA |
+| **Anthropic** | — | `ANTHROPIC_API_KEY` — requires signed enterprise DPA |
+| **Gemini** | — | `GEMINI_API_KEY` — requires signed enterprise DPA |
+| Kubernetes (optional) | 1.28+ | kubeconfig mounted at `/app/kubeconfig` |
+| Prometheus/Grafana (optional) | — | URLs set in `.env` |
+
+> **Recommended for self-hosted/air-gapped:** Ollama with `llama3.1` (LLM) + `nomic-embed-text` (embeddings). No data leaves your network.
+
+---
+
 ## Quick start
 
 ```bash
