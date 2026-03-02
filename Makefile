@@ -23,8 +23,8 @@ help:
 
 # ── install ───────────────────────────────────────────────────────────────────
 install: _check_docker _check_env _check_required
-	@echo "$(GREEN)Config OK — starting pagemenot...$(RESET)"
-	docker compose pull
+	@echo "$(GREEN)Config OK — building and starting pagemenot...$(RESET)"
+	docker compose build
 	docker compose up -d
 	@echo ""
 	@echo "$(GREEN)✓ pagemenot is running$(RESET)"

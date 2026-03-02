@@ -14,7 +14,7 @@
 
 ### Step 1 — Verify the spike is real
 <!-- exec: kubectl get pods -n {{ namespace }} -l app={{ service }} -->
-<!-- exec: curl -sf https://{{ service }}/health -->
+<!-- exec: kubectl rollout status deployment/{{ service }} -n {{ namespace }} -->
 
 ### Step 2 — Check recent deploy
 <!-- exec: kubectl rollout history deployment/{{ service }} -n {{ namespace }} -->

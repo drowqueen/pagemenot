@@ -1,6 +1,35 @@
 # Pagemenot — AI On-Call Copilot
 
-Self-hosted AI SRE. Alert fires → 3-agent crew triages → root cause + remediation posted to Slack. Executes runbook steps autonomously. Pages humans only when it can't resolve.
+**The problem:** An alert fires at 3am. An engineer wakes up, runs the same kubectl commands, checks the same metrics, reads the same runbook, applies the same fix. This happens hundreds of times a year for the same dozen incident types.
+
+**What pagemenot does:** When an alert fires, a 3-agent AI crew investigates in parallel — pulling metrics, checking recent deploys, matching runbooks — and either fixes the incident autonomously or hands off to the on-call engineer with the investigation already done.
+
+- If the crew resolves it: nobody gets paged. A summary posts to Slack.
+- If the crew needs a human decision: **Approve/Reject buttons** appear in the Slack thread for risky steps. A Jira ticket opens. PagerDuty pages the on-call.
+- If the crew is stumped: the on-call wakes up to a thread with root cause, correlated metrics, and the likely offending deploy already identified.
+
+Self-hosted. No new infrastructure. Connects to your existing monitoring stack.
+
+---
+
+## Features
+
+- **3-agent AI crew** — monitor, diagnose, and remediate in parallel on every alert
+- **Autonomous runbook execution** — `<!-- exec: -->` tagged steps run automatically; risky steps gate on human approval
+- **Learns from every incident** — postmortems indexed into ChromaDB; recurring incidents auto-resolve without pages over time
+- **Approval buttons in Slack** — one click to approve or reject; approval state persists across restarts (Redis or file fallback)
+- **Severity-based escalation** — Jira for all unresolved, PagerDuty + escalation channel for high/critical; fully configurable
+- **Clickable escalation links** — #escalated messages link directly to the exact alert thread and Jira ticket
+- **Works with any LLM** — Ollama (self-hosted, air-gapped), OpenAI, Anthropic, Gemini; switch with one env var
+- **Connects to your stack** — Prometheus, Grafana, Loki, Datadog, New Relic, PagerDuty, OpsGenie, Jira, GitHub, Kubernetes
+- **Webhook receiver** — Grafana, Alertmanager, Datadog, New Relic, PagerDuty, CloudWatch, Azure Monitor, generic
+- **No new infrastructure** — single Docker container; ChromaDB embedded by default
+
+## Screenshots
+
+| Escalation — Jira + PagerDuty | Approval button | Triage thread — RCA + links | Approval detail |
+|---|---|---|---|
+| [![escalation](screenshots/escalation-jira-pd.png)](screenshots/escalation-jira-pd.png) | [![approval](screenshots/approval-button.png)](screenshots/approval-button.png) | [![triage](screenshots/triage-thread-rca.png)](screenshots/triage-thread-rca.png) | [![approval-detail](screenshots/approval-required-detail.png)](screenshots/approval-required-detail.png) |
 
 ---
 
@@ -14,10 +43,11 @@ Self-hosted AI SRE. Alert fires → 3-agent crew triages → root cause + remedi
 - [Webhook sources](#webhook-sources)
 - [Autonomous execution](#autonomous-execution)
 - [Approval gate](#approval-gate)
+- [Jira lifecycle](#jira-lifecycle)
 - [Rate limiting](#rate-limiting)
 - [Knowledge base](#knowledge-base)
 - [Simulate incidents](#simulate-incidents)
-- [Deploy](#deploy)
+- [Deploy](#deploy) · [Storage](#storage-chromadb--approvals)
 - [Security](#security)
 - [Cloud IAM](#cloud-iam) (AWS · GCP · Azure alerts)
 - [Slash commands](#slash-commands)
@@ -27,11 +57,38 @@ Self-hosted AI SRE. Alert fires → 3-agent crew triages → root cause + remedi
 
 ## How it works
 
+An alert fires. Pagemenot receives it via webhook, deduplicates it (same service + alert within a TTL window is suppressed), and checks severity. If it passes those gates, three agents run simultaneously:
+
+- **MonitorAgent** pulls the metrics, dashboards, and logs from the window surrounding the incident — whatever is configured (Prometheus, Grafana, Datadog, Loki, New Relic).
+- **DiagnoserAgent** checks GitHub for deploys and PR diffs that landed before the alert fired, and searches ChromaDB for past incidents with similar symptoms.
+- **RemediatorAgent** retrieves the matching runbook via RAG and attempts to execute its remediation steps.
+
+Once the crew finishes, pagemenot decides what to do based on what the crew found:
+
+- **Auto-resolved**: runbook steps ran, incident cleared. Slack summary posted. No Jira. No PD page.
+- **Needs human approval**: crew identified a risky step (rollback, scale-down, delete). Approve/Reject buttons appear in Slack as a top-level message. Jira ticket opened (all severities — Jira emails the team). High/critical: also PD page + escalation channel ping.
+- **Stumped (any severity)**: Jira ticket opened (Jira emails the team). High/critical: also PD + escalation channel with Jira and PD links.
+
+**Escalation stack by severity:**
+
+| Severity | Jira ticket | PagerDuty | Escalation channel |
+|----------|-------------|-----------|-------------------|
+| low | — | — | — |
+| medium | — | — | — |
+| high | ✅ | ✅ | ✅ with links |
+| critical | ✅ | ✅ | ✅ with links |
+
+Configurable: `PAGEMENOT_JIRA_MIN_SEVERITY` (default: `high`) and `PAGEMENOT_PD_MIN_SEVERITY` (default: `high`).
+
+Low/medium unresolved incidents are posted to Slack only — no Jira ticket, no page.
+
+When the incident resolves (monitoring system sends `status=resolved`), pagemenot closes the Jira ticket, clears the dedup window, and posts the outcome.
+
 ```
 Alert (Grafana / Alertmanager / PagerDuty / Datadog / New Relic / Slack)
   │
   ▼
-Dedup + severity gate  ──── duplicate or low severity? → suppress
+Dedup + severity gate ── duplicate within TTL or low severity? → suppress
   │
   ▼
 ┌──────────────────────────────────────────────────────────┐
@@ -43,35 +100,193 @@ Dedup + severity gate  ──── duplicate or low severity? → suppress
 └──────────────────────────────────────────────────────────┘
   │
   ▼
-Runbook matched + exec enabled?
-  ├─ YES → execute steps → all succeed? → ✅ auto-resolved
-  │                      → any fail?   → escalate with log
-  └─ NO  → escalate
-             #alerts — triage thread + root cause + Jira ticket
-             #oncall — loud ping + PagerDuty incident URL
+Crew result?
+  ├─ [AUTO-SAFE] steps, exec succeeds
+  │    └─ ✅ Resolved — Slack summary posted. No Jira. No page.
+  │
+  ├─ [NEEDS APPROVAL] steps (risky: rollback, scale-down, delete)
+  │    ├─ Approval gate ON  → ✅ Approve / ❌ Reject buttons (top-level Slack message)
+  │    └─ Approval gate OFF → steps execute automatically
+  │    + always: Jira ticket opened (Jira emails team)
+  │    + high/critical: PagerDuty paged + escalation channel ping
+  │
+  ├─ Crew stumped (any severity)
+  │    ├─ always: Jira ticket opened (Jira emails team)
+  │    └─ high/critical: PagerDuty + escalation channel with Jira + PD links
+  │
+  └─ Auto-resolved
+       └─ ✅ Slack summary. No Jira. No page.
 ```
 
-No integrations configured → mock layer activates. Crew still runs end-to-end.
+When the monitoring system sends a resolve event (`status=resolved` or `incident.resolved`), pagemenot closes the open Jira ticket, clears the dedup registry, and posts the outcome to Slack.
+
+No integrations configured → mock layer activates. Crew runs end-to-end with simulated data.
+
+---
+
+## Requirements
+
+| Requirement | Version | Notes |
+|-------------|---------|-------|
+| Docker | 24+ | Compose v2 (`docker compose`) required |
+| Slack workspace | — | Bot token + app-level token (Socket Mode) |
+| LLM | — | One of: Ollama (local), OpenAI, Anthropic, Gemini |
+| **Ollama (local)** | 0.3+ | Models: `ollama pull llama3.1` + `ollama pull nomic-embed-text` |
+| **OpenAI** | — | `OPENAI_API_KEY` — requires signed enterprise DPA |
+| **Anthropic** | — | `ANTHROPIC_API_KEY` — requires signed enterprise DPA |
+| **Gemini** | — | `GEMINI_API_KEY` — requires signed enterprise DPA |
+| Kubernetes (optional) | — | kubectl baked into image; mount kubeconfig via `docker-compose.yml` |
+| Prometheus/Grafana (optional) | — | URLs set in `.env` |
+
+> **Recommended for self-hosted/air-gapped:** Ollama with `llama3.1` (LLM) + `nomic-embed-text` (embeddings). No data leaves your network.
+
+### Compute requirements
+
+**Pagemenot container** (the SRE agent): 256 MB RAM, 0.25 vCPU. Stateless apart from the ChromaDB volume.
+
+**Ollama** (if self-hosted LLM): requires a separate host with sufficient VRAM to load the model. A 3-agent crew makes ~15-20 LLM calls per incident; triage latency is determined by token throughput.
+
+| Instance | Cloud | vRAM / RAM | Triage time (llama3.1 8B) |
+|----------|-------|-----------|--------------------------|
+| g4dn.xlarge | AWS | 16 GB GPU (T4) | ~2 min |
+| g5.xlarge | AWS | 24 GB GPU (A10G) | ~1 min |
+| n1-standard-4 + T4 | GCP | 16 GB GPU | ~2 min |
+| Standard_NC4as_T4_v3 | Azure | 16 GB GPU (T4) | ~2 min |
+| GX2-15 | Hetzner | 16 GB GPU (RTX 4000) | ~2 min |
+| CPU-only (any cloud) | — | 8–16 GB RAM | 15–30 min, not recommended |
+
+Use `llama3.2:3b` for ~3× faster inference at some reasoning quality cost, or switch to an API LLM (OpenAI, Anthropic, Gemini) for 30–60s triage without a GPU.
+
+### Deployment topology
+
+Pagemenot requires a **persistent process** (Slack Socket Mode needs a long-lived connection) — Lambda, Cloud Functions, and Cloud Run with `min-instances=0` will not work.
+
+| Platform | Instance type | Notes |
+|----------|--------------|-------|
+| AWS ECS (Fargate) | 0.25 vCPU / 512 MB | pagemenot only; Ollama on separate EC2 GPU instance |
+| AWS EC2 | t3.small+ | collocate pagemenot + Ollama on GPU instance |
+| GCP Cloud Run | `--min-instances 1`, 512 MB | persistent; Ollama on separate GCE GPU VM |
+| GCP GKE | 1 replica, 256m CPU / 512 MB | GPU node pool for Ollama |
+| Azure Container Apps | 0.25 vCPU / 0.5 GB, min=1 | persistent; Ollama on separate ACI GPU |
+| Kubernetes (any) | 1 replica; GPU node pool for Ollama | tolerations for GPU node required |
+| Hetzner CX22 + GX2-15 | €4 + €35/mo | cheapest GPU-enabled setup |
+| DigitalOcean Basic + GPU Droplet | $6 + $0.80/hr | GPU Droplet on-demand when needed |
+
+> Ollama and pagemenot can run on the same GPU instance if the instance has enough VRAM for the LLM model (≥16 GB recommended for llama3.1 8B).
 
 ---
 
 ## Quick start
 
 ```bash
-cp .env.example .env   # fill in tokens — never commit this file
-make install           # validates config, pulls image, starts container
-make test              # fire a simulated incident
+git clone https://github.com/drowqueen/pagemenot && cd pagemenot
+./setup.sh     # wizard: Slack → LLM → cloud variant → integrations → writes .env
+make install   # builds your chosen image variant, starts the container
+make test      # fires a mock incident → check Slack
 ```
 
 `.env` is gitignored. `config/services.yaml` is committed (no secrets).
 
+---
+
+## How to install
+
+### Step 1 — Choose your image variant
+
+This is the first decision. Pagemenot builds a Docker image with the CLI tools your runbooks need. Pick the variant that matches your cloud environment:
+
+| Your environment | `PAGEMENOT_BUILD_TARGET` | What's baked in | Image overhead |
+|-----------------|--------------------------|-----------------|----------------|
+| Kubernetes only | `base` _(default)_ | kubectl (amd64 + arm64) | — |
+| AWS — EKS / ECS / EC2 | `aws` | kubectl + AWS CLI v2 | +~500 MB |
+| GCP — GKE / GCE | `gcp` | kubectl + gcloud | +~400 MB |
+| Azure — AKS | `azure` | kubectl + Azure CLI | +~300 MB |
+| Multi-cloud | `cloud` | kubectl + AWS CLI + gcloud + Azure CLI | +~1.2 GB |
+
+kubectl is always included and auto-detects `amd64` / `arm64` at build time. Credentials (kubeconfig, `~/.aws`, SA keys) are still provided at runtime via `docker-compose.yml` volume mounts — baking in the CLI only removes the binary dependency.
+
+**The wizard sets this for you** — it asks which cloud environment you run and writes the right value to `.env`. To set it manually:
+
+```bash
+# .env
+PAGEMENOT_BUILD_TARGET=aws   # or base / gcp / azure / cloud
+```
+
+First build downloads the CLI binaries (cold cache: 5–15 min depending on variant). Subsequent builds are fast — Docker layer cache + apt cache mounts skip re-downloading.
+
+---
+
+### Step 2 — Configure
+
+**Option A — wizard (recommended)**
+
+```bash
+./setup.sh
+```
+
+Walks through: Slack tokens → LLM → **image variant** → integrations → credentials → writes `.env`.
+
+**Option B — manual**
+
+```bash
+cp .env.example .env
+# edit .env: set SLACK_BOT_TOKEN, SLACK_APP_TOKEN, LLM_PROVIDER/MODEL,
+# PAGEMENOT_BUILD_TARGET, and any integrations you want live
+```
+
+---
+
+### Step 3 — Build and start
+
+```bash
+make install
+```
+
+Builds the image for `PAGEMENOT_BUILD_TARGET` in `.env`, then starts the container. Re-run any time you change the variant.
+
+To build without starting:
+```bash
+docker compose build
+```
+
+---
+
+### Step 4 — Verify
+
+```bash
+make status                        # running containers + enabled integrations
+make test                          # fires mock incident → check Slack for triage result
+make test SCENARIO=checkout-oom    # OOM / kubectl exec path
+make test SCENARIO=payment-500s    # deploy regression / approval + escalation path
+make logs                          # follow live logs
+```
+
+---
+
+### Changing the variant later
+
+Edit `.env`, then rebuild:
+
+```bash
+# .env
+PAGEMENOT_BUILD_TARGET=cloud   # changed from aws → cloud
+
+make install   # rebuilds image with new variant, restarts container
+```
+
+The `cloud` build installs AWS CLI, gcloud, and Azure CLI in a single layer with build deps (gnupg, unzip, lsb-release) purged after setup — no leftover bloat.
+
+---
+
+### Reference
+
 | Command | Effect |
 |---------|--------|
-| `make install` | validate config → pull image → start |
-| `make start` / `make stop` | start / stop container |
+| `make install` | build image → start container |
+| `make start` / `make stop` | start / stop without rebuild |
 | `make logs` | follow container logs |
 | `make status` | running containers + enabled integrations |
-| `make test SCENARIO=checkout-oom` | fire a simulated incident |
+| `make test SCENARIO=<name>` | fire a simulated incident |
 | `make hooks` | install git pre-commit/pre-push hooks |
 
 ---
@@ -113,6 +328,22 @@ make test              # fire a simulated incident
 | [Ollama](https://ollama.com) (self-hosted) | `OLLAMA_URL` | Nothing leaves your network |
 | OpenAI Enterprise | `OPENAI_API_KEY` + `LLM_EXTERNAL_ENTERPRISE_CONFIRMED=true` | Requires signed DPA |
 | Anthropic / Gemini / OpenAI (standard) | API key + `LLM_EXTERNAL_ENTERPRISE_CONFIRMED=true` | Dev/test only |
+
+The LLM is the reasoning engine for all three agents — it decides which tools to call, interprets raw metrics and logs, correlates deploys with symptoms, and produces root cause analysis and remediation steps. Without it the agents cannot function.
+
+**Cross-incident memory (Ollama)**
+
+By default, Ollama runs without cross-incident memory. Each incident is investigated from scratch. To enable memory, pull a local embedding model and set `OLLAMA_EMBEDDING_MODEL`:
+
+```bash
+ollama pull nomic-embed-text
+```
+
+```
+OLLAMA_EMBEDDING_MODEL=nomic-embed-text
+```
+
+With this set, pagemenot stores past incident context in ChromaDB and the DiagnoserAgent can recognise recurring patterns across incidents. Without it, single-incident triage works fully — only the cross-run pattern matching is unavailable. OpenAI enables memory automatically via `text-embedding-3-small`.
 
 > **⛔ DATA PRIVACY** — Agents send metrics, log snippets, PR diffs, and runbook text to the LLM. Standard API tiers may use your data for training. Use local Ollama for production or confirm a zero-retention DPA with your provider.
 
@@ -167,24 +398,101 @@ Set `WEBHOOK_SECRET_<SOURCE>` to enable HMAC verification per source. Unset = wa
 
 | Setting | Default | Effect |
 |---------|---------|--------|
-| `PAGEMENOT_EXEC_ENABLED` | `true` | Master switch for runbook execution |
-| `PAGEMENOT_EXEC_DRY_RUN` | `true` | Log steps only — no commands run |
+| `PAGEMENOT_EXEC_DRY_RUN` | `true` | `true` = simulate (log only); `false` = live execution |
 | `PAGEMENOT_EXEC_NAMESPACE` | `production` | k8s namespace for `{{ namespace }}` in exec tags |
 
-Set `PAGEMENOT_EXEC_DRY_RUN=false` for live execution. Execution is gated to `<!-- exec: -->` tags in runbook files — LLM output never triggers commands directly.
+**The agent only executes what is scripted in runbooks.** The LLM reasons over the runbook and decides which steps to run, but it cannot generate or modify the commands — it can only trigger steps that already exist as `<!-- exec: -->` tags in your runbook files. If a command is not in a runbook, it does not execute.
 
-Allowed: `kubectl rollout undo`, `kubectl scale`, `kubectl get/describe/logs`, AWS SSM diagnostic commands, AWS read-only APIs, HTTP health checks.
+**Dry run mode** (`PAGEMENOT_EXEC_DRY_RUN=true`, the default) simulates every step without executing anything. Each step posts its output to Slack so you can verify what *would* happen:
+
+```
+⚙️ user-service — Step 1/4: kubectl logs -n demo -l app=user-service --tail=100
+✅ Step 1/4 done:
+   [DRY RUN] would execute: kubectl logs -n demo -l app=user-service --tail=100
+
+⚙️ user-service — Step 3/4: kubectl rollout restart deployment/user-service -n demo
+✅ Step 3/4 done:
+   [DRY RUN] would execute: kubectl rollout restart deployment/user-service -n demo
+```
+
+Set `PAGEMENOT_EXEC_DRY_RUN=false` to run commands live. All other behaviour — Slack messages, Jira tickets, PagerDuty pages, approval buttons — is identical in both modes.
 
 ---
 
 ## Approval gate
 
-`[NEEDS APPROVAL]` steps post Approve/Reject buttons in the triage thread. Default: off (steps execute automatically).
+When the crew flags a step as `[NEEDS APPROVAL]` (risky operations: rollbacks, scale-down, delete), pagemenot posts **✅ Approve & Execute** / **❌ Reject** buttons as a top-level Slack message — immediately visible, not buried in a thread.
+
+| `PAGEMENOT_APPROVAL_GATE` | Behaviour |
+|--------------------------|-----------|
+| `true` (default) | Buttons posted; step waits for human decision |
+| `false` | `[NEEDS APPROVAL]` steps execute automatically without confirmation |
+
+**On Approve:** steps execute, outcome posted to Slack, postmortem written to `knowledge/postmortems/` and indexed in ChromaDB.
+
+**On Reject:** steps logged as rejected, incident stays open.
+
+**How the crew learns from approvals (works with Ollama):**
+
+When a human approves a risky step and it succeeds, the postmortem is indexed in ChromaDB. On the next similar incident, the DiagnoserAgent retrieves that postmortem as context. The LLM sees *"this rollback was approved and resolved the incident"* and reclassifies the same step as `[AUTO-SAFE]`. Over time, routinely approved remediations (rollbacks, restarts, scale adjustments) execute automatically without human confirmation. This is context-based learning (RAG), not model fine-tuning — it works identically with Ollama.
+
+**Postmortem indexing (full picture):**
+
+Postmortems are written and indexed in two cases — not just approvals:
+
+| Trigger | Postmortem written | Indexed in ChromaDB |
+|---------|-------------------|---------------------|
+| Crew auto-resolves (all exec steps succeed) | ✅ | ✅ immediately |
+| Human approves + execution succeeds | ✅ | ✅ immediately |
+| Crew stumped / exec fails | ✅ (pending review) | ✅ on next restart |
+
+On the next similar incident, `DiagnoserAgent` queries the `incidents` collection and injects matching postmortems as context. The effect compounds:
+
+- **Incident 1:** human approves a rollback → postmortem written
+- **Incident 2:** LLM sees prior approval in context → may classify rollback as `[AUTO-SAFE]` → no human needed
+- **Incident 5+:** recurring failure type fully auto-resolves with no pages, no tickets
+
+This is RAG (retrieval-augmented generation), not model fine-tuning. The LLM weights never change. It works identically with Ollama, OpenAI, or any other provider. The knowledge lives in ChromaDB alongside your runbooks.
+
+**Postmortem quality matters.** The `service`, `root_cause`, and `resolution` fields drive RAG retrieval accuracy. Drop structured postmortems into `knowledge/postmortems/` to pre-seed the knowledge base before your first incident.
+
+**Approval state persistence:**
+
+Pagemenot uses a three-tier store for pending approvals — no approval is lost on container restart:
+
+| Store | When active | Notes |
+|-------|-------------|-------|
+| Redis | `REDIS_URL` is set | Recommended for production; survives restarts and multi-instance deploys |
+| JSON file | No Redis | Writes to `/app/data/approvals.json` (on the `chromadata` volume); survives restarts |
+| In-memory | Neither | Lost on restart; only suitable for local testing |
+
+Approvals never expire. An on-call engineer can wake up, see the button in Slack, and click it hours or days later.
+
+**Recommended:** add `redis://redis:6379/0` to `.env` and a Redis service to `docker-compose.yml` for production deployments.
 
 | Setting | Default | Effect |
 |---------|---------|--------|
-| `PAGEMENOT_APPROVAL_GATE` | `false` | `true` = require human approval for `[NEEDS APPROVAL]` steps |
-| `REDIS_URL` | unset | Set to persist approvals across restarts (`redis://host:6379/0`) |
+| `PAGEMENOT_APPROVAL_GATE` | `true` | `false` = skip approval, execute automatically |
+| `REDIS_URL` | unset | Persist approval state in Redis (recommended for production) |
+
+---
+
+## Jira lifecycle
+
+Jira tickets open only when the crew cannot resolve the incident (escalation gate). One ticket per incident lifecycle — duplicates within the TTL reference the existing ticket.
+
+| Condition | Jira |
+|-----------|------|
+| Crew auto-resolved (any severity) | ✗ |
+| Unresolved — low/medium | ✗ |
+| Unresolved — high/critical | ✓ open once |
+
+When the monitoring system sends `status=resolved` (alertmanager) or `incident.resolved` (PagerDuty), pagemenot:
+
+1. Closes the open Jira ticket (transitions to Done/Resolved/Closed, adds resolution comment)
+2. Clears the dedup registry (future occurrences trigger fresh triage)
+3. Clears PD tracking
+4. Posts outcome to Slack
 
 ---
 
@@ -247,9 +555,21 @@ Only `<!-- exec: -->` tags execute — never free-form LLM output.
 
 ## Simulate incidents
 
+Start with `PAGEMENOT_EXEC_DRY_RUN=true` (the default). The crew runs fully end-to-end — it matches runbooks, produces remediation steps, and posts results to Slack — but no real commands execute. You can verify the full triage flow, approval buttons, and Jira/PagerDuty behavior before enabling live execution.
+
 ```bash
-python scripts/simulate_incident.py payment-500s
+# Recommended first run: OOM scenario with runbook exec steps
 python scripts/simulate_incident.py checkout-oom
+# → crew matches oomkill-response.md runbook, executes kubectl describe/get in dry-run
+# → if steps are [AUTO-SAFE] and exec succeeds: auto-resolved, no Jira
+# → watch: docker compose logs -f pagemenot
+
+# High-risk scenario: deployment rollback requires human approval
+python scripts/simulate_incident.py payment-500s
+# → crew matches rollback-procedure.md, flags rollback as [NEEDS APPROVAL]
+# → Approve/Reject buttons appear in Slack thread
+# → Jira ticket opened, PagerDuty paged
+
 python scripts/simulate_incident.py db-connection-pool
 python scripts/simulate_incident.py --random
 python scripts/simulate_incident.py payment-500s --source grafana
@@ -263,9 +583,11 @@ python scripts/simulate_incident.py payment-500s --source datadog
 Runs on any host with Docker — VPS, on-prem server, cloud VM, Kubernetes, ECS, Cloud Run.
 
 ```bash
-cp .env.example .env
-docker compose up -d
+./setup.sh     # generates .env
+make install   # pull image, start
 ```
+
+> **First startup is slow** — ChromaDB downloads a ~80MB ONNX embedding model on first boot. Cached in a Docker volume (`chromacache`) so subsequent restarts are fast.
 
 | Platform | Notes |
 |----------|-------|
@@ -275,6 +597,47 @@ docker compose up -d
 | GCP Cloud Run | `--min-instances 1` required (Socket Mode needs persistent connection) |
 
 Not suitable for FaaS (Lambda, Cloud Functions) — Slack Socket Mode requires a persistent connection.
+
+### Storage (ChromaDB + approvals)
+
+Pagemenot needs two persistent stores: the vector database (ChromaDB) and approval state.
+
+**Single replica (default — embedded)**
+
+```
+Docker volume: chromadata
+  ├─ /app/data/chroma        ← ChromaDB SQLite + ONNX cache
+  └─ /app/data/approvals.json ← approval state fallback
+```
+
+Works out of the box. `CHROMA_HOST` is unset → ChromaDB runs embedded.
+
+**Multi-replica (ECS, K8s with >1 pod)**
+
+Embedded SQLite on shared EFS/NFS is unsafe for concurrent writes. Run a dedicated ChromaDB server:
+
+```
+┌──────────────────────────────────────────────────┐
+│  pagemenot pod ×N                                 │
+│    CHROMA_HOST=chromadb                           │
+│    CHROMA_PORT=8000                               │
+│    REDIS_URL=redis://redis:6379/0                 │
+└───────────────────┬──────────────────────────────┘
+                    │ HTTP
+        ┌───────────▼───────────┐   ┌──────────────┐
+        │  ChromaDB server      │   │  Redis        │
+        │  chromadb/chroma:0.5  │   │  (approvals)  │
+        │  EBS/pd-ssd volume    │   │               │
+        └───────────────────────┘   └──────────────┘
+```
+
+| Setting | Default | Effect |
+|---------|---------|--------|
+| `CHROMA_HOST` | unset | Embedded mode (single replica) |
+| `CHROMA_PORT` | `8000` | ChromaDB server port |
+| `REDIS_URL` | unset | Approval state (falls back to JSON file) |
+
+For Kubernetes, add ChromaDB as a StatefulSet with a `ReadWriteOnce` PVC. For ECS, run ChromaDB as a sidecar or separate task on a single EC2 instance with an attached EBS volume.
 
 ---
 
@@ -394,6 +757,6 @@ Set `GOOGLE_APPLICATION_CREDENTIALS=/path/to/pagemenot-sa.json` in `.env`.
 |-|-|
 | [CrewAI](https://github.com/crewAIInc/crewAI) | multi-agent orchestration |
 | [Slack Bolt](https://github.com/slackapi/bolt-python) | Slack Socket Mode |
-| [ChromaDB](https://www.trychroma.com/) | embedded vector store |
+| [ChromaDB](https://www.trychroma.com/) | vector store (embedded or remote via `CHROMA_HOST`) |
 | [FastAPI](https://fastapi.tiangolo.com/) | webhook receiver |
 | [Ollama](https://ollama.com) | self-hosted LLM option |

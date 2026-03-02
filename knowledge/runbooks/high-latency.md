@@ -22,7 +22,7 @@
 <!-- exec: kubectl get hpa -n {{ namespace }} -->
 
 ### Step 3 — Verify downstream dependencies
-<!-- exec: curl -sf https://{{ service }}/health -->
+<!-- exec: kubectl rollout status deployment/{{ service }} -n {{ namespace }} -->
 
 ### Step 4 — Roll back if latency began after a deploy
 <!-- exec: kubectl rollout undo deployment/{{ service }} -n {{ namespace }} -->

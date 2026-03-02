@@ -16,9 +16,16 @@ class Settings(BaseSettings):
     anthropic_api_key: Optional[str] = None
     gemini_api_key: Optional[str] = None
     ollama_url: Optional[str] = None
+    ollama_embedding_model: Optional[str] = None  # e.g. nomic-embed-text — enables cross-incident memory with Ollama
 
-    # ── Vector store (embedded ChromaDB) ──────────────────
-    chroma_path: str = "/app/data/chroma"
+    # ── Postmortem LLM (optional — falls back to llm_provider/llm_model) ──
+    postmortem_llm_provider: Optional[str] = None  # e.g. anthropic — used only for postmortem drafting
+    postmortem_llm_model: Optional[str] = None      # e.g. claude-opus-4-6
+
+    # ── Vector store ──────────────────────────────────────
+    chroma_path: str = "/app/data/chroma"   # used only when CHROMA_HOST is not set (embedded mode)
+    chroma_host: Optional[str] = None       # remote ChromaDB server host (required for multi-replica)
+    chroma_port: int = 8000                 # remote ChromaDB server port
 
     # ── Slack ─────────────────────────────────────────────
     pagemenot_channel: str = "incidents"           # channel where results are posted
@@ -62,13 +69,15 @@ class Settings(BaseSettings):
     kubeconfig_path: Optional[str] = None
     pagemenot_exec_namespace: str = "production"  # default k8s namespace for runbook {{ namespace }}
     pagemenot_webhook_rate_limit: str = "60/minute"  # slowapi rate limit string for all webhook endpoints
-    pagemenot_exec_enabled: bool = True         # master switch for autonomous execution
-    pagemenot_exec_dry_run: bool = True         # dry run by default — set false for real execution
-    pagemenot_approval_gate: bool = False       # require human approval for [NEEDS APPROVAL] steps; false = execute automatically
+    pagemenot_exec_dry_run: bool = True         # true = simulate; false = real execution
+    pagemenot_approval_gate: bool = True        # require human approval for [NEEDS APPROVAL] steps
     pagemenot_oncall_channel: Optional[str] = None  # channel to ping on critical escalations
     pagemenot_autoapprove_delay: int = 900      # seconds before auto-executing [AUTO-SAFE] steps
     pagemenot_dedup_ttl_short: int = 600        # dedup window for critical/high (seconds)
     pagemenot_dedup_ttl_long: int = 1800        # dedup window for medium/low (seconds)
+    # Escalation severity thresholds — controls when Jira/PD are triggered
+    pagemenot_jira_min_severity: str = "high"      # open Jira when agent cannot resolve: high/critical only
+    pagemenot_pd_min_severity: str = "high"        # page PD for: high and critical (P1/P2); not medium/low
     # Approval state store
     redis_url: Optional[str] = None  # e.g. redis://localhost:6379/0 — for approval state persistence across restarts
 
@@ -117,7 +126,7 @@ class Settings(BaseSettings):
             integrations.append("kubernetes")
         return integrations
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
 
 settings = Settings()

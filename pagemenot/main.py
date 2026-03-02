@@ -23,13 +23,21 @@ from typing import Optional
 from pagemenot.config import settings
 from pagemenot.knowledge.rag import ingest_all
 from pagemenot.slack_bot import create_slack_app, _chunk_text
-from pagemenot.triage import run_triage, _executor
+from pagemenot.triage import run_triage, _executor, _dedup_key, _active_incidents, _dedup_lock
 
 logging.basicConfig(
     level=getattr(logging, settings.log_level),
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
 )
 logger = logging.getLogger("pagemenot")
+
+# dedup_key → jira issue key / pd incident url / approval id for open incidents; cleared on resolve
+_active_jira_tickets: dict[tuple, str] = {}
+_active_pd_incidents: dict[tuple, str] = {}
+_active_approvals: dict[tuple, str] = {}   # dedup_key → approval_id (prevents duplicate approval buttons)
+_jira_tickets_lock = asyncio.Lock()
+_pd_incidents_lock = asyncio.Lock()
+_approvals_lock = asyncio.Lock()
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
 
@@ -80,7 +88,7 @@ async def lifespan(app: FastAPI):
     logger.info(f"   LLM: {settings.llm_provider}/{settings.llm_model}")
     logger.info(f"   Integrations: {settings.enabled_integrations or ['none — add via .env']}")
     logger.info(f"   Slack channel: #{settings.pagemenot_channel}")
-    logger.info(f"   Exec: {'dry-run' if settings.pagemenot_exec_dry_run else 'enabled' if settings.pagemenot_exec_enabled else 'disabled'}")
+    logger.info(f"   Exec: {'dry-run' if settings.pagemenot_exec_dry_run else 'live'}")
     if settings.llm_provider != "ollama":
         if not settings.llm_external_enterprise_confirmed:
             raise RuntimeError(
@@ -130,9 +138,11 @@ async def pagerduty_webhook(
     await _check_sig("pagerduty", settings.webhook_secret_pagerduty, body, x_pagerduty_signature, prefix="v1=")
     payload = await request.json()
     for msg in payload.get("messages", []):
-        # PagerDuty v2 webhook event type is "incident.triggered"
-        if msg.get("event") == "incident.triggered":
+        event = msg.get("event")
+        if event == "incident.triggered":
             asyncio.create_task(_auto_triage("pagerduty", msg.get("incident", {})))
+        elif event == "incident.resolved":
+            asyncio.create_task(_handle_resolve("pagerduty", msg.get("incident", {})))
     return {"status": "accepted"}
 
 
@@ -161,8 +171,11 @@ async def alertmanager_webhook(
     await _check_sig("alertmanager", settings.webhook_secret_alertmanager, body, x_alertmanager_token)
     payload = await request.json()
     for alert in payload.get("alerts", []):
-        if alert.get("status") == "firing":
+        status = alert.get("status")
+        if status == "firing":
             asyncio.create_task(_auto_triage("alertmanager", alert))
+        elif status == "resolved":
+            asyncio.create_task(_handle_resolve("alertmanager", alert))
     return {"status": "accepted"}
 
 
@@ -309,8 +322,8 @@ async def _page_pagerduty(result) -> Optional[str]:
     return None
 
 
-async def _open_jira_ticket(result) -> Optional[str]:
-    """Create a Jira SM service request. Returns the browser URL or None on failure."""
+async def _open_jira_ticket(result) -> Optional[tuple[str, str]]:
+    """Create a Jira SM service request. Returns (issue_key, browser_url) or None on failure."""
     if not (settings.jira_sm_url and settings.jira_sm_email and
             settings.jira_sm_api_token and settings.jira_sm_project_key):
         return None
@@ -371,6 +384,12 @@ async def _open_jira_ticket(result) -> Optional[str]:
                             f"Severity: {result.severity}\n\n"
                             f"Root cause: {result.root_cause}\n\n"
                             f"Triage confidence: {result.confidence}"
+                            + (
+                                "\n\n⚠️ Human approval required before remediation can proceed.\n"
+                                "Steps awaiting approval:\n"
+                                + "\n".join(f"  - {s}" for s in result.needs_approval)
+                                if result.needs_approval else ""
+                            )
                         ),
                     },
                 },
@@ -380,109 +399,407 @@ async def _open_jira_ticket(result) -> Optional[str]:
             issue_key = resp.json().get("issueKey", "")
             url = f"{base}/browse/{issue_key}"
             logger.info("Jira ticket created: %s", url)
-            return url
+            return (issue_key, url)
         logger.warning("Jira ticket creation failed: %s %s", resp.status_code, resp.text[:200])
     except Exception as e:
         logger.warning("Jira ticket creation error: %s", e)
     return None
 
 
-async def _auto_triage(source: str, payload: dict):
-    """Run triage and route result based on severity and resolution status."""
+
+async def _close_jira_ticket(issue_key: str, comment: str) -> bool:
+    """Add a resolution comment and transition a Jira issue to Done/Resolved/Closed."""
+    if not (settings.jira_sm_url and settings.jira_sm_email and settings.jira_sm_api_token):
+        return False
+    import httpx
+
+    base = settings.jira_sm_url.rstrip("/")
+    credentials = base64.b64encode(
+        f"{settings.jira_sm_email}:{settings.jira_sm_api_token}".encode()
+    ).decode()
+    headers = {
+        "Authorization": f"Basic {credentials}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
     try:
-        from pagemenot.slack_bot import get_client
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(
+                f"{base}/rest/api/3/issue/{issue_key}/comment",
+                headers=headers,
+                json={"body": {"type": "doc", "version": 1, "content": [
+                    {"type": "paragraph", "content": [{"type": "text", "text": comment}]}
+                ]}},
+            )
+            r = await client.get(
+                f"{base}/rest/api/3/issue/{issue_key}/transitions", headers=headers
+            )
+            transitions = r.json().get("transitions", [])
+            _close_names = {"done", "resolved", "closed", "complete"}
+            transition_id = next(
+                (t["id"] for t in transitions if t.get("name", "").lower() in _close_names),
+                None,
+            )
+            if not transition_id:
+                logger.warning(
+                    "Jira %s: no close transition found (available: %s)",
+                    issue_key,
+                    [t.get("name") for t in transitions],
+                )
+                return False
+            await client.post(
+                f"{base}/rest/api/3/issue/{issue_key}/transitions",
+                headers=headers,
+                json={"transition": {"id": transition_id}},
+            )
+            logger.info("Jira ticket %s closed via transition %s", issue_key, transition_id)
+            return True
+    except Exception as e:
+        logger.warning("Jira close error for %s: %s", issue_key, e)
+    return False
 
+
+async def _handle_resolve(source: str, payload: dict) -> None:
+    """Handle a monitoring-system resolve event: clear dedup registry and close any open Jira ticket."""
+    from pagemenot.triage import _parse_alert
+    from pagemenot.slack_bot import get_client
+
+    try:
+        parsed = _parse_alert(source, payload)
+    except Exception as e:
+        logger.warning("_handle_resolve: could not parse %s payload: %s", source, e)
+        return
+
+    key = _dedup_key(parsed["service"], parsed["title"])
+
+    # Peek at issue_key without removing yet — only remove after successful close
+    async with _jira_tickets_lock:
+        issue_key = _active_jira_tickets.get(key)
+
+    async with _pd_incidents_lock:
+        _active_pd_incidents.pop(key, None)
+
+    # Clear dedup registry so future occurrences trigger fresh triage
+    with _dedup_lock:
+        _active_incidents.pop(key, None)
+
+    if not issue_key:
+        return
+
+    comment = (
+        f"Alert resolved by {source}. Service: {parsed['service']}. "
+        "Closing automatically — no further action required."
+    )
+    closed = await _close_jira_ticket(issue_key, comment)
+
+    client = get_client()
+    channel = settings.pagemenot_channel
+    if closed:
+        async with _jira_tickets_lock:
+            _active_jira_tickets.pop(key, None)
+        await client.chat_postMessage(
+            channel=channel,
+            text=f"✅ *{parsed['title']}* resolved — Jira {issue_key} closed automatically.",
+        )
+    else:
+        await client.chat_postMessage(
+            channel=channel,
+            text=f"✅ *{parsed['title']}* resolved — could not close Jira {issue_key} automatically.",
+        )
+
+_SEVERITY_ORDER = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+
+
+
+def _meets_severity(severity: str, threshold: str) -> bool:
+    return _SEVERITY_ORDER.get(severity, 0) >= _SEVERITY_ORDER.get(threshold, 0)
+
+
+async def _auto_triage(source: str, payload: dict):
+    """Run triage and post all updates to Slack in a thread."""
+    import uuid
+    from pagemenot.slack_bot import get_client, _approval_store
+    from pagemenot.triage import _parse_alert
+
+    client = get_client()
+    channel = settings.pagemenot_channel
+    thread_ts: Optional[str] = None
+
+    try:
+        # Step 1: post alert immediately so Slack shows it before crew starts
+        parsed = _parse_alert(source, payload)
+        sev_icon = {"critical": "🔴", "high": "🟠", "medium": "🟡"}.get(parsed.get("severity", ""), "⚪")
+        alert_title = parsed.get("title", "Unknown alert")
+        service = parsed.get("service", "unknown")
+
+        main_resp = await client.chat_postMessage(
+            channel=channel,
+            text=f"{sev_icon} *{alert_title}* — `{service}`",
+        )
+        thread_ts = main_resp["ts"]
+
+        await client.chat_postMessage(
+            channel=channel,
+            thread_ts=thread_ts,
+            text="🔍 Crew is investigating...",
+        )
+
+    except Exception as e:
+        logger.error("Failed to post alert to Slack: %s", e, exc_info=True)
+
+    # Step 2: run triage (may take several minutes)
+    try:
         result = await run_triage(source=source, payload=payload)
-        client = get_client()
-        channel = settings.pagemenot_channel
+    except Exception as e:
+        logger.error("Triage crew crashed: %s", e, exc_info=True)
+        if thread_ts:
+            try:
+                await client.chat_postMessage(
+                    channel=channel,
+                    thread_ts=thread_ts,
+                    text=f"⚠️ Triage failed — crew error: `{e}`\nManual review required.",
+                )
+            except Exception:
+                pass
+        return
 
-        # Suppressed (duplicate or low-severity)
+    # Step 3: post result in thread
+    try:
         if result.suppressed:
             sev_label = "Low-severity" if result.severity == "low" else "Duplicate"
             await client.chat_postMessage(
                 channel=channel,
-                text=f"⚪ {sev_label} suppressed: {result.alert_title} ({result.service})",
+                thread_ts=thread_ts,
+                text=f"⚪ {sev_label} — suppressed (no action taken)",
             )
             return
 
-        # Auto-resolved by runbook execution
-        if result.resolved_automatically:
-            log_text = "\n".join(result.execution_log) if result.execution_log else "No steps logged."
-            dry = settings.pagemenot_exec_dry_run
-            await client.chat_postMessage(
-                channel=channel,
-                text=(
-                    f"{'🔵 *Dry run* —' if dry else '✅'} *{'Would have resolved' if dry else 'Auto-resolved'}:* {result.alert_title}\n"
-                    f"Service: {result.service} | ⏱️ {result.duration_seconds:.1f}s\n\n"
-                    f"*{'Steps that would execute' if dry else 'Steps executed'}:*\n{log_text}"
-                ),
-            )
-            return
-
+        dry = settings.pagemenot_exec_dry_run
         sev = {"critical": "🔴", "high": "🟠", "medium": "🟡"}.get(result.severity, "⚪")
         conf = {"high": "🟢", "medium": "🟡", "low": "🔴"}.get(result.confidence, "⚪")
-        needs_page = result.severity in ("critical", "high")
 
-        headline = (
-            f"{sev} *INCIDENT: {result.alert_title}* — could not auto-resolve, escalating"
-            if needs_page
-            else f"{sev} {result.alert_title} — triage complete, no runbook match"
-        )
-        resp = await client.chat_postMessage(channel=channel, text=headline)
-        thread = resp["ts"]
-
-        # Root cause + analysis in thread
-        await client.chat_postMessage(
-            channel=channel,
-            thread_ts=thread,
-            text=(
-                f"*🔍 Root Cause* (confidence: {conf} {result.confidence})\n\n"
-                f"{result.root_cause}\n\n"
-                f"⏱️ Triaged in {result.duration_seconds:.1f}s"
-            ),
-        )
-
-        if result.raw_output:
-            for i, chunk in enumerate(_chunk_text(result.raw_output, 2900)[:3]):
-                await client.chat_postMessage(
-                    channel=channel,
-                    thread_ts=thread,
-                    text=f"Detailed analysis (part {i + 1})\n```{chunk}```",
-                )
-
-        # Page humans only for critical/high that could not be auto-resolved
-        if needs_page:
-            jira_url, pd_url = await asyncio.gather(
-                _open_jira_ticket(result),
-                _page_pagerduty(result),
-                return_exceptions=True,
+        if result.resolved_automatically:
+            log_text = "\n".join(result.execution_log) if result.execution_log else "No steps logged."
+            verb = "Would resolve (dry-run)" if dry else "Resolved by agent"
+            icon = "🔵" if dry else "✅"
+            # Post outcome at channel level so it's immediately visible
+            await client.chat_postMessage(
+                channel=channel,
+                text=f"{icon} *{verb}* — `{result.service}` / {result.alert_title} | ⏱️ {result.duration_seconds:.1f}s",
             )
-            if isinstance(jira_url, str):
-                await client.chat_postMessage(
-                    channel=channel,
-                    thread_ts=thread,
-                    text=f"🎫 Jira ticket opened: {jira_url}",
-                )
-            if isinstance(pd_url, str):
-                await client.chat_postMessage(
-                    channel=channel,
-                    thread_ts=thread,
-                    text=f"📟 On-call paged via PagerDuty: {pd_url}",
-                )
+            # Detailed steps in thread
+            await client.chat_postMessage(
+                channel=channel,
+                thread_ts=thread_ts,
+                text=(
+                    f"{icon} *{verb}* ⏱️ {result.duration_seconds:.1f}s\n\n"
+                    f"*Root cause:* {result.root_cause}\n\n"
+                    f"*{'Steps (dry run)' if dry else 'Steps executed'}:*\n{log_text}"
+                ),
+            )
+        else:
+            # Incident is unresolved — determine escalation path
+            has_approval_steps = bool(result.needs_approval)
+            has_runbook_steps = bool(result.remediation_steps) and not has_approval_steps
+            # Jira for all unresolved incidents (threshold configurable, default: low)
+            needs_jira = _meets_severity(result.severity, settings.pagemenot_jira_min_severity)
+            # PD only for high/critical (threshold configurable, default: high)
+            needs_pd = _meets_severity(result.severity, settings.pagemenot_pd_min_severity)
 
-            if settings.pagemenot_oncall_channel:
-                pd_line = f"\n📟 PagerDuty: {pd_url}" if isinstance(pd_url, str) else ""
+            # Priority order: high/critical escalation > approval needed > runbook-only > no match
+            if needs_pd and not has_approval_steps:
+                status_line = "🚨 *Could not resolve — escalating*"
+                channel_summary = f"🚨 *Escalating* — `{result.service}` / {result.alert_title} | {sev} {result.severity}"
+            elif has_approval_steps:
+                icon = "🚨" if needs_pd else "⚠️"
+                status_line = f"{icon} *Approval required*"
+                channel_summary = f"{icon} *Approval required* — `{result.service}` / {result.alert_title} | {sev} {result.severity}"
+            elif has_runbook_steps:
+                status_line = "⚠️ Not auto-resolved — crew has runbook steps"
+                channel_summary = f"⚠️ *Runbook steps ready* — `{result.service}` / {result.alert_title} | exec not configured"
+            else:
+                status_line = "⚠️ No runbook match"
+                channel_summary = f"⚠️ *No runbook match* — `{result.service}` / {result.alert_title} | {sev} {result.severity}"
+
+            # Post outcome at channel level
+            await client.chat_postMessage(channel=channel, text=channel_summary)
+            # Post detail in thread
+            await client.chat_postMessage(
+                channel=channel,
+                thread_ts=thread_ts,
+                text=(
+                    f"{status_line} | ⏱️ {result.duration_seconds:.1f}s\n\n"
+                    f"*Root cause* ({conf} {result.confidence}): {result.root_cause}"
+                ),
+            )
+
+            if result.raw_output:
+                for i, chunk in enumerate(_chunk_text(result.raw_output, 2900)[:3]):
+                    await client.chat_postMessage(
+                        channel=channel,
+                        thread_ts=thread_ts,
+                        text=f"Analysis (part {i + 1})\n```{chunk}```",
+                    )
+
+            dedup_key = _dedup_key(result.service, result.alert_title)
+            async with _jira_tickets_lock:
+                existing_jira = _active_jira_tickets.get(dedup_key)
+            async with _pd_incidents_lock:
+                existing_pd = _active_pd_incidents.get(dedup_key)
+
+            jira_url: Optional[str] = None
+            new_pd_url: Optional[str] = None
+
+            # Jira: open for all unresolved incidents (threshold=low by default)
+            if needs_jira:
+                if existing_jira:
+                    jira_url = f"{settings.jira_sm_url.rstrip('/')}/browse/{existing_jira}" if settings.jira_sm_url else None
+                    await client.chat_postMessage(
+                        channel=channel,
+                        thread_ts=thread_ts,
+                        text=f"🎫 Jira already open: {jira_url}",
+                    )
+                else:
+                    jira_info = await _open_jira_ticket(result)
+                    if isinstance(jira_info, tuple):
+                        issue_key, jira_url = jira_info
+                        async with _jira_tickets_lock:
+                            _active_jira_tickets[dedup_key] = issue_key
+                        await client.chat_postMessage(
+                            channel=channel, thread_ts=thread_ts, text=f"🎫 Jira: {jira_url}",
+                        )
+
+            # PagerDuty: page for high/critical only
+            if needs_pd:
+                if existing_pd:
+                    await client.chat_postMessage(
+                        channel=channel,
+                        thread_ts=thread_ts,
+                        text=f"📟 PagerDuty already paged: {existing_pd}",
+                    )
+                else:
+                    pd_result = await _page_pagerduty(result)
+                    if isinstance(pd_result, str):
+                        new_pd_url = pd_result
+                        async with _pd_incidents_lock:
+                            _active_pd_incidents[dedup_key] = new_pd_url
+                        await client.chat_postMessage(
+                            channel=channel, thread_ts=thread_ts, text=f"📟 PagerDuty: {new_pd_url}",
+                        )
+
+            # Approval buttons — posted as a top-level message so they're immediately visible
+            # One approval per incident: skip if a button for this exact incident is already pending
+            if result.needs_approval and settings.pagemenot_approval_gate:
+                approval_dedup = _dedup_key(result.service, result.alert_title)
+                async with _approvals_lock:
+                    existing_approval = _active_approvals.get(approval_dedup)
+                # Check if the existing approval is still in the store (not yet handled)
+                if existing_approval and await _approval_store.peek(existing_approval):
+                    await client.chat_postMessage(
+                        channel=channel,
+                        thread_ts=thread_ts,
+                        text=f"⏳ Approval already pending for `{result.service}` / {result.alert_title} — waiting for response.",
+                    )
+                else:
+                    approval_id = str(uuid.uuid4())[:8]
+                    async with _approvals_lock:
+                        _active_approvals[approval_dedup] = approval_id
+                    await _approval_store.set(approval_id, {
+                        "steps": result.needs_approval,
+                        "service": result.service or "",
+                        "alert_title": result.alert_title or "",
+                        "jira_url": jira_url or "",
+                        "channel": channel,
+                    })
+                    approval_text = "\n".join(f"• `{a}`" for a in result.needs_approval)
+                    approval_icon = "🚨" if needs_pd else "⚠️"
+                    await client.chat_postMessage(
+                        channel=channel,
+                        text=f"Approval required: {result.alert_title} ({result.service})",
+                        blocks=[
+                            {
+                                "type": "header",
+                                "text": {"type": "plain_text", "text": f"{approval_icon} Approval required — {result.service}"},
+                            },
+                            {
+                                "type": "section",
+                                "text": {
+                                    "type": "mrkdwn",
+                                    "text": (
+                                        f"{sev} *{result.alert_title}*\n"
+                                        f"_(see triage thread in #{channel})_\n\n"
+                                        f"*Steps requiring approval:*\n{approval_text}"
+                                    ),
+                                },
+                            },
+                            {
+                                "type": "actions",
+                                "elements": [
+                                    {
+                                        "type": "button",
+                                        "text": {"type": "plain_text", "text": "✅ Approve & Execute"},
+                                        "action_id": "approve_action",
+                                        "value": approval_id,
+                                        "style": "primary",
+                                    },
+                                    {
+                                        "type": "button",
+                                        "text": {"type": "plain_text", "text": "❌ Reject"},
+                                        "action_id": "reject_action",
+                                        "value": approval_id,
+                                        "style": "danger",
+                                    },
+                                ],
+                            },
+                        ],
+                    )
+
+            # Escalation channel ping: only for high/critical (needs_pd), first time only
+            escalation_channel = settings.pagemenot_oncall_channel
+            if needs_pd and escalation_channel and not (existing_jira and existing_pd):
+                effective_pd = existing_pd or new_pd_url
+                try:
+                    pl = await client.chat_getPermalink(channel=channel, message_ts=thread_ts)
+                    thread_link = pl.get("permalink", "")
+                except Exception:
+                    thread_link = ""
+                links = []
+                if thread_link:
+                    links.append(f"🔗 <{thread_link}|View thread in #{channel}>")
+                if jira_url:
+                    links.append(f"🎫 Jira: {jira_url}")
+                if effective_pd:
+                    links.append(f"📟 PagerDuty: {effective_pd}")
+                links_line = "\n" + "\n".join(links) if links else ""
+                reason = "Needs human approval" if has_approval_steps else "Crew could not resolve"
                 await client.chat_postMessage(
-                    channel=settings.pagemenot_oncall_channel,
+                    channel=escalation_channel,
                     text=(
-                        f"{sev} *ESCALATION:* {result.alert_title} ({result.service})\n"
-                        f"Confidence: {conf} {result.confidence} — could not auto-resolve — see #{channel}"
-                        f"{pd_line}"
+                        f"{sev} *ESCALATION:* {result.alert_title} (`{result.service}`)\n"
+                        f"Severity: {sev} {result.severity} | Confidence: {conf} {result.confidence}\n"
+                        f"{reason}"
+                        f"{links_line}"
                     ),
                 )
 
+        if result.postmortem_path and not result.pending_review:
+            await client.chat_postMessage(
+                channel=channel,
+                thread_ts=thread_ts,
+                text=f"📝 Postmortem saved: `knowledge/postmortems/{result.postmortem_path}`",
+            )
+        elif result.postmortem_path and result.pending_review:
+            await client.chat_postMessage(
+                channel=channel,
+                thread_ts=thread_ts,
+                text=(
+                    f"📋 Postmortem draft needs review (medium confidence): "
+                    f"`knowledge/pending_review/{result.postmortem_path}`"
+                ),
+            )
+
     except Exception as e:
-        logger.error(f"Auto-triage failed: {e}", exc_info=True)
+        logger.error("Failed to post triage result to Slack: %s", e, exc_info=True)
 
 
 if __name__ == "__main__":

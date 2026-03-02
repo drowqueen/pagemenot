@@ -18,6 +18,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from concurrent.futures import ThreadPoolExecutor
 
@@ -33,7 +34,9 @@ _dedup_lock = threading.Lock()
 
 
 def _dedup_key(service: str, title: str) -> tuple[str, str]:
-    return (service.lower(), str(hash(title.lower()[:60])))
+    import hashlib
+    h = hashlib.sha256(title.lower()[:60].encode()).hexdigest()[:16]
+    return (service.lower(), h)
 
 
 def _check_and_register(service: str, title: str, severity: str) -> bool:
@@ -94,6 +97,8 @@ class TriageResult:
     remediation_steps: list[str] = field(default_factory=list)
     needs_approval: list[str] = field(default_factory=list)
     postmortem_draft: str = ""
+    postmortem_path: str = ""
+    pending_review: bool = False
     raw_output: str = ""
     duration_seconds: float = 0.0
     suppressed: bool = False              # True = dedup or severity gate, crew never ran
@@ -107,7 +112,7 @@ def _parse_alert(source: str, payload: dict) -> dict:
         return {
             "title": payload.get("title", payload.get("description", "Unknown")),
             "service": payload.get("service", {}).get("name", "unknown"),
-            "severity": "critical" if payload.get("urgency") == "high" else "medium",
+            "severity": "critical" if payload.get("urgency") == "high" else "low",
             "description": payload.get("description", ""),
             "external_id": payload.get("id", ""),
         }
@@ -130,7 +135,9 @@ def _parse_alert(source: str, payload: dict) -> dict:
         return {
             "title": payload.get("title", payload.get("event_title", "Unknown")),
             "service": tags.get("service", _guess_service(str(payload))),
-            "severity": "critical" if payload.get("alert_type") == "error" else "medium",
+            "severity": {"error": "critical", "warning": "high", "info": "low"}.get(
+                payload.get("alert_type", ""), "medium"
+            ),
             "description": payload.get("body", payload.get("text", "")),
             "external_id": str(payload.get("id", "")),
         }
@@ -138,7 +145,9 @@ def _parse_alert(source: str, payload: dict) -> dict:
         return {
             "title": payload.get("name", payload.get("condition_name", "Unknown")),
             "service": payload.get("targets", [{}])[0].get("name", "unknown") if payload.get("targets") else "unknown",
-            "severity": "critical" if payload.get("severity", "").upper() == "CRITICAL" else "medium",
+            "severity": {"CRITICAL": "critical", "HIGH": "high", "WARNING": "medium", "INFO": "low"}.get(
+                payload.get("severity", "").upper(), "medium"
+            ),
             "description": payload.get("details", ""),
             "external_id": str(payload.get("incident_id", "")),
         }
@@ -227,17 +236,23 @@ def _seed_mock_if_needed(parsed_alert: dict):
     logger.debug(f"No mock scenario found for service '{service}', using defaults")
 
 
-def _run_crew_sync(alert_summary: str) -> str:
-    """Run the crew synchronously (in thread pool)."""
+def _run_crew_sync(alert_summary: str) -> tuple[str, dict | None]:
+    """Run the crew synchronously (in thread pool). Returns (raw_str, structured_dict | None)."""
     from pagemenot.crew import build_triage_crew
 
     crew = build_triage_crew(alert_summary)
     result = crew.kickoff()
-    return str(result)
+    raw = str(result)
+    structured = None
+    if result.tasks_output:
+        last = result.tasks_output[-1]
+        if getattr(last, "json_dict", None):
+            structured = last.json_dict
+    return raw, structured
 
 
-def _parse_crew_output(raw: str, parsed_alert: dict) -> TriageResult:
-    """Extract structured fields from crew output text."""
+def _parse_crew_output(raw: str, structured: dict | None, parsed_alert: dict) -> TriageResult:
+    """Build TriageResult from structured JSON output (preferred) or prose fallback."""
     result = TriageResult(
         alert_title=parsed_alert["title"],
         service=parsed_alert["service"],
@@ -245,57 +260,79 @@ def _parse_crew_output(raw: str, parsed_alert: dict) -> TriageResult:
         raw_output=raw,
     )
 
-    lower = raw.lower()
-
-    # Root cause
-    for marker in ["root cause:", "root cause analysis:", "**root cause"]:
-        if marker in lower:
-            idx = lower.index(marker)
-            chunk = raw[idx:idx + 500]
-            lines = chunk.split("\n")
-            result.root_cause = (lines[1].strip(" -•*") if len(lines) > 1
-                                 else lines[0].split(":", 1)[-1].strip())[:300]
-            break
-
-    # Confidence
-    for level in ["high", "medium", "low"]:
-        if f"confidence: {level}" in lower or f"confidence level: {level}" in lower:
-            result.confidence = level
-            break
-
-    # Remediation steps (AUTO-SAFE and NEEDS APPROVAL)
-    for line in raw.split("\n"):
-        stripped = line.strip(" -•*[]")
-        if "[AUTO-SAFE]" in line:
-            result.remediation_steps.append(stripped)
-        if "NEEDS APPROVAL" in line or "HUMAN APPROVAL" in line:
-            result.needs_approval.append(stripped)
+    if structured:
+        result.root_cause = structured.get("root_cause", "")[:300]
+        result.confidence = structured.get("confidence", "unknown")
+        result.evidence = structured.get("evidence", [])
+        steps = structured.get("remediation_steps", [])
+        for step in steps:
+            s = step if isinstance(step, str) else str(step)
+            if "NEEDS APPROVAL" in s or "HUMAN APPROVAL" in s:
+                result.needs_approval.append(s)
+            else:
+                result.remediation_steps.append(s)
+        result.postmortem_draft = structured.get("postmortem_summary", "")
+    else:
+        # Prose fallback for LLMs that ignore output_json
+        lower = raw.lower()
+        for marker in ["root cause:", "root cause analysis:", "**root cause"]:
+            if marker in lower:
+                idx = lower.index(marker)
+                chunk = raw[idx:idx + 500]
+                lines = chunk.split("\n")
+                result.root_cause = (lines[1].strip(" -•*") if len(lines) > 1
+                                     else lines[0].split(":", 1)[-1].strip())[:300]
+                break
+        for level in ["high", "medium", "low"]:
+            if f"confidence: {level}" in lower or f"confidence level: {level}" in lower:
+                result.confidence = level
+                break
+        for line in raw.split("\n"):
+            s = line.strip(" -•*[]")
+            if "[AUTO-SAFE]" in line:
+                result.remediation_steps.append(s)
+            if "NEEDS APPROVAL" in line or "HUMAN APPROVAL" in line:
+                result.needs_approval.append(s)
 
     if not result.root_cause:
-        result.root_cause = "See detailed analysis below."
+        result.root_cause = "Root cause could not be determined — see raw analysis."
 
     return result
 
 
-def _try_runbook_exec(result: TriageResult):
-    """Attempt autonomous runbook execution. Mutates result in place."""
-    if not settings.pagemenot_exec_enabled:
-        return
+_DESTRUCTIVE_PATTERNS = ("rollout undo", "delete ", "scale ", "--replicas=0")
 
+
+def _is_destructive(step: str) -> bool:
+    cmd = step.lower()
+    return any(p in cmd for p in _DESTRUCTIVE_PATTERNS)
+
+
+def _try_runbook_exec(result: TriageResult):
+    """Attempt autonomous runbook execution. Mutates result in place.
+
+    When PAGEMENOT_APPROVAL_GATE=true, destructive steps (rollout undo,
+    delete, scale-to-zero) are skipped. The incident stays unresolved so
+    approval buttons appear in Slack; handle_approve then runs all steps.
+    """
     from pagemenot.tools import get_runbook_exec_steps, dispatch_exec_step
 
-    # Only use <!-- exec: --> tagged steps from verified runbook files.
-    # LLM-generated [AUTO-SAFE] text is NEVER used for autonomous execution
-    # (prompt injection risk: attacker could craft alert text to inject commands).
     steps = get_runbook_exec_steps(result.alert_title, service=result.service)
-
     if not steps:
         return
 
+    gate = settings.pagemenot_approval_gate
     mode = "DRY RUN" if settings.pagemenot_exec_dry_run else "EXEC"
     logger.info(f"[{mode}] Attempting runbook exec: {len(steps)} step(s) for {result.service}")
+
     all_ok = True
+    gated_steps = []
     for step in steps:
+        if gate and _is_destructive(step):
+            gated_steps.append(step)
+            result.execution_log.append(f"⏸ {step[:100]}: awaiting human approval")
+            logger.info(f"Approval gate: deferred {step[:80]}")
+            continue
         try:
             output = dispatch_exec_step(step, service=result.service)
             result.execution_log.append(f"✅ {step[:100]}: {output[:150]}")
@@ -304,11 +341,119 @@ def _try_runbook_exec(result: TriageResult):
             result.execution_log.append(f"❌ {step[:100]}: {e}")
             logger.warning(f"Exec step failed: {step[:80]} — {e}")
             all_ok = False
-            break  # stop on first failure, escalate with context
+            break
 
-    if all_ok and steps:
+    if all_ok and steps and not gated_steps:
         result.resolved_automatically = True
         logger.info(f"Incident auto-resolved: {result.alert_title}")
+    elif gated_steps:
+        logger.info(f"Approval required for {len(gated_steps)} destructive step(s) — awaiting human")
+
+
+def _generate_postmortem_narrative(result: TriageResult) -> str:
+    """Call the postmortem LLM to write a narrative RCA. Falls back to structured summary on error."""
+    try:
+        from pagemenot.crew import build_postmortem_llm
+        llm = build_postmortem_llm()
+        evidence_text = "\n".join(f"- {e}" for e in result.evidence) if result.evidence else "N/A"
+        steps_text = "\n".join(f"- {s}" for s in result.remediation_steps) if result.remediation_steps else "N/A"
+        prompt = (
+            f"Write a concise incident postmortem narrative (3-4 paragraphs) for an SRE knowledge base.\n\n"
+            f"Alert: {result.alert_title}\n"
+            f"Service: {result.service}\n"
+            f"Severity: {result.severity}\n"
+            f"Root cause: {result.root_cause}\n"
+            f"Evidence:\n{evidence_text}\n"
+            f"Steps taken:\n{steps_text}\n"
+            f"Auto-resolved: {result.resolved_automatically}\n\n"
+            f"Write: (1) what happened and impact, (2) root cause analysis, "
+            f"(3) resolution summary, (4) prevention recommendations. "
+            f"Be specific and factual. No filler."
+        )
+        response = llm.call(messages=[{"role": "user", "content": prompt}])
+        return response if isinstance(response, str) else str(response)
+    except Exception as e:
+        logger.warning(f"Postmortem narrative generation failed: {e}")
+        return result.root_cause
+
+
+def _retrieve_past_context(alert_title: str, service: str) -> str:
+    """Query postmortems RAG for incidents matching this service/alert. Returns filtered summaries."""
+    try:
+        import chromadb
+        from pagemenot.config import settings as _s
+        client = chromadb.PersistentClient(path=_s.chroma_path)
+        try:
+            collection = client.get_collection("incidents")
+        except Exception:
+            return ""
+        results = collection.query(
+            query_texts=[f"{service} {alert_title}"],
+            n_results=3,
+            where={"type": "postmortem"},
+        )
+        docs = results.get("documents", [[]])[0]
+        metas = results.get("metadatas", [[]])[0]
+        lines = []
+        for doc, meta in zip(docs, metas):
+            # Only include postmortems for the same service to avoid cross-contamination
+            if meta.get("service", "general") not in (service, "general"):
+                continue
+            title = meta.get("title", "Unknown incident")
+            lines.append(f"- {title}: {doc[:200].strip()}")
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
+def _write_postmortem(result: TriageResult) -> tuple[Path | None, bool]:
+    """Write an auto-generated postmortem MD and index it if confidence is high."""
+    from pagemenot.knowledge.rag import POSTMORTEMS_DIR, add_postmortem
+
+    if result.confidence == "high":
+        target_dir = POSTMORTEMS_DIR
+        index = True
+    elif result.confidence == "medium":
+        target_dir = POSTMORTEMS_DIR.parent / "pending_review"
+        index = False
+    else:
+        return None, False
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    slug = re.sub(r"[^\w]+", "-", result.service.lower()).strip("-")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    filepath = target_dir / f"{slug}_{timestamp}.md"
+
+    evidence_md = "\n".join(f"- {e}" for e in result.evidence) if result.evidence else "- N/A"
+    remediation_md = "\n".join(f"- {s}" for s in result.remediation_steps) if result.remediation_steps else "- N/A"
+    similar_md = "\n".join(f"- {s}" for s in result.similar_incidents) if result.similar_incidents else "- N/A"
+
+    narrative = _generate_postmortem_narrative(result)
+
+    content = (
+        f"# Incident: {result.alert_title}\n\n"
+        f"**Service:** {result.service}\n"
+        f"**Severity:** {result.severity}\n"
+        f"**Date:** {datetime.now(timezone.utc).strftime('%Y-%m-%d')}\n"
+        f"**Resolved automatically:** {result.resolved_automatically}\n"
+        f"**Triage confidence:** {result.confidence}\n\n"
+        f"## Analysis\n\n{narrative}\n\n"
+        f"## Root Cause\n\n{result.root_cause}\n\n"
+        f"## Evidence\n\n{evidence_md}\n\n"
+        f"## Remediation\n\n{remediation_md}\n\n"
+        f"## Similar Incidents\n\n{similar_md}\n"
+    )
+
+    try:
+        filepath.write_text(content, encoding="utf-8")
+        logger.info(f"Postmortem written: {filepath.name}")
+        if index:
+            add_postmortem(filepath)
+        return filepath, not index
+    except Exception as e:
+        logger.warning(f"Postmortem write failed: {e}")
+        return None, False
 
 
 async def run_triage(source: str, payload: dict[str, Any]) -> TriageResult:
@@ -344,24 +489,32 @@ async def run_triage(source: str, payload: dict[str, Any]) -> TriageResult:
     # 4. Seed mocks if real integrations aren't configured
     _seed_mock_if_needed(parsed)
 
-    # 5. Build summary for the crew — redact credentials before sending to LLM
+    # 5. Build summary for the crew — inject relevant past incident context from postmortems RAG
     raw_description = parsed.get('description', 'N/A')
+    past_context = _retrieve_past_context(parsed['title'], parsed['service'])
     summary = _redact_sensitive(
         f"**Alert:** {parsed['title']}\n"
         f"**Service:** {parsed['service']}\n"
         f"**Severity:** {parsed['severity']}\n"
         f"**Description:** {raw_description}\n"
         f"**Time:** {datetime.now(timezone.utc).isoformat()}"
+        + (f"\n\n**Similar past incidents (for context only — focus on current alert):**\n{past_context}" if past_context else "")
     )
 
     # 6. Run crew
     loop = asyncio.get_running_loop()
-    raw = await loop.run_in_executor(_executor, _run_crew_sync, summary)
+    raw, structured = await loop.run_in_executor(_executor, _run_crew_sync, summary)
 
     # 7. Parse output
-    result = _parse_crew_output(raw, parsed)
+    result = _parse_crew_output(raw, structured, parsed)
 
-    # 8. Attempt runbook-driven resolution (only if exec is enabled)
+    # 8. Write postmortem (high confidence → index; medium → pending_review)
+    pm_path, pm_pending = _write_postmortem(result)
+    if pm_path:
+        result.postmortem_path = str(pm_path.name)
+        result.pending_review = pm_pending
+
+    # 9. Attempt runbook-driven resolution (only if exec is enabled)
     _try_runbook_exec(result)
 
     result.duration_seconds = (datetime.now(timezone.utc) - start).total_seconds()

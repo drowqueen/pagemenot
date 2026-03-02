@@ -6,13 +6,32 @@ which auto-detects: real integration configured? Use it. Not configured?
 Use the mock. Teams never see the difference in the agent config.
 """
 
+from typing import Literal
+
 from crewai import Agent, Task, Crew, Process, LLM
+from pydantic import BaseModel, Field, field_validator
 from pagemenot.config import settings
 from pagemenot.mock_tools import get_available_tools
 
 import logging
 
 logger = logging.getLogger("pagemenot.crew")
+
+
+class TriageOutput(BaseModel):
+    root_cause: str = Field(description="Specific root cause of the incident.")
+    confidence: Literal["high", "medium", "low"] = Field(description="Confidence in the root cause.")
+    evidence: list[str] = Field(default=[], description="Key evidence supporting the root cause.")
+    remediation_steps: list[str] = Field(default=[], description="Ordered fix steps, each prefixed [AUTO-SAFE] or [NEEDS APPROVAL].")
+    postmortem_summary: str = Field(default="", description="3-sentence postmortem summary.")
+
+    @field_validator("remediation_steps", "evidence", mode="before")
+    @classmethod
+    def coerce_to_list(cls, v):
+        if isinstance(v, str):
+            lines = [line.strip() for line in v.splitlines() if line.strip()]
+            return lines if lines else ([v] if v else [])
+        return v
 
 
 def _build_llm() -> LLM:
@@ -24,6 +43,20 @@ def _build_llm() -> LLM:
         return LLM(model=f"gemini/{settings.llm_model}", api_key=settings.gemini_api_key)
     else:
         return LLM(model=f"openai/{settings.llm_model}", api_key=settings.openai_api_key)
+
+
+def build_postmortem_llm() -> LLM:
+    """LLM for postmortem drafting. Uses POSTMORTEM_LLM_* if set, otherwise falls back to triage LLM."""
+    provider = settings.postmortem_llm_provider or settings.llm_provider
+    model = settings.postmortem_llm_model or settings.llm_model
+    if provider == "ollama":
+        return LLM(model=f"ollama/{model}", base_url=settings.ollama_url)
+    elif provider == "anthropic":
+        return LLM(model=f"anthropic/{model}", api_key=settings.anthropic_api_key)
+    elif provider == "gemini":
+        return LLM(model=f"gemini/{model}", api_key=settings.gemini_api_key)
+    else:
+        return LLM(model=f"openai/{model}", api_key=settings.openai_api_key)
 
 
 def build_triage_crew(alert_summary: str) -> Crew:
@@ -135,53 +168,57 @@ def build_triage_crew(alert_summary: str) -> Crew:
 
     remediate_task = Task(
         description=(
-            "Based on the diagnosis, propose remediation:\n"
-            "1. Search runbooks for established procedures\n"
-            "2. List ordered fix steps (safest/fastest first)\n"
-            "3. Tag each step as [AUTO-SAFE] or [NEEDS APPROVAL]\n"
-            "4. Include a rollback plan\n"
+            "Based on the diagnosis, produce a structured remediation plan:\n"
+            "1. Extract the root_cause and confidence level (high/medium/low) from the diagnoser's output\n"
+            "2. Search runbooks for established procedures\n"
+            "3. List ordered fix steps (safest/fastest first), each prefixed [AUTO-SAFE] or [NEEDS APPROVAL]\n"
+            "4. Summarize key evidence from the monitoring and diagnosis\n"
             "5. Draft a 3-sentence postmortem summary\n\n"
-            "NEVER recommend destructive actions without [NEEDS APPROVAL] tag."
+            "[AUTO-SAFE] — use for: read-only commands (get/describe/logs/top), rolling restarts (rollout restart), "
+            "scaling UP, connection pool resets, cache flushes, log rotation, health checks.\n"
+            "[NEEDS APPROVAL] — use for: rollbacks (rollout undo), scaling DOWN (especially to 0), deleting resources, "
+            "any change that reduces capacity or cannot be easily reversed.\n"
+            "If root cause cannot be determined, set confidence to 'low'."
         ),
-        expected_output=(
-            "Remediation plan:\n"
-            "- Ordered steps with [AUTO-SAFE] or [NEEDS APPROVAL] tags\n"
-            "- Expected impact of each step\n"
-            "- Rollback plan\n"
-            "- Postmortem draft (3 sentences)\n"
-            "- Estimated time to resolution"
-        ),
+        expected_output="JSON object matching the TriageOutput schema.",
+        output_json=TriageOutput,
         agent=remediator,
         context=[monitor_task, diagnose_task],
     )
 
     # Configure memory embedder per provider.
-    # Grok/Ollama have no embedding API — memory disabled for those.
     embedder_config = None
-    if settings.llm_provider == "openai" and settings.openai_api_key:
+    if settings.llm_provider == "ollama" and settings.ollama_embedding_model:
+        embedder_config = {
+            "provider": "ollama",
+            "config": {
+                "model_name": settings.ollama_embedding_model,
+                "url": f"{settings.ollama_url}/api/embeddings",
+            },
+        }
+    elif settings.llm_provider == "openai" and settings.openai_api_key:
         embedder_config = {
             "provider": "openai",
             "config": {"model": "text-embedding-3-small", "api_key": settings.openai_api_key},
         }
     elif settings.llm_provider == "anthropic" and settings.anthropic_api_key:
-        # Anthropic has no embedding API — fall back to OpenAI if key available, else skip
+        # Anthropic has no embedding API — use OpenAI embeddings if key available
         if settings.openai_api_key:
             embedder_config = {
                 "provider": "openai",
                 "config": {"model": "text-embedding-3-small", "api_key": settings.openai_api_key},
             }
-    # gemini/ollama: no ChromaDB-compatible embedding API — memory stays disabled
+    # gemini: no ChromaDB-compatible embedding API — memory stays disabled
 
-    memory_enabled = embedder_config is not None
-
+    # ShortTermMemory is disabled — it persists across crew runs in ChromaDB and causes
+    # cross-incident contamination (previous incident context retrieved for unrelated incidents).
+    # Cross-incident learning is handled via the postmortems RAG in triage.py instead.
     crew_kwargs: dict = {
         "agents": [monitor, diagnoser, remediator],
         "tasks": [monitor_task, diagnose_task, remediate_task],
         "process": Process.sequential,
         "verbose": _verbose,
-        "memory": memory_enabled,
+        "memory": False,
     }
-    if embedder_config:
-        crew_kwargs["embedder"] = embedder_config
 
     return Crew(**crew_kwargs)
