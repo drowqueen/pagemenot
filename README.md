@@ -27,6 +27,14 @@ Self-hosted AI SRE. Alert fires → 3-agent crew triages → root cause + remedi
 
 ## How it works
 
+When an alert fires, pagemenot deduplicates it, assesses severity, and runs a 3-agent crew in parallel:
+
+- **MonitorAgent** — pulls metrics from Prometheus, Grafana, Datadog, or New Relic around the incident window
+- **DiagnoserAgent** — checks recent GitHub deploys and PR diffs, queries past incidents from ChromaDB
+- **RemediatorAgent** — searches runbooks, executes matching remediation steps (kubectl, AWS, HTTP)
+
+If the runbook resolves the incident, pagemenot posts a summary and pages nobody. If it can't resolve, it escalates: root cause thread in Slack, Jira ticket, PagerDuty page for critical/high severity.
+
 ```
 Alert (Grafana / Alertmanager / PagerDuty / Datadog / New Relic / Slack)
   │
