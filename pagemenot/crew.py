@@ -37,6 +37,20 @@ def _build_llm() -> LLM:
         return LLM(model=f"openai/{settings.llm_model}", api_key=settings.openai_api_key)
 
 
+def build_postmortem_llm() -> LLM:
+    """LLM for postmortem drafting. Uses POSTMORTEM_LLM_* if set, otherwise falls back to triage LLM."""
+    provider = settings.postmortem_llm_provider or settings.llm_provider
+    model = settings.postmortem_llm_model or settings.llm_model
+    if provider == "ollama":
+        return LLM(model=f"ollama/{model}", base_url=settings.ollama_url)
+    elif provider == "anthropic":
+        return LLM(model=f"anthropic/{model}", api_key=settings.anthropic_api_key)
+    elif provider == "gemini":
+        return LLM(model=f"gemini/{model}", api_key=settings.gemini_api_key)
+    else:
+        return LLM(model=f"openai/{model}", api_key=settings.openai_api_key)
+
+
 def build_triage_crew(alert_summary: str) -> Crew:
     """Build a complete triage crew for a specific incident and return it ready to kickoff."""
     llm = _build_llm()

@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     ollama_url: Optional[str] = None
     ollama_embedding_model: Optional[str] = None  # e.g. nomic-embed-text — enables cross-incident memory with Ollama
 
+    # ── Postmortem LLM (optional — falls back to llm_provider/llm_model) ──
+    postmortem_llm_provider: Optional[str] = None  # e.g. anthropic — used only for postmortem drafting
+    postmortem_llm_model: Optional[str] = None      # e.g. claude-opus-4-6
+
     # ── Vector store (embedded ChromaDB) ──────────────────
     chroma_path: str = "/app/data/chroma"
 

@@ -328,6 +328,33 @@ def _try_runbook_exec(result: TriageResult):
         logger.info(f"Incident auto-resolved: {result.alert_title}")
 
 
+def _generate_postmortem_narrative(result: TriageResult) -> str:
+    """Call the postmortem LLM to write a narrative RCA. Falls back to structured summary on error."""
+    try:
+        from pagemenot.crew import build_postmortem_llm
+        llm = build_postmortem_llm()
+        evidence_text = "\n".join(f"- {e}" for e in result.evidence) if result.evidence else "N/A"
+        steps_text = "\n".join(f"- {s}" for s in result.remediation_steps) if result.remediation_steps else "N/A"
+        prompt = (
+            f"Write a concise incident postmortem narrative (3-4 paragraphs) for an SRE knowledge base.\n\n"
+            f"Alert: {result.alert_title}\n"
+            f"Service: {result.service}\n"
+            f"Severity: {result.severity}\n"
+            f"Root cause: {result.root_cause}\n"
+            f"Evidence:\n{evidence_text}\n"
+            f"Steps taken:\n{steps_text}\n"
+            f"Auto-resolved: {result.resolved_automatically}\n\n"
+            f"Write: (1) what happened and impact, (2) root cause analysis, "
+            f"(3) resolution summary, (4) prevention recommendations. "
+            f"Be specific and factual. No filler."
+        )
+        response = llm.call(messages=[{"role": "user", "content": prompt}])
+        return response if isinstance(response, str) else str(response)
+    except Exception as e:
+        logger.warning(f"Postmortem narrative generation failed: {e}")
+        return result.root_cause
+
+
 def _write_postmortem(result: TriageResult) -> tuple[Path | None, bool]:
     """Write an auto-generated postmortem MD and index it if confidence is high."""
     from pagemenot.knowledge.rag import POSTMORTEMS_DIR, add_postmortem
@@ -351,6 +378,8 @@ def _write_postmortem(result: TriageResult) -> tuple[Path | None, bool]:
     remediation_md = "\n".join(f"- {s}" for s in result.remediation_steps) if result.remediation_steps else "- N/A"
     similar_md = "\n".join(f"- {s}" for s in result.similar_incidents) if result.similar_incidents else "- N/A"
 
+    narrative = _generate_postmortem_narrative(result)
+
     content = (
         f"# Incident: {result.alert_title}\n\n"
         f"**Service:** {result.service}\n"
@@ -358,6 +387,7 @@ def _write_postmortem(result: TriageResult) -> tuple[Path | None, bool]:
         f"**Date:** {datetime.now(timezone.utc).strftime('%Y-%m-%d')}\n"
         f"**Resolved automatically:** {result.resolved_automatically}\n"
         f"**Triage confidence:** {result.confidence}\n\n"
+        f"## Analysis\n\n{narrative}\n\n"
         f"## Root Cause\n\n{result.root_cause}\n\n"
         f"## Evidence\n\n{evidence_md}\n\n"
         f"## Remediation\n\n{remediation_md}\n\n"
