@@ -180,54 +180,103 @@ Pagemenot requires a **persistent process** (Slack Socket Mode needs a long-live
 
 ```bash
 git clone https://github.com/drowqueen/pagemenot && cd pagemenot
-./setup.sh     # interactive wizard — generates .env (includes image variant selection)
-make install   # builds image, starts container
-make test      # fire a simulated incident
+./setup.sh     # wizard: Slack → LLM → cloud variant → integrations → writes .env
+make install   # builds your chosen image variant, starts the container
+make test      # fires a mock incident → check Slack
 ```
 
 `.env` is gitignored. `config/services.yaml` is committed (no secrets).
 
-The wizard covers every step: Slack tokens → LLM → **image variant** → integrations → credentials → writes `.env`.
+---
 
-### Installation steps
+## How to install
 
-**1. Run the wizard**
+### Step 1 — Choose your image variant
+
+This is the first decision. Pagemenot builds a Docker image with the CLI tools your runbooks need. Pick the variant that matches your cloud environment:
+
+| Your environment | `PAGEMENOT_BUILD_TARGET` | What's baked in | Image overhead |
+|-----------------|--------------------------|-----------------|----------------|
+| Kubernetes only | `base` _(default)_ | kubectl (amd64 + arm64) | — |
+| AWS — EKS / ECS / EC2 | `aws` | kubectl + AWS CLI v2 | +~500 MB |
+| GCP — GKE / GCE | `gcp` | kubectl + gcloud | +~400 MB |
+| Azure — AKS | `azure` | kubectl + Azure CLI | +~300 MB |
+| Multi-cloud | `cloud` | kubectl + AWS CLI + gcloud + Azure CLI | +~1.2 GB |
+
+kubectl is always included and auto-detects `amd64` / `arm64` at build time. Credentials (kubeconfig, `~/.aws`, SA keys) are still provided at runtime via `docker-compose.yml` volume mounts — baking in the CLI only removes the binary dependency.
+
+**The wizard sets this for you** — it asks which cloud environment you run and writes the right value to `.env`. To set it manually:
+
+```bash
+# .env
+PAGEMENOT_BUILD_TARGET=aws   # or base / gcp / azure / cloud
+```
+
+First build downloads the CLI binaries (cold cache: 5–15 min depending on variant). Subsequent builds are fast — Docker layer cache + apt cache mounts skip re-downloading.
+
+---
+
+### Step 2 — Configure
+
+**Option A — wizard (recommended)**
 
 ```bash
 ./setup.sh
 ```
 
-The wizard asks which cloud environment you run on and picks the right image variant for you. Answer the prompts, confirm the summary, and it writes `.env`.
+Walks through: Slack tokens → LLM → **image variant** → integrations → credentials → writes `.env`.
 
-**2. Build and start**
+**Option B — manual**
+
+```bash
+cp .env.example .env
+# edit .env: set SLACK_BOT_TOKEN, SLACK_APP_TOKEN, LLM_PROVIDER/MODEL,
+# PAGEMENOT_BUILD_TARGET, and any integrations you want live
+```
+
+---
+
+### Step 3 — Build and start
 
 ```bash
 make install
 ```
 
-Builds the image for your selected variant (`PAGEMENOT_BUILD_TARGET` in `.env`), starts the container. First build downloads binaries — subsequent builds use Docker layer cache.
+Builds the image for `PAGEMENOT_BUILD_TARGET` in `.env`, then starts the container. Re-run any time you change the variant.
 
-**3. Verify**
-
+To build without starting:
 ```bash
-make status          # shows running containers + enabled integrations
-make test            # fires a mock incident → check Slack
-make logs            # follow live logs
+docker compose build
 ```
 
-### Image variant — which CLI tools are baked in
+---
 
-The wizard sets this. To change it later: edit `PAGEMENOT_BUILD_TARGET` in `.env`, then `make install`.
+### Step 4 — Verify
 
-| Environment | `PAGEMENOT_BUILD_TARGET` | Baked in | Extra size |
-|-------------|--------------------------|----------|------------|
-| Kubernetes only | `base` _(default)_ | kubectl (auto amd64/arm64) | — |
-| AWS (EKS / ECS / EC2) | `aws` | kubectl + AWS CLI v2 | ~500 MB |
-| GCP (GKE / GCE) | `gcp` | kubectl + gcloud | ~400 MB |
-| Azure (AKS) | `azure` | kubectl + Azure CLI | ~300 MB |
-| Multi-cloud | `cloud` | kubectl + all three CLIs | ~1.2 GB |
+```bash
+make status                        # running containers + enabled integrations
+make test                          # fires mock incident → check Slack for triage result
+make test SCENARIO=checkout-oom    # OOM / kubectl exec path
+make test SCENARIO=payment-500s    # deploy regression / approval + escalation path
+make logs                          # follow live logs
+```
 
-kubectl is always included — no host binary mount needed. Credentials (kubeconfig, `~/.aws`, SA keys) are still mounted at runtime. See the comments in `docker-compose.yml`.
+---
+
+### Changing the variant later
+
+Edit `.env`, then rebuild:
+
+```bash
+# .env
+PAGEMENOT_BUILD_TARGET=cloud   # changed from aws → cloud
+
+make install   # rebuilds image with new variant, restarts container
+```
+
+The `cloud` build installs AWS CLI, gcloud, and Azure CLI in a single layer with build deps (gnupg, unzip, lsb-release) purged after setup — no leftover bloat.
+
+---
 
 ### Reference
 
@@ -237,7 +286,7 @@ kubectl is always included — no host binary mount needed. Credentials (kubecon
 | `make start` / `make stop` | start / stop without rebuild |
 | `make logs` | follow container logs |
 | `make status` | running containers + enabled integrations |
-| `make test SCENARIO=checkout-oom` | fire a simulated incident |
+| `make test SCENARIO=<name>` | fire a simulated incident |
 | `make hooks` | install git pre-commit/pre-push hooks |
 
 ---
