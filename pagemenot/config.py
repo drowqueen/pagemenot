@@ -69,6 +69,7 @@ class Settings(BaseSettings):
     kubeconfig_path: Optional[str] = None
     pagemenot_exec_namespace: str = "production"  # default k8s namespace for runbook {{ namespace }}
     pagemenot_webhook_rate_limit: str = "60/minute"  # slowapi rate limit string for all webhook endpoints
+    pagemenot_exec_enabled: bool = True         # master switch for autonomous execution
     pagemenot_exec_dry_run: bool = True         # true = simulate; false = real execution
     pagemenot_approval_gate: bool = True        # require human approval for [NEEDS APPROVAL] steps
     pagemenot_oncall_channel: Optional[str] = None  # channel to ping on critical escalations

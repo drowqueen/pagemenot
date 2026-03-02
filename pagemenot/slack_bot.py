@@ -28,77 +28,38 @@ _client: AsyncWebClient | None = None
 _pending_autoapprove: dict[str, asyncio.Task] = {}
 
 
-_APPROVAL_FILE = "/app/data/approvals.json"
-
-
 class _ApprovalStore:
-    """Pending approval store.
-
-    Priority: Redis (if REDIS_URL set) → JSON file on disk → in-memory.
-    File store survives container restarts without any external dependency.
-    """
+    """Pending approval store — Redis if REDIS_URL is set, in-memory fallback."""
 
     def __init__(self):
         self._mem: dict[str, dict] = {}
         self._redis = None
-        self._file_lock = asyncio.Lock()
 
-    async def _redis_client(self):
+    async def _client(self):
         if self._redis is None and settings.redis_url:
             try:
                 import redis.asyncio as aioredis
                 self._redis = aioredis.from_url(settings.redis_url, decode_responses=True)
             except ImportError:
-                logger.warning("redis package not installed — using file-based approval store")
+                logger.warning("redis package not installed — falling back to in-memory approval store")
         return self._redis
 
-    def _load_file(self) -> dict:
-        try:
-            import os
-            os.makedirs("/app/data", exist_ok=True)
-            with open(_APPROVAL_FILE) as f:
-                return json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            return {}
-
-    def _save_file(self, data: dict) -> None:
-        import os
-        os.makedirs("/app/data", exist_ok=True)
-        with open(_APPROVAL_FILE, "w") as f:
-            json.dump(data, f)
-
-    async def set(self, key: str, value: dict) -> None:
-        r = await self._redis_client()
+    async def set(self, key: str, value: dict, ttl: int = 3600) -> None:
+        r = await self._client()
         if r:
-            await r.set(key, json.dumps(value))  # no TTL — approvals don't expire
-            return
-        async with self._file_lock:
-            data = self._load_file()
-            data[key] = value
-            self._save_file(data)
-
-    async def peek(self, key: str) -> bool:
-        """Return True if key exists without removing it."""
-        r = await self._redis_client()
-        if r:
-            return await r.exists(key) > 0
-        async with self._file_lock:
-            return key in self._load_file()
+            await r.setex(key, ttl, json.dumps(value))
+        else:
+            self._mem[key] = value
 
     async def pop(self, key: str) -> dict | None:
-        r = await self._redis_client()
+        r = await self._client()
         if r:
             async with r.pipeline() as pipe:
                 pipe.get(key)
                 pipe.delete(key)
                 result, _ = await pipe.execute()
             return json.loads(result) if result else None
-        async with self._file_lock:
-            data = self._load_file()
-            value = data.pop(key, None)
-            if value is not None:
-                self._save_file(data)
-            return value
+        return self._mem.pop(key, None)
 
 
 _approval_store = _ApprovalStore()
@@ -167,7 +128,7 @@ def create_slack_app() -> AsyncApp:
     @app.action("approve_action")
     async def handle_approve(ack, body, client):
         await ack()
-        from pagemenot.tools import dispatch_exec_step, get_runbook_exec_steps
+        from pagemenot.tools import dispatch_exec_step
         from pagemenot.triage import _redact_sensitive
 
         approval_id = body["actions"][0]["value"]
@@ -185,39 +146,22 @@ def create_slack_app() -> AsyncApp:
             )
             return
 
+        steps = entry["steps"]
         service = entry.get("service", "")
-        alert_title = entry.get("alert_title", "")
-        jira_url = entry.get("jira_url", "")
-        alerts_channel = entry.get("channel", "")
-
-        # entry["steps"] are LLM-generated display text (what the human reviewed before approving).
-        # Execution uses <!-- exec: --> tagged steps from the matching runbook — never LLM free text.
-        steps = get_runbook_exec_steps(alert_title or service, service=service)
-
-        if not steps:
-            await client.chat_update(
-                channel=channel, ts=msg_ts,
-                text=f"✅ Approved by @{user} — no executable steps",
-                blocks=[{"type": "section", "text": {"type": "mrkdwn",
-                    "text": f"✅ *Approved by <@{user_id}>* — no `<!-- exec: -->` steps found in matching runbook. Manual action required."}}],
-            )
-            return
-
-        incident_label = f"`{service}` — {alert_title}" if alert_title else f"`{service}`"
 
         # Remove buttons immediately — prevents double-click
         await client.chat_update(
             channel=channel, ts=msg_ts,
             text=f"✅ Approved by @{user}",
             blocks=[{"type": "section", "text": {"type": "mrkdwn",
-                "text": f"✅ *Approved by <@{user_id}>* | {incident_label} — executing {len(steps)} runbook step(s)..."}}],
+                "text": f"✅ *Approved by <@{user_id}>* — executing {len(steps)} step(s)..."}}],
         )
 
         success = True
         for i, step in enumerate(steps, 1):
             await client.chat_postMessage(
                 channel=channel, thread_ts=thread,
-                text=f"⚙️ *{incident_label}* — Step {i}/{len(steps)}: `{step[:120]}`",
+                text=f"⚙️ Step {i}/{len(steps)}: `{step[:120]}`",
             )
             try:
                 output = await asyncio.get_running_loop().run_in_executor(
@@ -228,47 +172,17 @@ def create_slack_app() -> AsyncApp:
                     text=f"✅ Step {i}/{len(steps)} done:\n```{_redact_sensitive(output)[:500]}```",
                 )
             except Exception as e:
-                escalation_channel = settings.pagemenot_oncall_channel
-                jira_key = jira_url.rstrip("/").split("/")[-1] if jira_url else ""
-                jira_line = f"\n🎫 <{jira_url}|{jira_key}>" if jira_url else ""
-                escalation_line = f"\nSee <#{escalation_channel}> for escalation." if escalation_channel else ""
                 await client.chat_postMessage(
                     channel=channel, thread_ts=thread,
-                    text=(
-                        f"❌ Step {i}/{len(steps)} failed: `{e}`\n"
-                        f"Remaining steps skipped — manual action required."
-                        f"{jira_line}{escalation_line}"
-                    ),
+                    text=f"❌ Step {i}/{len(steps)} failed: `{e}`\nRemaining steps skipped.",
                 )
                 success = False
-                # Escalate to oncall channel — agent could not execute approved steps
-                if escalation_channel:
-                    try:
-                        pl = await client.chat_getPermalink(channel=channel, message_ts=thread or msg_ts)
-                        thread_link = pl.get("permalink", "")
-                    except Exception:
-                        thread_link = ""
-                    thread_ref = f"\n🔗 <{thread_link}|View thread>" if thread_link else (f" | see <#{alerts_channel}>" if alerts_channel else "")
-                    await client.chat_postMessage(
-                        channel=escalation_channel,
-                        text=(
-                            f"🚨 *ESCALATION* — {incident_label}\n"
-                            f"Approved runbook step failed — manual action required\n"
-                            f"Approved by <@{user_id}> | Step {i}/{len(steps)} failed: `{e}`"
-                            f"{jira_line}{thread_ref}"
-                        ),
-                    )
                 break
 
         if success:
             await client.chat_postMessage(
                 channel=channel, thread_ts=thread,
                 text=f"✅ All {len(steps)} step(s) executed successfully.",
-            )
-            # Channel-level resolution announcement — clearly visible without opening thread
-            await client.chat_postMessage(
-                channel=channel,
-                text=f"✅ *Resolved by human approval* — {incident_label} | Approved by <@{user_id}>",
             )
 
     @app.action("reject_action")
@@ -399,7 +313,7 @@ async def _do_triage(say, source: str, payload: dict, thread_ts: str | None = No
         autosafe = [s for s in result.remediation_steps if "[AUTO-SAFE]" in s]
         if not settings.pagemenot_approval_gate and result.needs_approval:
             autosafe = autosafe + result.needs_approval
-        if autosafe and result.confidence == "high":
+        if (autosafe and result.confidence == "high" and settings.pagemenot_exec_enabled):
             task_id = str(uuid.uuid4())[:8]
             delay_min = settings.pagemenot_autoapprove_delay // 60
             steps_text = "\n".join(f"• {s[:120]}" for s in autosafe[:5])
