@@ -9,11 +9,12 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./knowledge/postmortems:/app/knowledge/postmortems:ro
+      - ./knowledge/postmortems:/app/knowledge/postmortems
       - ./knowledge/runbooks:/app/knowledge/runbooks:ro
       - chromadata:/app/data/chroma
       - chromacache:/root/.cache/chroma
-      - ./kubeconfig-minikube.yaml:/app/kubeconfig:ro
+      # To enable kubectl exec, mount your kubeconfig and set KUBECONFIG_PATH=/app/kubeconfig in .env:
+      # - /path/to/your/kubeconfig:/app/kubeconfig:ro
 
 volumes:
   chromadata:
