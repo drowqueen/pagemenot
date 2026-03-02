@@ -189,6 +189,29 @@ if ask_yes "GCP (Cloud Logging / Monitoring)"; then
     prompt "Service account JSON path" "/path/to/pagemenot-sa.json"; GOOGLE_APPLICATION_CREDENTIALS="$_REPLY"
 fi
 
+# ── Image variant ─────────────────────────────────────────────────────────────
+PAGEMENOT_BUILD_TARGET="base"
+
+header "Container image variant"
+say "  kubectl is always included. Select additional cloud CLIs to bake in."
+say "  1) Kubernetes only  — kubectl                         (~1 GB)"
+say "  2) AWS              — kubectl + AWS CLI v2            (+500 MB)"
+say "  3) GCP              — kubectl + gcloud                (+400 MB)"
+say "  4) Azure            — kubectl + Azure CLI             (+300 MB)"
+say "  5) Multi-cloud      — kubectl + AWS CLI + gcloud + Azure CLI  (+1.2 GB)"
+
+while true; do
+    prompt "Choice" "1"; VARIANT_CHOICE="$_REPLY"
+    case "$VARIANT_CHOICE" in
+    1) PAGEMENOT_BUILD_TARGET="base";  ok "base  — kubectl only";              break ;;
+    2) PAGEMENOT_BUILD_TARGET="aws";   ok "aws   — kubectl + AWS CLI v2";      break ;;
+    3) PAGEMENOT_BUILD_TARGET="gcp";   ok "gcp   — kubectl + gcloud";          break ;;
+    4) PAGEMENOT_BUILD_TARGET="azure"; ok "azure — kubectl + Azure CLI";        break ;;
+    5) PAGEMENOT_BUILD_TARGET="cloud"; ok "cloud — kubectl + all three CLIs";  break ;;
+    *) err "Enter 1–5" ;;
+    esac
+done
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 header "Summary"
 say "  Slack bot token   : $(mask "$SLACK_BOT_TOKEN")"
@@ -206,6 +229,7 @@ say "  LLM               : $LLM_PROVIDER / $LLM_MODEL"
 [[ -n "$KUBECONFIG_PATH" ]] && say "  Kubernetes        : $KUBECONFIG_PATH"
 [[ -n "$AWS_ROLE_ARN"   ]] && say "  AWS               : $AWS_ROLE_ARN"
 [[ -n "$GOOGLE_APPLICATION_CREDENTIALS" ]] && say "  GCP               : $GOOGLE_APPLICATION_CREDENTIALS"
+say "  Image variant     : $PAGEMENOT_BUILD_TARGET"
 
 say ""
 if ! ask_yes "Write .env and continue"; then
@@ -261,6 +285,9 @@ echo "# ── Integrations ─────────────────�
 [[ "$AWS_REGION" != "us-east-1" ]] && echo "AWS_REGION=$AWS_REGION"
 [[ -n "$GOOGLE_APPLICATION_CREDENTIALS" ]] && echo "GOOGLE_APPLICATION_CREDENTIALS=$(q "$GOOGLE_APPLICATION_CREDENTIALS")"
 echo ""
+echo "# ── Image variant ──────────────────────────────────────────────────────"
+echo "PAGEMENOT_BUILD_TARGET=$PAGEMENOT_BUILD_TARGET"
+echo ""
 echo "LOG_LEVEL=INFO"
 } > .env
 
@@ -277,4 +304,6 @@ if [[ -n "$GITHUB_TOKEN" ]]; then
 fi
 
 say ""
-say "${BOLD}Next step:${RESET} ${GREEN}make install${RESET}"
+say "${BOLD}Next steps:${RESET}"
+say "  ${GREEN}make install${RESET}   — builds the ${BOLD}${PAGEMENOT_BUILD_TARGET}${RESET} image and starts pagemenot"
+say "  ${GREEN}make test${RESET}      — fire a simulated incident to verify the setup"

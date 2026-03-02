@@ -135,7 +135,7 @@ No integrations configured → mock layer activates. Crew runs end-to-end with s
 | **OpenAI** | — | `OPENAI_API_KEY` — requires signed enterprise DPA |
 | **Anthropic** | — | `ANTHROPIC_API_KEY` — requires signed enterprise DPA |
 | **Gemini** | — | `GEMINI_API_KEY` — requires signed enterprise DPA |
-| Kubernetes (optional) | kubectl ≥ 1.28 | mount host binary + kubeconfig — see docker-compose.yml comments |
+| Kubernetes (optional) | — | kubectl baked into image; mount kubeconfig via `docker-compose.yml` |
 | Prometheus/Grafana (optional) | — | URLs set in `.env` |
 
 > **Recommended for self-hosted/air-gapped:** Ollama with `llama3.1` (LLM) + `nomic-embed-text` (embeddings). No data leaves your network.
@@ -179,35 +179,66 @@ Pagemenot requires a **persistent process** (Slack Socket Mode needs a long-live
 ## Quick start
 
 ```bash
-./setup.sh     # interactive wizard — generates .env
-make install   # validates config, pulls image, starts container
+git clone https://github.com/drowqueen/pagemenot && cd pagemenot
+./setup.sh     # interactive wizard — generates .env (includes image variant selection)
+make install   # builds image, starts container
 make test      # fire a simulated incident
 ```
 
 `.env` is gitignored. `config/services.yaml` is committed (no secrets).
 
+The wizard covers every step: Slack tokens → LLM → **image variant** → integrations → credentials → writes `.env`.
+
+### Installation steps
+
+**1. Run the wizard**
+
+```bash
+./setup.sh
+```
+
+The wizard asks which cloud environment you run on and picks the right image variant for you. Answer the prompts, confirm the summary, and it writes `.env`.
+
+**2. Build and start**
+
+```bash
+make install
+```
+
+Builds the image for your selected variant (`PAGEMENOT_BUILD_TARGET` in `.env`), starts the container. First build downloads binaries — subsequent builds use Docker layer cache.
+
+**3. Verify**
+
+```bash
+make status          # shows running containers + enabled integrations
+make test            # fires a mock incident → check Slack
+make logs            # follow live logs
+```
+
+### Image variant — which CLI tools are baked in
+
+The wizard sets this. To change it later: edit `PAGEMENOT_BUILD_TARGET` in `.env`, then `make install`.
+
+| Environment | `PAGEMENOT_BUILD_TARGET` | Baked in | Extra size |
+|-------------|--------------------------|----------|------------|
+| Kubernetes only | `base` _(default)_ | kubectl (auto amd64/arm64) | — |
+| AWS (EKS / ECS / EC2) | `aws` | kubectl + AWS CLI v2 | ~500 MB |
+| GCP (GKE / GCE) | `gcp` | kubectl + gcloud | ~400 MB |
+| Azure (AKS) | `azure` | kubectl + Azure CLI | ~300 MB |
+| Multi-cloud | `cloud` | kubectl + all three CLIs | ~1.2 GB |
+
+kubectl is always included — no host binary mount needed. Credentials (kubeconfig, `~/.aws`, SA keys) are still mounted at runtime. See the comments in `docker-compose.yml`.
+
+### Reference
+
 | Command | Effect |
 |---------|--------|
-| `make install` | validate config → pull image → start |
-| `make start` / `make stop` | start / stop container |
+| `make install` | build image → start container |
+| `make start` / `make stop` | start / stop without rebuild |
 | `make logs` | follow container logs |
 | `make status` | running containers + enabled integrations |
 | `make test SCENARIO=checkout-oom` | fire a simulated incident |
 | `make hooks` | install git pre-commit/pre-push hooks |
-
-### Image variant — which CLI tools to bake in
-
-Set `PAGEMENOT_BUILD_TARGET` in `.env`, then `docker compose build && docker compose up -d`.
-
-| Environment | `PAGEMENOT_BUILD_TARGET` | Baked in | Extra size |
-|-------------|--------------------------|----------|------------|
-| Kubernetes only | `base` _(default)_ | kubectl | — |
-| AWS (EKS / ECS / EC2) | `aws` | kubectl + AWS CLI v2 | ~500 MB |
-| GCP (GKE / GCE) | `gcp` | kubectl + gcloud | ~400 MB |
-| Azure (AKS) | `azure` | kubectl + Azure CLI | ~300 MB |
-| Multi-cloud | `cloud` | kubectl + all three | ~1.2 GB |
-
-kubectl is always included — it auto-detects `amd64` / `arm64` at build time. Cloud CLI credentials are still mounted at runtime via volumes or env vars (see comments in `docker-compose.yml`).
 
 ---
 
