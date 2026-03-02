@@ -7,7 +7,7 @@ license = { text = "MIT" }
 
 dependencies = [
     # CrewAI core
-    "crewai[tools,google-genai]>=0.105",
+    "crewai[tools,google-genai,litellm]>=0.105",
 
     # Slack
     "slack-bolt>=1.20",
@@ -37,6 +37,7 @@ dependencies = [
     # LLM providers
     "openai>=1.40",
     "anthropic>=0.34",
+    "ollama>=0.4",
 
     # Optional: approval state persistence
     "redis[asyncio]>=5.0",

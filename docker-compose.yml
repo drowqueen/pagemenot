@@ -12,7 +12,9 @@ services:
       - ./knowledge/postmortems:/app/knowledge/postmortems:ro
       - ./knowledge/runbooks:/app/knowledge/runbooks:ro
       - chromadata:/app/data/chroma
+      - chromacache:/root/.cache/chroma
       - ./kubeconfig-minikube.yaml:/app/kubeconfig:ro
 
 volumes:
   chromadata:
+  chromacache:

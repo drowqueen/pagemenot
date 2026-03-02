@@ -295,6 +295,8 @@ Runs on any host with Docker — VPS, on-prem server, cloud VM, Kubernetes, ECS,
 make install   # pull image, start
 ```
 
+> **First startup is slow** — ChromaDB downloads a ~80MB ONNX embedding model on first boot. Cached in a Docker volume (`chromacache`) so subsequent restarts are fast.
+
 | Platform | Notes |
 |----------|-------|
 | Any Linux server | `docker compose up -d` |

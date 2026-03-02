@@ -8,11 +8,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
     chmod +x /usr/local/bin/kubectl && \
     rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir --upgrade pip
-RUN pip install --no-cache-dir "setuptools>=68" wheel
+RUN pip install --upgrade pip setuptools wheel
 
 COPY pyproject.toml ./
-RUN pip install --no-cache-dir .
+RUN --mount=type=cache,target=/root/.cache/pip pip install .
 
 COPY pagemenot/ pagemenot/
 COPY scripts/ scripts/

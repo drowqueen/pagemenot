@@ -160,7 +160,10 @@ def build_triage_crew(alert_summary: str) -> Crew:
     if settings.llm_provider == "ollama" and settings.ollama_embedding_model:
         embedder_config = {
             "provider": "ollama",
-            "config": {"model": settings.ollama_embedding_model, "base_url": settings.ollama_url},
+            "config": {
+                "model_name": settings.ollama_embedding_model,
+                "url": f"{settings.ollama_url}/api/embeddings",
+            },
         }
     elif settings.llm_provider == "openai" and settings.openai_api_key:
         embedder_config = {
