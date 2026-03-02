@@ -275,8 +275,8 @@ python scripts/simulate_incident.py payment-500s --source datadog
 Runs on any host with Docker — VPS, on-prem server, cloud VM, Kubernetes, ECS, Cloud Run.
 
 ```bash
-cp .env.example .env
-docker compose up -d
+./setup.sh     # generates .env
+make install   # pull image, start
 ```
 
 | Platform | Notes |

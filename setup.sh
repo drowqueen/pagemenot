@@ -14,29 +14,30 @@ warn() { say "${YELLOW}⚠ $*${RESET}"; }
 err()  { say "${RED}✗ $*${RESET}"; }
 header() { say "\n${BOLD}── $* ─────────────────────────────────────────${RESET}"; }
 
+# _REPLY holds the last prompt result (avoids eval)
+_REPLY=""
+
 prompt() {
-    # prompt <var> <label> [default]
-    local var=$1 label=$2 default=${3:-}
+    # prompt <label> [default]
+    local label=$1 default=${2:-}
     local hint; hint=$( [[ -n "$default" ]] && echo " [${DIM}${default}${RESET}]" || echo "" )
     printf "%b%s%b%s: " "${YELLOW}" "$label" "${RESET}" "$hint"
-    read -r input
-    if [[ -z "$input" && -n "$default" ]]; then input="$default"; fi
-    eval "$var=\"\$input\""
+    read -r _REPLY
+    if [[ -z "$_REPLY" && -n "$default" ]]; then _REPLY="$default"; fi
 }
 
 prompt_secret() {
-    # prompt_secret <var> <label>
-    local var=$1 label=$2
-    printf "%b%s%b: " "${YELLOW}" "$label" "${RESET}"
-    read -rs input; echo
-    eval "$var=\"\$input\""
+    # prompt_secret <label>
+    local label=$1
+    printf "%b%s%b (input hidden): " "${YELLOW}" "$label" "${RESET}"
+    read -rs _REPLY; echo
 }
 
 ask_yes() {
     # ask_yes <question> → returns 0 (yes) or 1 (no)
     printf "%b%s%b [y/N]: " "${YELLOW}" "$1" "${RESET}"
-    read -r yn
-    [[ "$(echo "$yn" | tr '[:upper:]' '[:lower:]')" == "y" ]]
+    read -r _yn
+    [[ "$(echo "$_yn" | tr '[:upper:]' '[:lower:]')" == "y" ]]
 }
 
 ping_url() {
@@ -47,15 +48,6 @@ mask() {
     local s=$1
     [[ -z "$s" ]] && echo "(not set)" && return
     echo "${s:0:4}$(printf '*%.0s' $(seq 1 $((${#s} - 4 < 0 ? 0 : ${#s} - 4))))"
-}
-
-write_env() {
-    local file=$1; shift
-    # Args: KEY=VALUE pairs
-    : > "$file"
-    for pair in "$@"; do
-        echo "$pair" >> "$file"
-    done
 }
 
 # ── Existing .env ─────────────────────────────────────────────────────────────
@@ -76,9 +68,9 @@ fi
 # ── Slack (required) ──────────────────────────────────────────────────────────
 header "Slack (required)"
 say "${DIM}api.slack.com/apps → your app → OAuth & Basic Information${RESET}"
-prompt_secret SLACK_BOT_TOKEN  "Bot Token (xoxb-...)"
-prompt_secret SLACK_APP_TOKEN  "App Token (xapp-...)"
-prompt PAGEMENOT_CHANNEL "Results channel (no #)" "incidents"
+prompt_secret "Bot Token (xoxb-...)";  SLACK_BOT_TOKEN="$_REPLY"
+prompt_secret "App Token (xapp-...)";  SLACK_APP_TOKEN="$_REPLY"
+prompt "Results channel (no #)" "incidents"; PAGEMENOT_CHANNEL="$_REPLY"
 
 # ── LLM ───────────────────────────────────────────────────────────────────────
 header "LLM provider"
@@ -86,35 +78,39 @@ say "  1) Ollama (self-hosted — recommended for production)"
 say "  2) OpenAI"
 say "  3) Anthropic"
 say "  4) Gemini"
-prompt LLM_CHOICE "Choice" "1"
 
 LLM_PROVIDER="" LLM_MODEL="" OLLAMA_URL="" OPENAI_API_KEY="" ANTHROPIC_API_KEY=""
 GEMINI_API_KEY="" LLM_EXTERNAL_ENTERPRISE_CONFIRMED="false"
 
-case "$LLM_CHOICE" in
-1)
-    LLM_PROVIDER="ollama"
-    prompt OLLAMA_URL "Ollama URL" "http://localhost:11434"
-    prompt LLM_MODEL  "Model" "llama3.1"
-    if ping_url "$OLLAMA_URL"; then ok "Ollama reachable"; else warn "Ollama not reachable — continue anyway"; fi
-    ;;
-2|3|4)
-    say "${RED}External LLMs send metrics, logs, and PR diffs outside your network.${RESET}"
-    say "Only use if you have a signed zero-retention DPA with your provider."
-    if ! ask_yes "Confirm enterprise approval for external LLM"; then
-        err "External LLM not confirmed. Re-run and choose Ollama, or confirm approval."
-        exit 1
-    fi
-    LLM_EXTERNAL_ENTERPRISE_CONFIRMED="true"
+while true; do
+    prompt "Choice" "1"; LLM_CHOICE="$_REPLY"
     case "$LLM_CHOICE" in
-    2) LLM_PROVIDER="openai";    prompt LLM_MODEL "Model" "gpt-4o";               prompt_secret OPENAI_API_KEY    "OpenAI API key" ;;
-    3) LLM_PROVIDER="anthropic"; prompt LLM_MODEL "Model" "claude-sonnet-4-6";    prompt_secret ANTHROPIC_API_KEY "Anthropic API key" ;;
-    4) LLM_PROVIDER="gemini";    prompt LLM_MODEL "Model" "gemini-2.0-flash";      prompt_secret GEMINI_API_KEY    "Gemini API key" ;;
+    1)
+        LLM_PROVIDER="ollama"
+        prompt "Ollama URL" "http://localhost:11434"; OLLAMA_URL="$_REPLY"
+        prompt "Model" "llama3.1"; LLM_MODEL="$_REPLY"
+        if ping_url "$OLLAMA_URL"; then ok "Ollama reachable"; else warn "Ollama not reachable — continue anyway"; fi
+        break
+        ;;
+    2|3|4)
+        say "${RED}External LLMs send metrics, logs, and PR diffs outside your network.${RESET}"
+        say "Only use if you have a signed zero-retention DPA with your provider."
+        if ! ask_yes "Confirm enterprise approval for external LLM"; then
+            warn "Unconfirmed. Choose a different provider or confirm approval."
+            continue
+        fi
+        LLM_EXTERNAL_ENTERPRISE_CONFIRMED="true"
+        case "$LLM_CHOICE" in
+        2) LLM_PROVIDER="openai";    prompt "Model" "gpt-4o";            LLM_MODEL="$_REPLY"; prompt_secret "OpenAI API key";    OPENAI_API_KEY="$_REPLY" ;;
+        3) LLM_PROVIDER="anthropic"; prompt "Model" "claude-sonnet-4-6"; LLM_MODEL="$_REPLY"; prompt_secret "Anthropic API key"; ANTHROPIC_API_KEY="$_REPLY" ;;
+        4) LLM_PROVIDER="gemini";    prompt "Model" "gemini-2.0-flash";  LLM_MODEL="$_REPLY"; prompt_secret "Gemini API key";    GEMINI_API_KEY="$_REPLY" ;;
+        esac
+        break
+        ;;
+    *)
+        err "Invalid choice — enter 1, 2, 3, or 4" ;;
     esac
-    ;;
-*)
-    err "Invalid choice"; exit 1 ;;
-esac
+done
 
 # ── Optional integrations ─────────────────────────────────────────────────────
 PROMETHEUS_URL="" PROMETHEUS_AUTH_TOKEN=""
@@ -132,63 +128,63 @@ GOOGLE_APPLICATION_CREDENTIALS=""
 header "Optional integrations (Enter to skip each)"
 
 if ask_yes "Prometheus"; then
-    prompt PROMETHEUS_URL "Prometheus URL" "http://prometheus:9090"
-    prompt PROMETHEUS_AUTH_TOKEN "Auth token (managed Prometheus, else blank)" ""
+    prompt "Prometheus URL" "http://prometheus:9090"; PROMETHEUS_URL="$_REPLY"
+    prompt "Auth token (managed Prometheus, else blank)" ""; PROMETHEUS_AUTH_TOKEN="$_REPLY"
     ping_url "$PROMETHEUS_URL" && ok "Prometheus reachable" || warn "Not reachable — check URL later"
 fi
 
 if ask_yes "Grafana"; then
-    prompt GRAFANA_URL "Grafana URL" "http://grafana:3000"
-    prompt_secret GRAFANA_API_KEY "Grafana API key"
-    prompt GRAFANA_ORG_ID "Org ID (Grafana Cloud only, else blank)" ""
+    prompt "Grafana URL" "http://grafana:3000"; GRAFANA_URL="$_REPLY"
+    prompt_secret "Grafana API key"; GRAFANA_API_KEY="$_REPLY"
+    prompt "Org ID (Grafana Cloud only, else blank)" ""; GRAFANA_ORG_ID="$_REPLY"
     ping_url "$GRAFANA_URL" && ok "Grafana reachable" || warn "Not reachable — check URL later"
 fi
 
 if ask_yes "Loki"; then
-    prompt LOKI_URL "Loki URL" "http://loki:3100"
-    prompt LOKI_AUTH_TOKEN "Auth token (Grafana Cloud, else blank)" ""
-    prompt LOKI_ORG_ID "Org ID (multi-tenant Loki, else blank)" ""
+    prompt "Loki URL" "http://loki:3100"; LOKI_URL="$_REPLY"
+    prompt "Auth token (Grafana Cloud, else blank)" ""; LOKI_AUTH_TOKEN="$_REPLY"
+    prompt "Org ID (multi-tenant Loki, else blank)" ""; LOKI_ORG_ID="$_REPLY"
 fi
 
 if ask_yes "Datadog"; then
-    prompt_secret DATADOG_API_KEY "Datadog API key"
-    prompt_secret DATADOG_APP_KEY "Datadog App key"
-    prompt DATADOG_SITE "Datadog site" "datadoghq.com"
+    prompt_secret "Datadog API key"; DATADOG_API_KEY="$_REPLY"
+    prompt_secret "Datadog App key"; DATADOG_APP_KEY="$_REPLY"
+    prompt "Datadog site" "datadoghq.com"; DATADOG_SITE="$_REPLY"
 fi
 
 if ask_yes "New Relic"; then
-    prompt_secret NEWRELIC_API_KEY "New Relic API key (NRAK-...)"
-    prompt NEWRELIC_ACCOUNT_ID "Account ID" ""
+    prompt_secret "New Relic API key (NRAK-...)"; NEWRELIC_API_KEY="$_REPLY"
+    prompt "Account ID" ""; NEWRELIC_ACCOUNT_ID="$_REPLY"
 fi
 
 if ask_yes "PagerDuty"; then
-    prompt_secret PAGERDUTY_API_KEY "PagerDuty REST API key"
-    prompt PAGERDUTY_FROM_EMAIL "Requester email (PagerDuty account email)" ""
+    prompt_secret "PagerDuty REST API key"; PAGERDUTY_API_KEY="$_REPLY"
+    prompt "Requester email (PagerDuty account email)" ""; PAGERDUTY_FROM_EMAIL="$_REPLY"
 fi
 
 if ask_yes "GitHub (deploy correlation)"; then
-    prompt_secret GITHUB_TOKEN "GitHub token (repo read scope)"
-    prompt GITHUB_ORG "GitHub org" ""
+    prompt_secret "GitHub token (repo read scope)"; GITHUB_TOKEN="$_REPLY"
+    prompt "GitHub org" ""; GITHUB_ORG="$_REPLY"
 fi
 
 if ask_yes "Jira Service Management"; then
-    prompt JIRA_SM_URL       "Jira URL (https://<workspace>.atlassian.net)" ""
-    prompt JIRA_SM_EMAIL     "Jira account email" ""
-    prompt_secret JIRA_SM_API_TOKEN "Jira API token"
-    prompt JIRA_SM_PROJECT_KEY "Project key (e.g. OPS)" ""
+    prompt "Jira URL (https://<workspace>.atlassian.net)" ""; JIRA_SM_URL="$_REPLY"
+    prompt "Jira account email" ""; JIRA_SM_EMAIL="$_REPLY"
+    prompt_secret "Jira API token"; JIRA_SM_API_TOKEN="$_REPLY"
+    prompt "Project key (e.g. OPS)" ""; JIRA_SM_PROJECT_KEY="$_REPLY"
 fi
 
 if ask_yes "Kubernetes (runbook execution)"; then
-    prompt KUBECONFIG_PATH "Kubeconfig path inside container" "/app/kubeconfig"
+    prompt "Kubeconfig path inside container" "/app/kubeconfig"; KUBECONFIG_PATH="$_REPLY"
 fi
 
 if ask_yes "AWS (SSM / ECS execution)"; then
-    prompt AWS_ROLE_ARN "IAM role ARN" "arn:aws:iam::ACCOUNT:role/pagemenot-exec"
-    prompt AWS_REGION   "Region" "us-east-1"
+    prompt "IAM role ARN" "arn:aws:iam::ACCOUNT:role/pagemenot-exec"; AWS_ROLE_ARN="$_REPLY"
+    prompt "Region" "us-east-1"; AWS_REGION="$_REPLY"
 fi
 
 if ask_yes "GCP (Cloud Logging / Monitoring)"; then
-    prompt GOOGLE_APPLICATION_CREDENTIALS "Service account JSON path" "/path/to/pagemenot-sa.json"
+    prompt "Service account JSON path" "/path/to/pagemenot-sa.json"; GOOGLE_APPLICATION_CREDENTIALS="$_REPLY"
 fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────
@@ -216,49 +212,51 @@ if ! ask_yes "Write .env and continue"; then
 fi
 
 # ── Write .env ────────────────────────────────────────────────────────────────
+q() { echo "\"$1\""; }  # quote a value for .env
+
 {
 echo "# Generated by setup.sh on $(date -u '+%Y-%m-%d %H:%M UTC')"
 echo ""
 echo "# ── Slack ──────────────────────────────────────────────────────────────"
-echo "SLACK_BOT_TOKEN=$SLACK_BOT_TOKEN"
-echo "SLACK_APP_TOKEN=$SLACK_APP_TOKEN"
-echo "PAGEMENOT_CHANNEL=$PAGEMENOT_CHANNEL"
+echo "SLACK_BOT_TOKEN=$(q "$SLACK_BOT_TOKEN")"
+echo "SLACK_APP_TOKEN=$(q "$SLACK_APP_TOKEN")"
+echo "PAGEMENOT_CHANNEL=$(q "$PAGEMENOT_CHANNEL")"
 echo ""
 echo "# ── LLM ────────────────────────────────────────────────────────────────"
 echo "LLM_PROVIDER=$LLM_PROVIDER"
 echo "LLM_MODEL=$LLM_MODEL"
-[[ -n "$OLLAMA_URL"       ]] && echo "OLLAMA_URL=$OLLAMA_URL"
-[[ -n "$OPENAI_API_KEY"   ]] && echo "OPENAI_API_KEY=$OPENAI_API_KEY"
-[[ -n "$ANTHROPIC_API_KEY" ]] && echo "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY"
-[[ -n "$GEMINI_API_KEY"   ]] && echo "GEMINI_API_KEY=$GEMINI_API_KEY"
-[[ "$LLM_EXTERNAL_ENTERPRISE_CONFIRMED" == "true" ]] && echo "LLM_EXTERNAL_ENTERPRISE_CONFIRMED=true"
+[[ -n "$OLLAMA_URL"       ]] && echo "OLLAMA_URL=$(q "$OLLAMA_URL")"
+[[ -n "$OPENAI_API_KEY"   ]] && echo "OPENAI_API_KEY=$(q "$OPENAI_API_KEY")"
+[[ -n "$ANTHROPIC_API_KEY" ]] && echo "ANTHROPIC_API_KEY=$(q "$ANTHROPIC_API_KEY")"
+[[ -n "$GEMINI_API_KEY"   ]] && echo "GEMINI_API_KEY=$(q "$GEMINI_API_KEY")"
+echo "LLM_EXTERNAL_ENTERPRISE_CONFIRMED=$LLM_EXTERNAL_ENTERPRISE_CONFIRMED"
 echo ""
 echo "# ── Integrations ───────────────────────────────────────────────────────"
-[[ -n "$PROMETHEUS_URL"   ]] && echo "PROMETHEUS_URL=$PROMETHEUS_URL"
-[[ -n "$PROMETHEUS_AUTH_TOKEN" ]] && echo "PROMETHEUS_AUTH_TOKEN=$PROMETHEUS_AUTH_TOKEN"
-[[ -n "$GRAFANA_URL"      ]] && echo "GRAFANA_URL=$GRAFANA_URL"
-[[ -n "$GRAFANA_API_KEY"  ]] && echo "GRAFANA_API_KEY=$GRAFANA_API_KEY"
-[[ -n "$GRAFANA_ORG_ID"   ]] && echo "GRAFANA_ORG_ID=$GRAFANA_ORG_ID"
-[[ -n "$LOKI_URL"         ]] && echo "LOKI_URL=$LOKI_URL"
-[[ -n "$LOKI_AUTH_TOKEN"  ]] && echo "LOKI_AUTH_TOKEN=$LOKI_AUTH_TOKEN"
-[[ -n "$LOKI_ORG_ID"      ]] && echo "LOKI_ORG_ID=$LOKI_ORG_ID"
-[[ -n "$DATADOG_API_KEY"  ]] && echo "DATADOG_API_KEY=$DATADOG_API_KEY"
-[[ -n "$DATADOG_APP_KEY"  ]] && echo "DATADOG_APP_KEY=$DATADOG_APP_KEY"
-[[ -n "$DATADOG_SITE"     && "$DATADOG_SITE" != "datadoghq.com" ]] && echo "DATADOG_SITE=$DATADOG_SITE"
-[[ -n "$NEWRELIC_API_KEY" ]] && echo "NEWRELIC_API_KEY=$NEWRELIC_API_KEY"
+[[ -n "$PROMETHEUS_URL"   ]] && echo "PROMETHEUS_URL=$(q "$PROMETHEUS_URL")"
+[[ -n "$PROMETHEUS_AUTH_TOKEN" ]] && echo "PROMETHEUS_AUTH_TOKEN=$(q "$PROMETHEUS_AUTH_TOKEN")"
+[[ -n "$GRAFANA_URL"      ]] && echo "GRAFANA_URL=$(q "$GRAFANA_URL")"
+[[ -n "$GRAFANA_API_KEY"  ]] && echo "GRAFANA_API_KEY=$(q "$GRAFANA_API_KEY")"
+[[ -n "$GRAFANA_ORG_ID"   ]] && echo "GRAFANA_ORG_ID=$(q "$GRAFANA_ORG_ID")"
+[[ -n "$LOKI_URL"         ]] && echo "LOKI_URL=$(q "$LOKI_URL")"
+[[ -n "$LOKI_AUTH_TOKEN"  ]] && echo "LOKI_AUTH_TOKEN=$(q "$LOKI_AUTH_TOKEN")"
+[[ -n "$LOKI_ORG_ID"      ]] && echo "LOKI_ORG_ID=$(q "$LOKI_ORG_ID")"
+[[ -n "$DATADOG_API_KEY"  ]] && echo "DATADOG_API_KEY=$(q "$DATADOG_API_KEY")"
+[[ -n "$DATADOG_APP_KEY"  ]] && echo "DATADOG_APP_KEY=$(q "$DATADOG_APP_KEY")"
+[[ -n "$DATADOG_SITE"     && "$DATADOG_SITE" != "datadoghq.com" ]] && echo "DATADOG_SITE=$(q "$DATADOG_SITE")"
+[[ -n "$NEWRELIC_API_KEY" ]] && echo "NEWRELIC_API_KEY=$(q "$NEWRELIC_API_KEY")"
 [[ -n "$NEWRELIC_ACCOUNT_ID" ]] && echo "NEWRELIC_ACCOUNT_ID=$NEWRELIC_ACCOUNT_ID"
-[[ -n "$PAGERDUTY_API_KEY" ]] && echo "PAGERDUTY_API_KEY=$PAGERDUTY_API_KEY"
-[[ -n "$PAGERDUTY_FROM_EMAIL" ]] && echo "PAGERDUTY_FROM_EMAIL=$PAGERDUTY_FROM_EMAIL"
-[[ -n "$GITHUB_TOKEN"     ]] && echo "GITHUB_TOKEN=$GITHUB_TOKEN"
-[[ -n "$GITHUB_ORG"       ]] && echo "GITHUB_ORG=$GITHUB_ORG"
-[[ -n "$JIRA_SM_URL"      ]] && echo "JIRA_SM_URL=$JIRA_SM_URL"
-[[ -n "$JIRA_SM_EMAIL"    ]] && echo "JIRA_SM_EMAIL=$JIRA_SM_EMAIL"
-[[ -n "$JIRA_SM_API_TOKEN" ]] && echo "JIRA_SM_API_TOKEN=$JIRA_SM_API_TOKEN"
-[[ -n "$JIRA_SM_PROJECT_KEY" ]] && echo "JIRA_SM_PROJECT_KEY=$JIRA_SM_PROJECT_KEY"
-[[ -n "$KUBECONFIG_PATH"  ]] && echo "KUBECONFIG_PATH=$KUBECONFIG_PATH"
-[[ -n "$AWS_ROLE_ARN"     ]] && echo "AWS_ROLE_ARN=$AWS_ROLE_ARN"
-[[ -n "$AWS_REGION" && "$AWS_REGION" != "us-east-1" ]] && echo "AWS_REGION=$AWS_REGION"
-[[ -n "$GOOGLE_APPLICATION_CREDENTIALS" ]] && echo "GOOGLE_APPLICATION_CREDENTIALS=$GOOGLE_APPLICATION_CREDENTIALS"
+[[ -n "$PAGERDUTY_API_KEY" ]] && echo "PAGERDUTY_API_KEY=$(q "$PAGERDUTY_API_KEY")"
+[[ -n "$PAGERDUTY_FROM_EMAIL" ]] && echo "PAGERDUTY_FROM_EMAIL=$(q "$PAGERDUTY_FROM_EMAIL")"
+[[ -n "$GITHUB_TOKEN"     ]] && echo "GITHUB_TOKEN=$(q "$GITHUB_TOKEN")"
+[[ -n "$GITHUB_ORG"       ]] && echo "GITHUB_ORG=$(q "$GITHUB_ORG")"
+[[ -n "$JIRA_SM_URL"      ]] && echo "JIRA_SM_URL=$(q "$JIRA_SM_URL")"
+[[ -n "$JIRA_SM_EMAIL"    ]] && echo "JIRA_SM_EMAIL=$(q "$JIRA_SM_EMAIL")"
+[[ -n "$JIRA_SM_API_TOKEN" ]] && echo "JIRA_SM_API_TOKEN=$(q "$JIRA_SM_API_TOKEN")"
+[[ -n "$JIRA_SM_PROJECT_KEY" ]] && echo "JIRA_SM_PROJECT_KEY=$(q "$JIRA_SM_PROJECT_KEY")"
+[[ -n "$KUBECONFIG_PATH"  ]] && echo "KUBECONFIG_PATH=$(q "$KUBECONFIG_PATH")"
+[[ -n "$AWS_ROLE_ARN"     ]] && echo "AWS_ROLE_ARN=$(q "$AWS_ROLE_ARN")"
+[[ "$AWS_REGION" != "us-east-1" ]] && echo "AWS_REGION=$AWS_REGION"
+[[ -n "$GOOGLE_APPLICATION_CREDENTIALS" ]] && echo "GOOGLE_APPLICATION_CREDENTIALS=$(q "$GOOGLE_APPLICATION_CREDENTIALS")"
 echo ""
 echo "LOG_LEVEL=INFO"
 } > .env
