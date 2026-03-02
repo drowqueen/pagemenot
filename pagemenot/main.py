@@ -31,9 +31,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger("pagemenot")
 
-# dedup_key → jira issue key for open tickets; closed on resolve webhook
+# dedup_key → jira issue key / pd incident url for open incidents; cleared on resolve
 _active_jira_tickets: dict[tuple, str] = {}
+_active_pd_incidents: dict[tuple, str] = {}
 _jira_tickets_lock = asyncio.Lock()
+_pd_incidents_lock = asyncio.Lock()
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
 
@@ -462,11 +464,16 @@ async def _handle_resolve(source: str, payload: dict) -> None:
 
     key = _dedup_key(parsed["service"], parsed["title"])
 
+    # Peek at issue_key without removing yet — only remove after successful close
+    async with _jira_tickets_lock:
+        issue_key = _active_jira_tickets.get(key)
+
+    async with _pd_incidents_lock:
+        _active_pd_incidents.pop(key, None)
+
+    # Clear dedup registry so future occurrences trigger fresh triage
     with _dedup_lock:
         _active_incidents.pop(key, None)
-
-    async with _jira_tickets_lock:
-        issue_key = _active_jira_tickets.pop(key, None)
 
     if not issue_key:
         return
@@ -480,6 +487,8 @@ async def _handle_resolve(source: str, payload: dict) -> None:
     client = get_client()
     channel = settings.pagemenot_channel
     if closed:
+        async with _jira_tickets_lock:
+            _active_jira_tickets.pop(key, None)
         await client.chat_postMessage(
             channel=channel,
             text=f"✅ *{parsed['title']}* resolved — Jira {issue_key} closed automatically.",
@@ -599,20 +608,18 @@ async def _auto_triage(source: str, payload: dict):
                 dedup_key = _dedup_key(result.service, result.alert_title)
                 async with _jira_tickets_lock:
                     existing_jira = _active_jira_tickets.get(dedup_key)
+                async with _pd_incidents_lock:
+                    existing_pd = _active_pd_incidents.get(dedup_key)
 
+                # Jira: open once per incident lifecycle
                 if existing_jira:
-                    pd_url = await _page_pagerduty(result)
                     await client.chat_postMessage(
                         channel=channel,
                         thread_ts=thread_ts,
                         text=f"🎫 Jira already open: {settings.jira_sm_url.rstrip('/')}/browse/{existing_jira}",
                     )
                 else:
-                    jira_info, pd_url = await asyncio.gather(
-                        _open_jira_ticket(result),
-                        _page_pagerduty(result),
-                        return_exceptions=True,
-                    )
+                    jira_info = await _open_jira_ticket(result)
                     if isinstance(jira_info, tuple):
                         issue_key, jira_url = jira_info
                         async with _jira_tickets_lock:
@@ -620,14 +627,30 @@ async def _auto_triage(source: str, payload: dict):
                         await client.chat_postMessage(
                             channel=channel, thread_ts=thread_ts, text=f"🎫 Jira: {jira_url}",
                         )
-                if isinstance(pd_url, str):
-                    await client.chat_postMessage(
-                        channel=channel, thread_ts=thread_ts, text=f"📟 PagerDuty: {pd_url}",
-                    )
 
+                # PagerDuty: page once per incident lifecycle
+                new_pd_url: Optional[str] = None
+                if existing_pd:
+                    await client.chat_postMessage(
+                        channel=channel,
+                        thread_ts=thread_ts,
+                        text=f"📟 PagerDuty already paged: {existing_pd}",
+                    )
+                else:
+                    pd_result = await _page_pagerduty(result)
+                    if isinstance(pd_result, str):
+                        new_pd_url = pd_result
+                        async with _pd_incidents_lock:
+                            _active_pd_incidents[dedup_key] = new_pd_url
+                        await client.chat_postMessage(
+                            channel=channel, thread_ts=thread_ts, text=f"📟 PagerDuty: {new_pd_url}",
+                        )
+
+                # Only ping oncall channel on first escalation of this incident
                 escalation_channel = settings.pagemenot_oncall_channel
-                if escalation_channel:
-                    pd_line = f"\n📟 {pd_url}" if isinstance(pd_url, str) else ""
+                if escalation_channel and not (existing_jira and existing_pd):
+                    effective_pd = existing_pd or new_pd_url
+                    pd_line = f"\n📟 {effective_pd}" if effective_pd else ""
                     await client.chat_postMessage(
                         channel=escalation_channel,
                         text=(

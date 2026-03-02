@@ -117,3 +117,48 @@ docker compose up -d
 ```
 
 **That's it. Same 4 commands everywhere.**
+
+## Triage Behavior
+
+### Alert lifecycle
+
+```
+Alert fires
+  │
+  ├─ Low severity or duplicate within TTL → suppressed, no action
+  │
+  └─ Crew runs
+       │
+       ├─ Auto-resolved (runbook exec succeeded)
+       │    └─ Posts result to Slack thread. No Jira. No PD.
+       │
+       ├─ Crew has remediation steps, no human approval needed
+       │    └─ Posts steps to Slack thread. No Jira. No PD. No oncall ping.
+       │
+       ├─ Crew has needs-approval steps OR no steps at all (high/critical only)
+       │    └─ Opens Jira ticket (once). Pages PagerDuty (once). Pings oncall channel (once).
+       │
+       └─ Unresolved, medium or lower severity
+            └─ Posts analysis to Slack thread. No Jira. No PD.
+```
+
+### Escalation gate
+
+| Condition | Jira | PagerDuty | Oncall ping |
+|-----------|------|-----------|-------------|
+| Auto-resolved | ✗ | ✗ | ✗ |
+| Crew has runbook steps (exec disabled) | ✗ | ✗ | ✗ |
+| Crew needs human approval — high/critical | ✓ once | ✓ once | ✓ once |
+| Crew stumped — high/critical | ✓ once | ✓ once | ✓ once |
+| Crew stumped — medium/low | ✗ | ✗ | ✗ |
+
+### Auto-resolve (monitoring-system resolves)
+
+When `alertmanager status=resolved` or `pagerduty incident.resolved` arrives:
+- Clears the alert from the dedup registry (future occurrences trigger fresh triage)
+- Looks up any open Jira ticket for that alert; adds resolution comment and transitions to Done/Resolved/Closed
+- Posts outcome to Slack
+
+### Jira deduplication
+
+One Jira ticket per incident lifecycle. If the dedup TTL expires and the same alert fires again while a Jira ticket is already open, the existing ticket is referenced instead of opening a new one. Same for PagerDuty paging.

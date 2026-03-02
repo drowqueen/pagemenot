@@ -34,7 +34,9 @@ _dedup_lock = threading.Lock()
 
 
 def _dedup_key(service: str, title: str) -> tuple[str, str]:
-    return (service.lower(), str(hash(title.lower()[:60])))
+    import hashlib
+    h = hashlib.sha256(title.lower()[:60].encode()).hexdigest()[:16]
+    return (service.lower(), h)
 
 
 def _check_and_register(service: str, title: str, severity: str) -> bool:
