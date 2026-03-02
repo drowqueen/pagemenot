@@ -1,6 +1,10 @@
 # Pagemenot — AI On-Call Copilot
 
-Self-hosted AI SRE. Alert fires → 3-agent crew triages → root cause + remediation posted to Slack. Executes runbook steps autonomously. Pages humans only when it can't resolve.
+On-call engineers spend most of their time on the same recurring incidents — OOM restarts, deployment regressions, connection pool exhaustion — running the same diagnostics and the same runbook steps at 3am. Pagemenot automates that loop.
+
+When an alert fires, a 3-agent AI crew investigates (metrics, logs, recent deploys), matches a runbook, and executes remediation steps autonomously. If it resolves the incident, nobody gets paged. If it can't, the on-call engineer wakes up to a Slack thread with root cause, relevant data, and the deploy that likely caused it already identified — investigation done, decision remaining.
+
+Self-hosted. Connects to your existing monitoring stack. No new infrastructure required.
 
 ---
 
