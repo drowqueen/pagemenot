@@ -5,6 +5,7 @@
 FROM python:3.12-slim AS builder
 
 WORKDIR /app
+ENV PYTHONUNBUFFERED=1
 
 RUN python -m venv /venv
 ENV PATH="/venv/bin:$PATH"
@@ -32,12 +33,22 @@ ENV PATH="/venv/bin:$PATH"
 # One layer for all app code
 COPY pagemenot/ pagemenot/ scripts/ scripts/ knowledge/ knowledge/
 
-# kubectl — single binary, arch-aware, pinned version; no build deps needed
+# kubectl — single binary, arch-aware, pinned version; sha256 verified
 ARG KUBECTL_VERSION=v1.35.2
 RUN ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') && \
     curl -fsSLo /usr/local/bin/kubectl \
       "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl" && \
+    curl -fsSLo /tmp/kubectl.sha256 \
+      "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl.sha256" && \
+    echo "$(cat /tmp/kubectl.sha256)  /usr/local/bin/kubectl" | sha256sum --check --strict && \
+    rm /tmp/kubectl.sha256 && \
     chmod +x /usr/local/bin/kubectl
+
+RUN groupadd --system appgroup && \
+    useradd --system --gid appgroup --no-create-home appuser && \
+    chown -R appuser:appgroup /app /venv
+
+USER appuser
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
     CMD curl -f http://localhost:8080/health || exit 1
