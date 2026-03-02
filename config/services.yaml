@@ -1,0 +1,35 @@
+# Service → GitHub repo mapping
+# Used by DiagnoserAgent to correlate incidents with recent deploys.
+# Safe to commit — no secrets.
+#
+# Default (no entry needed): GITHUB_ORG/service-name
+#
+# Fields:
+#   repos:        list of org/repo strings (required)
+#   path_prefix:  restrict to PRs touching this directory (monorepo only)
+#
+# Examples:
+#
+# Repo name differs from service name:
+# payment-service:
+#   repos:
+#     - myorg/payments
+#
+# Monorepo — only PRs touching services/checkout/:
+# checkout-service:
+#   repos:
+#     - myorg/platform
+#   path_prefix: services/checkout/
+#
+# Multiple repos:
+# api-gateway:
+#   repos:
+#     - myorg/api-gateway
+#     - myorg/gateway-plugins
+#
+# Monorepo + standalone:
+# notification-service:
+#   repos:
+#     - myorg/platform
+#     - myorg/notification-workers
+#   path_prefix: packages/notifications/

@@ -9,16 +9,8 @@ NC='\033[0m'
 echo "Running pre-commit checks..."
 EXIT_CODE=0
 
-# 1. Hardcoded credentials — code files only (.md and .env.example are excluded)
-# Scoped to py/sh/yaml/toml/json to avoid false positives from docs/examples
-if git diff --cached -- '*.py' '*.sh' '*.yaml' '*.yml' '*.toml' '*.json' \
-    | grep -E '^\+' \
-    | grep -v '^\+\s*#' \
-    | grep -E '(password|api_key|secret|token|database_url|db_url|connection).*=.*["'"'"'][A-Za-z0-9_\-]{20,}["'"'"']' \
-    | grep -v "os\.getenv" \
-    | grep -v "os\.environ" \
-    | grep -v '<[A-Za-z_-]*>' \
-    | grep -q .; then
+# 1. Hardcoded credentials
+if git diff --cached | grep -E '^\+.*(password|api_key|secret|token|key|database_url|db_url|connection).*=.*["'"'"'][A-Za-z0-9_\-]{20,}["'"'"']' | grep -v "os.getenv" | grep -v "os.environ" | grep -q .; then
     echo -e "${RED}❌ ERROR: Possible credentials in staged changes${NC}"
     echo "Use .env file and os.getenv() instead."
     echo "False positive? Use: git commit --no-verify"

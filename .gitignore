@@ -67,6 +67,6 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
-
-# ── Claude Code ───────────────────────────────────────────────────────────────
+# ── Claude Code / Serena ──────────────────────────────────────────────────────
 .claude/settings.local.json
+.serena/

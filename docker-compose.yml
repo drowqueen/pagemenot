@@ -1,6 +1,8 @@
 services:
   pagemenot:
-    build: .
+    build:
+      context: .
+      target: ${PAGEMENOT_BUILD_TARGET:-base}
     container_name: pagemenot
     restart: unless-stopped
     env_file: .env
@@ -9,10 +11,20 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./knowledge/postmortems:/app/knowledge/postmortems:ro
+      - ./knowledge/postmortems:/app/knowledge/postmortems
       - ./knowledge/runbooks:/app/knowledge/runbooks:ro
+      - appdata:/app/data
       - chromadata:/app/data/chroma
-      - ./kubeconfig-minikube.yaml:/app/kubeconfig:ro
+      - chromacache:/root/.cache/chroma
+      # Kubernetes: mount your kubeconfig and set KUBECONFIG_PATH=/app/kubeconfig in .env
+      # - /path/to/kubeconfig:/app/kubeconfig:ro
+      # AWS credentials (for aws target): mount ~/.aws or use IAM role / env vars
+      # - ~/.aws:/root/.aws:ro
+      # GCP credentials (for gcp target): mount service account key or use Workload Identity
+      # - /path/to/sa-key.json:/app/gcp-sa.json:ro   # then GOOGLE_APPLICATION_CREDENTIALS=/app/gcp-sa.json
+      # Azure credentials (for azure target): set AZURE_TENANT_ID/CLIENT_ID/CLIENT_SECRET in .env
 
 volumes:
+  appdata:
   chromadata:
+  chromacache:

@@ -7,7 +7,7 @@ State which rules apply BEFORE any task. If violated: STOP, fix, add validation.
 
 | Task | Rules |
 |------|-------|
-| Git | #24, #26 |
+| Git | #24, #24.5, #26 |
 | New code | #29 |
 | Any docs/README | #30 |
 | Long jobs | #7, #0.95 |
@@ -37,9 +37,10 @@ FORBIDDEN everywhere: "robust", "seamless", "leverages", "powerful", "comprehens
 NEVER commit without explicit user command. NEVER commit credentials or secrets.
 
 ### #24.5: BRANCH AND PR WORKFLOW
-ALWAYS work on a branch. NEVER commit directly to `main` or `develop`.
+NEVER commit or work directly on local `main` or `develop`. ALWAYS create a local feature branch first.
 Branch naming: `feature/<name>`, `fix/<name>`, `chore/<name>`.
 Every change must go through a PR. No exceptions.
+Violation of this rule is a hard stop — abort, create the branch, move the work there.
 
 ### #25: DELEGATE — AGENTS USE SCREEN, NEVER BLOCK
 Task agents MUST use `screen -dmS` for any work >2 min. FORBIDDEN: blocking terminal waiting for agent results. Launch screen, report name + log path, move on. Agent inventory: `.claude/agents/README.md`.
