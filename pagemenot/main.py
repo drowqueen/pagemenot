@@ -450,6 +450,23 @@ async def _auto_triage(source: str, payload: dict):
                     text=f"Detailed analysis (part {i + 1})\n```{chunk}```",
                 )
 
+        if result.postmortem_path and not result.pending_review:
+            await client.chat_postMessage(
+                channel=channel,
+                thread_ts=thread,
+                text=f"📝 Postmortem saved to knowledge base: `knowledge/postmortems/{result.postmortem_path}`",
+            )
+        elif result.postmortem_path and result.pending_review:
+            await client.chat_postMessage(
+                channel=channel,
+                thread_ts=thread,
+                text=(
+                    f"📋 Postmortem draft needs review (medium confidence):\n"
+                    f"`knowledge/pending_review/{result.postmortem_path}`\n"
+                    f"Edit and move to `knowledge/postmortems/` to index it."
+                ),
+            )
+
         # Page humans only for critical/high that could not be auto-resolved
         if needs_page:
             jira_url, pd_url = await asyncio.gather(

@@ -95,6 +95,8 @@ class TriageResult:
     remediation_steps: list[str] = field(default_factory=list)
     needs_approval: list[str] = field(default_factory=list)
     postmortem_draft: str = ""
+    postmortem_path: str = ""
+    pending_review: bool = False
     raw_output: str = ""
     duration_seconds: float = 0.0
     suppressed: bool = False              # True = dedup or severity gate, crew never ran
@@ -312,7 +314,7 @@ def _try_runbook_exec(result: TriageResult):
         logger.info(f"Incident auto-resolved: {result.alert_title}")
 
 
-def _write_postmortem(result: TriageResult) -> None:
+def _write_postmortem(result: TriageResult) -> tuple[Path | None, bool]:
     """Write an auto-generated postmortem MD and index it if confidence is high."""
     from pagemenot.knowledge.rag import POSTMORTEMS_DIR, add_postmortem
 
@@ -323,7 +325,7 @@ def _write_postmortem(result: TriageResult) -> None:
         target_dir = POSTMORTEMS_DIR.parent / "pending_review"
         index = False
     else:
-        return
+        return None, False
 
     target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -353,8 +355,10 @@ def _write_postmortem(result: TriageResult) -> None:
         logger.info(f"Postmortem written: {filepath.name}")
         if index:
             add_postmortem(filepath)
+        return filepath, not index
     except Exception as e:
         logger.warning(f"Postmortem write failed: {e}")
+        return None, False
 
 
 async def run_triage(source: str, payload: dict[str, Any]) -> TriageResult:
@@ -408,7 +412,10 @@ async def run_triage(source: str, payload: dict[str, Any]) -> TriageResult:
     result = _parse_crew_output(raw, parsed)
 
     # 8. Write postmortem (high confidence → index; medium → pending_review)
-    _write_postmortem(result)
+    pm_path, pm_pending = _write_postmortem(result)
+    if pm_path:
+        result.postmortem_path = str(pm_path.name)
+        result.pending_review = pm_pending
 
     # 9. Attempt runbook-driven resolution (only if exec is enabled)
     _try_runbook_exec(result)
