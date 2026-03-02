@@ -775,9 +775,6 @@ def exec_kubectl(command: str) -> str:
     _exec_enabled()
     if settings.pagemenot_exec_dry_run:
         return f"[DRY RUN] would execute: kubectl {command}"
-    if not settings.kubeconfig_path:
-        raise RuntimeError("KUBECONFIG_PATH not configured")
-
     parts = shlex.split(command)
     verb = parts[0].lower() if parts else ""
 
@@ -788,7 +785,8 @@ def exec_kubectl(command: str) -> str:
     if verb == "rollout" and (len(parts) < 2 or parts[1].lower() != "undo"):
         raise ValueError("Only 'rollout undo' is allowed autonomously")
 
-    cmd = ["kubectl", "--kubeconfig", settings.kubeconfig_path] + parts
+    kubeconfig = settings.kubeconfig_path or os.environ.get("KUBECONFIG")
+    cmd = (["kubectl", "--kubeconfig", kubeconfig] if kubeconfig else ["kubectl"]) + parts
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     if result.returncode != 0:
         raise RuntimeError(f"kubectl failed: {result.stderr[:300]}")
