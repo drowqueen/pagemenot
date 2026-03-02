@@ -24,11 +24,18 @@ POSTMORTEMS_DIR = _KNOWLEDGE_BASE / "postmortems"
 RUNBOOKS_DIR = _KNOWLEDGE_BASE / "runbooks"
 
 
+def _chroma_client():
+    """Return a ChromaDB client — HTTP (remote) if CHROMA_HOST is set, PersistentClient otherwise."""
+    if settings.chroma_host:
+        return chromadb.HttpClient(host=settings.chroma_host, port=settings.chroma_port)
+    os.makedirs(settings.chroma_path, exist_ok=True)
+    return chromadb.PersistentClient(path=settings.chroma_path)
+
+
 def ingest_all():
     """Auto-ingest all knowledge on startup. Called from main.py."""
     try:
-        os.makedirs(settings.chroma_path, exist_ok=True)
-        client = chromadb.PersistentClient(path=settings.chroma_path)
+        client = _chroma_client()
 
         _ingest_directory(client, POSTMORTEMS_DIR, "incidents", "postmortem")
         _ingest_directory(client, RUNBOOKS_DIR, "runbooks", "runbook")
@@ -101,8 +108,7 @@ def _ingest_directory(
 def add_postmortem(filepath: Path) -> None:
     """Incrementally index a single postmortem file into ChromaDB. Non-blocking on error."""
     try:
-        os.makedirs(settings.chroma_path, exist_ok=True)
-        client = chromadb.PersistentClient(path=settings.chroma_path)
+        client = _chroma_client()
         collection = client.get_or_create_collection(
             name="incidents",
             metadata={"hnsw:space": "cosine"},

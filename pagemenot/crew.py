@@ -9,7 +9,7 @@ Use the mock. Teams never see the difference in the agent config.
 from typing import Literal
 
 from crewai import Agent, Task, Crew, Process, LLM
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from pagemenot.config import settings
 from pagemenot.mock_tools import get_available_tools
 
@@ -24,6 +24,14 @@ class TriageOutput(BaseModel):
     evidence: list[str] = Field(default=[], description="Key evidence supporting the root cause.")
     remediation_steps: list[str] = Field(default=[], description="Ordered fix steps, each prefixed [AUTO-SAFE] or [NEEDS APPROVAL].")
     postmortem_summary: str = Field(default="", description="3-sentence postmortem summary.")
+
+    @field_validator("remediation_steps", "evidence", mode="before")
+    @classmethod
+    def coerce_to_list(cls, v):
+        if isinstance(v, str):
+            lines = [line.strip() for line in v.splitlines() if line.strip()]
+            return lines if lines else ([v] if v else [])
+        return v
 
 
 def _build_llm() -> LLM:
@@ -166,7 +174,10 @@ def build_triage_crew(alert_summary: str) -> Crew:
             "3. List ordered fix steps (safest/fastest first), each prefixed [AUTO-SAFE] or [NEEDS APPROVAL]\n"
             "4. Summarize key evidence from the monitoring and diagnosis\n"
             "5. Draft a 3-sentence postmortem summary\n\n"
-            "NEVER recommend destructive actions without [NEEDS APPROVAL] prefix.\n"
+            "[AUTO-SAFE] — use for: read-only commands (get/describe/logs/top), rolling restarts (rollout restart), "
+            "scaling UP, connection pool resets, cache flushes, log rotation, health checks.\n"
+            "[NEEDS APPROVAL] — use for: rollbacks (rollout undo), scaling DOWN (especially to 0), deleting resources, "
+            "any change that reduces capacity or cannot be easily reversed.\n"
             "If root cause cannot be determined, set confidence to 'low'."
         ),
         expected_output="JSON object matching the TriageOutput schema.",

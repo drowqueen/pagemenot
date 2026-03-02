@@ -11,11 +11,20 @@ services:
     volumes:
       - ./knowledge/postmortems:/app/knowledge/postmortems
       - ./knowledge/runbooks:/app/knowledge/runbooks:ro
+      - appdata:/app/data
       - chromadata:/app/data/chroma
       - chromacache:/root/.cache/chroma
-      # To enable kubectl exec, mount your kubeconfig and set KUBECONFIG_PATH=/app/kubeconfig in .env:
-      # - /path/to/your/kubeconfig:/app/kubeconfig:ro
+      # Mount CLI tools and credentials for autonomous execution.
+      # Pagemenot uses whatever binaries you mount — kubectl, aws, gcloud, or any other tool
+      # referenced in your runbook <!-- exec: --> tags.
+      # Examples (uncomment and adjust paths):
+      - /tmp/kubectl-linux-arm64:/usr/local/bin/kubectl:ro  # Linux arm64 kubectl for container
+      - /tmp/kubeconfig-container:/app/kubeconfig:ro            # set KUBECONFIG_PATH=/app/kubeconfig in .env
+      # - /usr/local/bin/aws:/usr/local/bin/aws:ro             # AWS CLI v2
+      # - ~/.aws:/root/.aws:ro                                 # AWS credentials
+      # - /usr/local/bin/gcloud:/usr/local/bin/gcloud:ro       # gcloud CLI
 
 volumes:
+  appdata:
   chromadata:
   chromacache:

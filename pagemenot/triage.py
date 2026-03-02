@@ -112,7 +112,7 @@ def _parse_alert(source: str, payload: dict) -> dict:
         return {
             "title": payload.get("title", payload.get("description", "Unknown")),
             "service": payload.get("service", {}).get("name", "unknown"),
-            "severity": "critical" if payload.get("urgency") == "high" else "medium",
+            "severity": "critical" if payload.get("urgency") == "high" else "low",
             "description": payload.get("description", ""),
             "external_id": payload.get("id", ""),
         }
@@ -135,7 +135,9 @@ def _parse_alert(source: str, payload: dict) -> dict:
         return {
             "title": payload.get("title", payload.get("event_title", "Unknown")),
             "service": tags.get("service", _guess_service(str(payload))),
-            "severity": "critical" if payload.get("alert_type") == "error" else "medium",
+            "severity": {"error": "critical", "warning": "high", "info": "low"}.get(
+                payload.get("alert_type", ""), "medium"
+            ),
             "description": payload.get("body", payload.get("text", "")),
             "external_id": str(payload.get("id", "")),
         }
@@ -143,7 +145,9 @@ def _parse_alert(source: str, payload: dict) -> dict:
         return {
             "title": payload.get("name", payload.get("condition_name", "Unknown")),
             "service": payload.get("targets", [{}])[0].get("name", "unknown") if payload.get("targets") else "unknown",
-            "severity": "critical" if payload.get("severity", "").upper() == "CRITICAL" else "medium",
+            "severity": {"CRITICAL": "critical", "HIGH": "high", "WARNING": "medium", "INFO": "low"}.get(
+                payload.get("severity", "").upper(), "medium"
+            ),
             "description": payload.get("details", ""),
             "external_id": str(payload.get("incident_id", "")),
         }
@@ -296,25 +300,39 @@ def _parse_crew_output(raw: str, structured: dict | None, parsed_alert: dict) ->
     return result
 
 
-def _try_runbook_exec(result: TriageResult):
-    """Attempt autonomous runbook execution. Mutates result in place."""
-    if not settings.pagemenot_exec_enabled:
-        return
+_DESTRUCTIVE_PATTERNS = ("rollout undo", "delete ", "scale ", "--replicas=0")
 
+
+def _is_destructive(step: str) -> bool:
+    cmd = step.lower()
+    return any(p in cmd for p in _DESTRUCTIVE_PATTERNS)
+
+
+def _try_runbook_exec(result: TriageResult):
+    """Attempt autonomous runbook execution. Mutates result in place.
+
+    When PAGEMENOT_APPROVAL_GATE=true, destructive steps (rollout undo,
+    delete, scale-to-zero) are skipped. The incident stays unresolved so
+    approval buttons appear in Slack; handle_approve then runs all steps.
+    """
     from pagemenot.tools import get_runbook_exec_steps, dispatch_exec_step
 
-    # Only use <!-- exec: --> tagged steps from verified runbook files.
-    # LLM-generated [AUTO-SAFE] text is NEVER used for autonomous execution
-    # (prompt injection risk: attacker could craft alert text to inject commands).
     steps = get_runbook_exec_steps(result.alert_title, service=result.service)
-
     if not steps:
         return
 
+    gate = settings.pagemenot_approval_gate
     mode = "DRY RUN" if settings.pagemenot_exec_dry_run else "EXEC"
     logger.info(f"[{mode}] Attempting runbook exec: {len(steps)} step(s) for {result.service}")
+
     all_ok = True
+    gated_steps = []
     for step in steps:
+        if gate and _is_destructive(step):
+            gated_steps.append(step)
+            result.execution_log.append(f"⏸ {step[:100]}: awaiting human approval")
+            logger.info(f"Approval gate: deferred {step[:80]}")
+            continue
         try:
             output = dispatch_exec_step(step, service=result.service)
             result.execution_log.append(f"✅ {step[:100]}: {output[:150]}")
@@ -323,11 +341,13 @@ def _try_runbook_exec(result: TriageResult):
             result.execution_log.append(f"❌ {step[:100]}: {e}")
             logger.warning(f"Exec step failed: {step[:80]} — {e}")
             all_ok = False
-            break  # stop on first failure, escalate with context
+            break
 
-    if all_ok and steps:
+    if all_ok and steps and not gated_steps:
         result.resolved_automatically = True
         logger.info(f"Incident auto-resolved: {result.alert_title}")
+    elif gated_steps:
+        logger.info(f"Approval required for {len(gated_steps)} destructive step(s) — awaiting human")
 
 
 def _generate_postmortem_narrative(result: TriageResult) -> str:

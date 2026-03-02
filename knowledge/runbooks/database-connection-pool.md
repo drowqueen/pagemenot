@@ -25,7 +25,8 @@ This forces connection pool reset. Safe if DB is healthy.
 <!-- exec: kubectl rollout status deployment/{{ service }} -n {{ namespace }} -->
 
 ### Step 4 — Verify recovery
-<!-- exec: curl -sf https://{{ service }}/health -->
+<!-- exec: kubectl rollout status deployment/{{ service }} -n {{ namespace }} -->
+<!-- exec: kubectl get pods -n {{ namespace }} -l app={{ service }} -->
 
 ## Escalate if
 - Restart does not clear the backlog within 3 minutes

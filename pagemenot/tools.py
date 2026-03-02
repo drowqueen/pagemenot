@@ -733,15 +733,13 @@ def kubectl_rollback(deployment_name: str) -> str:
 
 # ══════════════════════════════════════════════════════════════
 # EXECUTOR — plain functions (not @tool), called directly
-# Only runs when PAGEMENOT_EXEC_ENABLED=true
-# No destructive operations — only safe/reversible actions
+# Safety gates: PAGEMENOT_EXEC_DRY_RUN (simulate) and
+# PAGEMENOT_APPROVAL_GATE ([NEEDS APPROVAL] steps require human click).
+# Runbook authors are trusted — only <!-- exec: --> tagged steps run,
+# never free-form LLM output.
 # ══════════════════════════════════════════════════════════════
 
-_KUBECTL_ALLOWED_VERBS = {"rollout", "scale", "get", "describe", "logs"}
-_KUBECTL_FORBIDDEN_VERBS = {"delete", "drain", "taint", "cordon", "exec"}
-
 _SHELL_WHITELIST = [
-    # Read-only / non-destructive only. FLUSHDB removed — destructive, requires human.
     r"^curl\s+-sf\s+https?://\S+/health$",
     r"^curl\s+-sf\s+https?://\S+/ready$",
 ]
@@ -765,29 +763,19 @@ _SSM_COMMAND_WHITELIST = [
 ]
 
 
-def _exec_enabled():
-    if not settings.pagemenot_exec_enabled and not settings.pagemenot_exec_dry_run:
-        raise RuntimeError("PAGEMENOT_EXEC_ENABLED is false — autonomous execution is disabled")
-
-
 def exec_kubectl(command: str) -> str:
-    """Execute a safe kubectl command. Allowed: rollout undo, scale (up), get, describe, logs."""
-    _exec_enabled()
+    """Execute a kubectl command from a runbook <!-- exec: --> tag.
+
+    Safety gates: PAGEMENOT_EXEC_DRY_RUN (simulate without running) and
+    PAGEMENOT_APPROVAL_GATE (risky steps require human approval before reaching here).
+    Runbook authors are trusted — this function is never called with LLM-generated text.
+    """
     if settings.pagemenot_exec_dry_run:
         return f"[DRY RUN] would execute: kubectl {command}"
     parts = shlex.split(command)
-    verb = parts[0].lower() if parts else ""
-
-    if verb in _KUBECTL_FORBIDDEN_VERBS:
-        raise ValueError(f"kubectl '{verb}' is forbidden for autonomous execution")
-    if verb not in _KUBECTL_ALLOWED_VERBS:
-        raise ValueError(f"kubectl '{verb}' not in allowed list")
-    if verb == "rollout" and (len(parts) < 2 or parts[1].lower() != "undo"):
-        raise ValueError("Only 'rollout undo' is allowed autonomously")
-
     kubeconfig = settings.kubeconfig_path or os.environ.get("KUBECONFIG")
     cmd = (["kubectl", "--kubeconfig", kubeconfig] if kubeconfig else ["kubectl"]) + parts
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     if result.returncode != 0:
         raise RuntimeError(f"kubectl failed: {result.stderr[:300]}")
     return result.stdout.strip()[:500]
@@ -795,7 +783,6 @@ def exec_kubectl(command: str) -> str:
 
 def exec_aws(service: str, action: str, params: dict) -> str:
     """Execute a safe AWS operation via assumed IAM role."""
-    _exec_enabled()
     if settings.pagemenot_exec_dry_run:
         return f"[DRY RUN] would call: aws {service} {action}({params})"
     if not settings.aws_role_arn:
@@ -829,7 +816,6 @@ def exec_aws(service: str, action: str, params: dict) -> str:
 
 def exec_ssm(instance_id: str, command: str) -> str:
     """Run a whitelisted diagnostic command on an EC2 instance via SSM (no SSH/bastion needed)."""
-    _exec_enabled()
     if not re.fullmatch(r'i-[0-9a-f]{8,17}', instance_id):
         raise ValueError(f"Invalid EC2 instance ID: {instance_id!r}")
     if not any(re.fullmatch(p, command) for p in _SSM_COMMAND_WHITELIST):
@@ -876,7 +862,6 @@ def exec_ssm(instance_id: str, command: str) -> str:
 
 def exec_azure_run_command(resource_group: str, vm_name: str, command: str) -> str:
     """Run a whitelisted diagnostic command on an Azure VM via Run Command (no SSH/bastion needed)."""
-    _exec_enabled()
     if not re.fullmatch(r'[\w\-\.]+', resource_group):
         raise ValueError(f"Invalid resource group: {resource_group!r}")
     if not re.fullmatch(r'[\w\-\.]+', vm_name):
@@ -917,7 +902,6 @@ def exec_azure_run_command(resource_group: str, vm_name: str, command: str) -> s
 
 def exec_shell(command: str) -> str:
     """Execute a whitelisted shell command (read-only health checks only)."""
-    _exec_enabled()
     if settings.pagemenot_exec_dry_run:
         return f"[DRY RUN] would execute: {command}"
     # re.fullmatch — prevents prefix-bypass attacks (e.g. "curl -sf http://x/health; rm -rf /")
@@ -932,7 +916,6 @@ def exec_shell(command: str) -> str:
 def exec_http(method: str, url: str, headers: dict | None = None, body: dict | None = None) -> str:
     """Make an HTTP call (health check or alert acknowledge).
     Restricted to domains explicitly configured in .env to prevent SSRF."""
-    _exec_enabled()
     if settings.pagemenot_exec_dry_run:
         return f"[DRY RUN] would {method.upper()} {url}"
 
@@ -1042,19 +1025,19 @@ def get_runbook_exec_steps(query: str, service: str = "") -> list[str]:
 
         from pagemenot.knowledge.rag import RUNBOOKS_DIR
 
+        # Only the most-relevant runbook executes; multiple runbooks produce conflicting step sequences.
         exec_steps: list[str] = []
-        seen: set[str] = set()
         for meta in results["metadatas"][0]:
             filename = meta.get("filename", "")
-            if not filename or filename in seen:
+            if not filename:
                 continue
-            seen.add(filename)
             runbook_path = RUNBOOKS_DIR / filename
             if runbook_path.exists():
                 content = runbook_path.read_text(encoding="utf-8")
-                # Return the full <!-- exec: ... --> tag so dispatch_exec_step can validate + substitute
                 for match in re.finditer(r'<!--\s*exec:\s*.+?\s*-->', content):
                     exec_steps.append(match.group(0))
+            if exec_steps:
+                break
 
         return exec_steps
 
