@@ -27,9 +27,16 @@ Self-hosted. No new infrastructure. Connects to your existing monitoring stack.
 
 ## Screenshots
 
-| Escalation — Jira + PagerDuty | Approval button | Triage thread — RCA + links | Approval detail |
-|---|---|---|---|
-| [![escalation](screenshots/escalation-jira-pd.png)](screenshots/escalation-jira-pd.png) | [![approval](screenshots/approval-button.png)](screenshots/approval-button.png) | [![triage](screenshots/triage-thread-rca.png)](screenshots/triage-thread-rca.png) | [![approval-detail](screenshots/approval-required-detail.png)](screenshots/approval-required-detail.png) |
+**Triage thread — root cause, correlated metrics, runbook match**
+![triage thread](screenshots/triage-thread-rca.png)
+
+**Approval gate — risky runbook steps require one-click sign-off**
+![approval button](screenshots/approval-button.png)
+
+![approval detail](screenshots/approval-required-detail.png)
+
+**Escalation — Jira ticket + PagerDuty page with thread permalink**
+![escalation](screenshots/escalation-jira-pd.png)
 
 ---
 
