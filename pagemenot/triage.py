@@ -230,17 +230,23 @@ def _seed_mock_if_needed(parsed_alert: dict):
     logger.debug(f"No mock scenario found for service '{service}', using defaults")
 
 
-def _run_crew_sync(alert_summary: str) -> str:
-    """Run the crew synchronously (in thread pool)."""
+def _run_crew_sync(alert_summary: str) -> tuple[str, dict | None]:
+    """Run the crew synchronously (in thread pool). Returns (raw_str, structured_dict | None)."""
     from pagemenot.crew import build_triage_crew
 
     crew = build_triage_crew(alert_summary)
     result = crew.kickoff()
-    return str(result)
+    raw = str(result)
+    structured = None
+    if result.tasks_output:
+        last = result.tasks_output[-1]
+        if getattr(last, "json_dict", None):
+            structured = last.json_dict
+    return raw, structured
 
 
-def _parse_crew_output(raw: str, parsed_alert: dict) -> TriageResult:
-    """Extract structured fields from crew output text."""
+def _parse_crew_output(raw: str, structured: dict | None, parsed_alert: dict) -> TriageResult:
+    """Build TriageResult from structured JSON output (preferred) or prose fallback."""
     result = TriageResult(
         alert_title=parsed_alert["title"],
         service=parsed_alert["service"],
@@ -248,34 +254,42 @@ def _parse_crew_output(raw: str, parsed_alert: dict) -> TriageResult:
         raw_output=raw,
     )
 
-    lower = raw.lower()
-
-    # Root cause
-    for marker in ["root cause:", "root cause analysis:", "**root cause"]:
-        if marker in lower:
-            idx = lower.index(marker)
-            chunk = raw[idx:idx + 500]
-            lines = chunk.split("\n")
-            result.root_cause = (lines[1].strip(" -•*") if len(lines) > 1
-                                 else lines[0].split(":", 1)[-1].strip())[:300]
-            break
-
-    # Confidence
-    for level in ["high", "medium", "low"]:
-        if f"confidence: {level}" in lower or f"confidence level: {level}" in lower:
-            result.confidence = level
-            break
-
-    # Remediation steps (AUTO-SAFE and NEEDS APPROVAL)
-    for line in raw.split("\n"):
-        stripped = line.strip(" -•*[]")
-        if "[AUTO-SAFE]" in line:
-            result.remediation_steps.append(stripped)
-        if "NEEDS APPROVAL" in line or "HUMAN APPROVAL" in line:
-            result.needs_approval.append(stripped)
+    if structured:
+        result.root_cause = structured.get("root_cause", "")[:300]
+        result.confidence = structured.get("confidence", "unknown")
+        result.evidence = structured.get("evidence", [])
+        steps = structured.get("remediation_steps", [])
+        for step in steps:
+            s = step if isinstance(step, str) else str(step)
+            if "NEEDS APPROVAL" in s or "HUMAN APPROVAL" in s:
+                result.needs_approval.append(s)
+            else:
+                result.remediation_steps.append(s)
+        result.postmortem_draft = structured.get("postmortem_summary", "")
+    else:
+        # Prose fallback for LLMs that ignore output_json
+        lower = raw.lower()
+        for marker in ["root cause:", "root cause analysis:", "**root cause"]:
+            if marker in lower:
+                idx = lower.index(marker)
+                chunk = raw[idx:idx + 500]
+                lines = chunk.split("\n")
+                result.root_cause = (lines[1].strip(" -•*") if len(lines) > 1
+                                     else lines[0].split(":", 1)[-1].strip())[:300]
+                break
+        for level in ["high", "medium", "low"]:
+            if f"confidence: {level}" in lower or f"confidence level: {level}" in lower:
+                result.confidence = level
+                break
+        for line in raw.split("\n"):
+            s = line.strip(" -•*[]")
+            if "[AUTO-SAFE]" in line:
+                result.remediation_steps.append(s)
+            if "NEEDS APPROVAL" in line or "HUMAN APPROVAL" in line:
+                result.needs_approval.append(s)
 
     if not result.root_cause:
-        result.root_cause = "See detailed analysis below."
+        result.root_cause = "Root cause could not be determined — see raw analysis."
 
     return result
 
@@ -406,10 +420,10 @@ async def run_triage(source: str, payload: dict[str, Any]) -> TriageResult:
 
     # 6. Run crew
     loop = asyncio.get_running_loop()
-    raw = await loop.run_in_executor(_executor, _run_crew_sync, summary)
+    raw, structured = await loop.run_in_executor(_executor, _run_crew_sync, summary)
 
     # 7. Parse output
-    result = _parse_crew_output(raw, parsed)
+    result = _parse_crew_output(raw, structured, parsed)
 
     # 8. Write postmortem (high confidence → index; medium → pending_review)
     pm_path, pm_pending = _write_postmortem(result)

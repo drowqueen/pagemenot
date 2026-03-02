@@ -6,13 +6,24 @@ which auto-detects: real integration configured? Use it. Not configured?
 Use the mock. Teams never see the difference in the agent config.
 """
 
+from typing import Literal
+
 from crewai import Agent, Task, Crew, Process, LLM
+from pydantic import BaseModel, Field
 from pagemenot.config import settings
 from pagemenot.mock_tools import get_available_tools
 
 import logging
 
 logger = logging.getLogger("pagemenot.crew")
+
+
+class TriageOutput(BaseModel):
+    root_cause: str = Field(description="Specific root cause of the incident.")
+    confidence: Literal["high", "medium", "low"] = Field(description="Confidence in the root cause.")
+    evidence: list[str] = Field(default=[], description="Key evidence supporting the root cause.")
+    remediation_steps: list[str] = Field(default=[], description="Ordered fix steps, each prefixed [AUTO-SAFE] or [NEEDS APPROVAL].")
+    postmortem_summary: str = Field(default="", description="3-sentence postmortem summary.")
 
 
 def _build_llm() -> LLM:
@@ -135,22 +146,17 @@ def build_triage_crew(alert_summary: str) -> Crew:
 
     remediate_task = Task(
         description=(
-            "Based on the diagnosis, propose remediation:\n"
-            "1. Search runbooks for established procedures\n"
-            "2. List ordered fix steps (safest/fastest first)\n"
-            "3. Tag each step as [AUTO-SAFE] or [NEEDS APPROVAL]\n"
-            "4. Include a rollback plan\n"
+            "Based on the diagnosis, produce a structured remediation plan:\n"
+            "1. Extract the root_cause and confidence level (high/medium/low) from the diagnoser's output\n"
+            "2. Search runbooks for established procedures\n"
+            "3. List ordered fix steps (safest/fastest first), each prefixed [AUTO-SAFE] or [NEEDS APPROVAL]\n"
+            "4. Summarize key evidence from the monitoring and diagnosis\n"
             "5. Draft a 3-sentence postmortem summary\n\n"
-            "NEVER recommend destructive actions without [NEEDS APPROVAL] tag."
+            "NEVER recommend destructive actions without [NEEDS APPROVAL] prefix.\n"
+            "If root cause cannot be determined, set confidence to 'low'."
         ),
-        expected_output=(
-            "Remediation plan:\n"
-            "- Ordered steps with [AUTO-SAFE] or [NEEDS APPROVAL] tags\n"
-            "- Expected impact of each step\n"
-            "- Rollback plan\n"
-            "- Postmortem draft (3 sentences)\n"
-            "- Estimated time to resolution"
-        ),
+        expected_output="JSON object matching the TriageOutput schema.",
+        output_json=TriageOutput,
         agent=remediator,
         context=[monitor_task, diagnose_task],
     )

@@ -421,7 +421,7 @@ async def _auto_triage(source: str, payload: dict):
 
         sev = {"critical": "🔴", "high": "🟠", "medium": "🟡"}.get(result.severity, "⚪")
         conf = {"high": "🟢", "medium": "🟡", "low": "🔴"}.get(result.confidence, "⚪")
-        needs_page = result.severity in ("critical", "high")
+        needs_page = result.severity in ("critical", "high") and not result.resolved_automatically
 
         headline = (
             f"{sev} *INCIDENT: {result.alert_title}* — could not auto-resolve, escalating"
