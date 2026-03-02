@@ -775,9 +775,22 @@ def exec_kubectl(command: str) -> str:
     parts = shlex.split(command)
     kubeconfig = settings.kubeconfig_path or os.environ.get("KUBECONFIG")
     cmd = (["kubectl", "--kubeconfig", kubeconfig] if kubeconfig else ["kubectl"]) + parts
+    # Add --timeout to rollout status so it doesn't block indefinitely on a stuck deployment
+    if parts and parts[0] == "rollout" and len(parts) > 1 and parts[1] == "status" and "--timeout" not in command:
+        cmd = cmd + ["--timeout=30s"]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     if result.returncode != 0:
-        raise RuntimeError(f"kubectl failed: {result.stderr[:300]}")
+        stderr = result.stderr[:300]
+        stdout = result.stdout.strip()[:300]
+        # kubectl top fails when metrics-server isn't available or pods are not running — diagnostic only, non-fatal
+        if parts and parts[0] == "top" and (
+            "metrics.k8s.io" in stderr or "Metrics not available" in stderr or "Metrics API" in stderr
+        ):
+            return f"[WARN] kubectl top unavailable (pods not running or metrics-server not ready): {stderr.strip()}"
+        # rollout status non-zero means deployment not progressing — report as status, not exception
+        if parts and parts[0] == "rollout" and len(parts) > 1 and parts[1] == "status":
+            return f"[WARN] Rollout not healthy: {(stdout or stderr).strip()}"
+        raise RuntimeError(f"kubectl failed: {stderr}")
     return result.stdout.strip()[:500]
 
 
