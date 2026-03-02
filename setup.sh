@@ -36,7 +36,7 @@ ask_yes() {
     # ask_yes <question> → returns 0 (yes) or 1 (no)
     printf "%b%s%b [y/N]: " "${YELLOW}" "$1" "${RESET}"
     read -r yn
-    [[ "${yn,,}" == "y" ]]
+    [[ "$(echo "$yn" | tr '[:upper:]' '[:lower:]')" == "y" ]]
 }
 
 ping_url() {
