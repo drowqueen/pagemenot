@@ -501,7 +501,8 @@ async def _handle_resolve(source: str, payload: dict) -> None:
 
 async def _auto_triage(source: str, payload: dict):
     """Run triage and post all updates to Slack in a thread."""
-    from pagemenot.slack_bot import get_client
+    import uuid
+    from pagemenot.slack_bot import get_client, _approval_store
     from pagemenot.triage import _parse_alert
 
     client = get_client()
@@ -603,6 +604,45 @@ async def _auto_triage(source: str, payload: dict):
                         thread_ts=thread_ts,
                         text=f"Analysis (part {i + 1})\n```{chunk}```",
                     )
+
+            # Approval buttons for steps that need human sign-off
+            if result.needs_approval and settings.pagemenot_approval_gate:
+                approval_id = str(uuid.uuid4())[:8]
+                await _approval_store.set(approval_id, {
+                    "steps": result.needs_approval,
+                    "service": result.service or "",
+                })
+                approval_text = "\n".join(f"• `{a}`" for a in result.needs_approval)
+                await client.chat_postMessage(
+                    channel=channel,
+                    thread_ts=thread_ts,
+                    text="Actions requiring approval",
+                    blocks=[
+                        {
+                            "type": "section",
+                            "text": {"type": "mrkdwn", "text": f"*⚠️ Steps requiring approval:*\n{approval_text}"},
+                        },
+                        {
+                            "type": "actions",
+                            "elements": [
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": "✅ Approve & Execute"},
+                                    "action_id": "approve_action",
+                                    "value": approval_id,
+                                    "style": "primary",
+                                },
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": "❌ Reject"},
+                                    "action_id": "reject_action",
+                                    "value": approval_id,
+                                    "style": "danger",
+                                },
+                            ],
+                        },
+                    ],
+                )
 
             if needs_page:
                 dedup_key = _dedup_key(result.service, result.alert_title)
