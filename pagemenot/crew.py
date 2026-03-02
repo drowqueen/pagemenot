@@ -199,16 +199,15 @@ def build_triage_crew(alert_summary: str) -> Crew:
             }
     # gemini: no ChromaDB-compatible embedding API — memory stays disabled
 
-    memory_enabled = embedder_config is not None
-
+    # ShortTermMemory is disabled — it persists across crew runs in ChromaDB and causes
+    # cross-incident contamination (previous incident context retrieved for unrelated incidents).
+    # Cross-incident learning is handled via the postmortems RAG in triage.py instead.
     crew_kwargs: dict = {
         "agents": [monitor, diagnoser, remediator],
         "tasks": [monitor_task, diagnose_task, remediate_task],
         "process": Process.sequential,
         "verbose": _verbose,
-        "memory": memory_enabled,
+        "memory": False,
     }
-    if embedder_config:
-        crew_kwargs["embedder"] = embedder_config
 
     return Crew(**crew_kwargs)

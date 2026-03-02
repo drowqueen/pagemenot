@@ -355,6 +355,35 @@ def _generate_postmortem_narrative(result: TriageResult) -> str:
         return result.root_cause
 
 
+def _retrieve_past_context(alert_title: str, service: str) -> str:
+    """Query postmortems RAG for incidents matching this service/alert. Returns filtered summaries."""
+    try:
+        import chromadb
+        from pagemenot.config import settings as _s
+        client = chromadb.PersistentClient(path=_s.chroma_path)
+        try:
+            collection = client.get_collection("incidents")
+        except Exception:
+            return ""
+        results = collection.query(
+            query_texts=[f"{service} {alert_title}"],
+            n_results=3,
+            where={"type": "postmortem"},
+        )
+        docs = results.get("documents", [[]])[0]
+        metas = results.get("metadatas", [[]])[0]
+        lines = []
+        for doc, meta in zip(docs, metas):
+            # Only include postmortems for the same service to avoid cross-contamination
+            if meta.get("service", "general") not in (service, "general"):
+                continue
+            title = meta.get("title", "Unknown incident")
+            lines.append(f"- {title}: {doc[:200].strip()}")
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
 def _write_postmortem(result: TriageResult) -> tuple[Path | None, bool]:
     """Write an auto-generated postmortem MD and index it if confidence is high."""
     from pagemenot.knowledge.rag import POSTMORTEMS_DIR, add_postmortem
@@ -438,14 +467,16 @@ async def run_triage(source: str, payload: dict[str, Any]) -> TriageResult:
     # 4. Seed mocks if real integrations aren't configured
     _seed_mock_if_needed(parsed)
 
-    # 5. Build summary for the crew — redact credentials before sending to LLM
+    # 5. Build summary for the crew — inject relevant past incident context from postmortems RAG
     raw_description = parsed.get('description', 'N/A')
+    past_context = _retrieve_past_context(parsed['title'], parsed['service'])
     summary = _redact_sensitive(
         f"**Alert:** {parsed['title']}\n"
         f"**Service:** {parsed['service']}\n"
         f"**Severity:** {parsed['severity']}\n"
         f"**Description:** {raw_description}\n"
         f"**Time:** {datetime.now(timezone.utc).isoformat()}"
+        + (f"\n\n**Similar past incidents (for context only — focus on current alert):**\n{past_context}" if past_context else "")
     )
 
     # 6. Run crew
