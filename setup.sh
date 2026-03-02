@@ -79,7 +79,7 @@ say "  2) OpenAI"
 say "  3) Anthropic"
 say "  4) Gemini"
 
-LLM_PROVIDER="" LLM_MODEL="" OLLAMA_URL="" OPENAI_API_KEY="" ANTHROPIC_API_KEY=""
+LLM_PROVIDER="" LLM_MODEL="" OLLAMA_URL="" OLLAMA_EMBEDDING_MODEL="" OPENAI_API_KEY="" ANTHROPIC_API_KEY=""
 GEMINI_API_KEY="" LLM_EXTERNAL_ENTERPRISE_CONFIRMED="false"
 
 while true; do
@@ -90,6 +90,8 @@ while true; do
         prompt "Ollama URL" "http://localhost:11434"; OLLAMA_URL="$_REPLY"
         prompt "Model" "llama3.1"; LLM_MODEL="$_REPLY"
         if ping_url "$OLLAMA_URL"; then ok "Ollama reachable"; else warn "Ollama not reachable — continue anyway"; fi
+        say "${DIM}Cross-incident memory requires a local embedding model (ollama pull nomic-embed-text).${RESET}"
+        prompt "Embedding model (blank to skip)" ""; OLLAMA_EMBEDDING_MODEL="$_REPLY"
         break
         ;;
     2|3|4)
@@ -226,6 +228,7 @@ echo "# ── LLM ────────────────────�
 echo "LLM_PROVIDER=$LLM_PROVIDER"
 echo "LLM_MODEL=$LLM_MODEL"
 [[ -n "$OLLAMA_URL"       ]] && echo "OLLAMA_URL=$(q "$OLLAMA_URL")"
+[[ -n "$OLLAMA_EMBEDDING_MODEL" ]] && echo "OLLAMA_EMBEDDING_MODEL=$OLLAMA_EMBEDDING_MODEL"
 [[ -n "$OPENAI_API_KEY"   ]] && echo "OPENAI_API_KEY=$(q "$OPENAI_API_KEY")"
 [[ -n "$ANTHROPIC_API_KEY" ]] && echo "ANTHROPIC_API_KEY=$(q "$ANTHROPIC_API_KEY")"
 [[ -n "$GEMINI_API_KEY"   ]] && echo "GEMINI_API_KEY=$(q "$GEMINI_API_KEY")"

@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     anthropic_api_key: Optional[str] = None
     gemini_api_key: Optional[str] = None
     ollama_url: Optional[str] = None
+    ollama_embedding_model: Optional[str] = None  # e.g. nomic-embed-text — enables cross-incident memory with Ollama
 
     # ── Vector store (embedded ChromaDB) ──────────────────
     chroma_path: str = "/app/data/chroma"

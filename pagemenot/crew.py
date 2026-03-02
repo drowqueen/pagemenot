@@ -156,21 +156,25 @@ def build_triage_crew(alert_summary: str) -> Crew:
     )
 
     # Configure memory embedder per provider.
-    # Grok/Ollama have no embedding API — memory disabled for those.
     embedder_config = None
-    if settings.llm_provider == "openai" and settings.openai_api_key:
+    if settings.llm_provider == "ollama" and settings.ollama_embedding_model:
+        embedder_config = {
+            "provider": "ollama",
+            "config": {"model": settings.ollama_embedding_model, "base_url": settings.ollama_url},
+        }
+    elif settings.llm_provider == "openai" and settings.openai_api_key:
         embedder_config = {
             "provider": "openai",
             "config": {"model": "text-embedding-3-small", "api_key": settings.openai_api_key},
         }
     elif settings.llm_provider == "anthropic" and settings.anthropic_api_key:
-        # Anthropic has no embedding API — fall back to OpenAI if key available, else skip
+        # Anthropic has no embedding API — use OpenAI embeddings if key available
         if settings.openai_api_key:
             embedder_config = {
                 "provider": "openai",
                 "config": {"model": "text-embedding-3-small", "api_key": settings.openai_api_key},
             }
-    # gemini/ollama: no ChromaDB-compatible embedding API — memory stays disabled
+    # gemini: no ChromaDB-compatible embedding API — memory stays disabled
 
     memory_enabled = embedder_config is not None
 
