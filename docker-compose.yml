@@ -1,6 +1,8 @@
 services:
   pagemenot:
-    build: .
+    build:
+      context: .
+      target: ${PAGEMENOT_BUILD_TARGET:-base}
     container_name: pagemenot
     restart: unless-stopped
     env_file: .env
@@ -14,15 +16,13 @@ services:
       - appdata:/app/data
       - chromadata:/app/data/chroma
       - chromacache:/root/.cache/chroma
-      # Mount CLI tools and credentials for autonomous execution.
-      # Pagemenot uses whatever binaries you mount — kubectl, aws, gcloud, or any other tool
-      # referenced in your runbook <!-- exec: --> tags.
-      # Examples (uncomment and adjust paths):
-      - /tmp/kubectl-linux-arm64:/usr/local/bin/kubectl:ro  # Linux arm64 kubectl for container
-      - /tmp/kubeconfig-container:/app/kubeconfig:ro            # set KUBECONFIG_PATH=/app/kubeconfig in .env
-      # - /usr/local/bin/aws:/usr/local/bin/aws:ro             # AWS CLI v2
-      # - ~/.aws:/root/.aws:ro                                 # AWS credentials
-      # - /usr/local/bin/gcloud:/usr/local/bin/gcloud:ro       # gcloud CLI
+      # Kubernetes: mount your kubeconfig and set KUBECONFIG_PATH=/app/kubeconfig in .env
+      # - /path/to/kubeconfig:/app/kubeconfig:ro
+      # AWS credentials (for aws target): mount ~/.aws or use IAM role / env vars
+      # - ~/.aws:/root/.aws:ro
+      # GCP credentials (for gcp target): mount service account key or use Workload Identity
+      # - /path/to/sa-key.json:/app/gcp-sa.json:ro   # then GOOGLE_APPLICATION_CREDENTIALS=/app/gcp-sa.json
+      # Azure credentials (for azure target): set AZURE_TENANT_ID/CLIENT_ID/CLIENT_SECRET in .env
 
 volumes:
   appdata:

@@ -195,6 +195,20 @@ make test      # fire a simulated incident
 | `make test SCENARIO=checkout-oom` | fire a simulated incident |
 | `make hooks` | install git pre-commit/pre-push hooks |
 
+### Image variant — which CLI tools to bake in
+
+Set `PAGEMENOT_BUILD_TARGET` in `.env`, then `docker compose build && docker compose up -d`.
+
+| Environment | `PAGEMENOT_BUILD_TARGET` | Baked in | Extra size |
+|-------------|--------------------------|----------|------------|
+| Kubernetes only | `base` _(default)_ | kubectl | — |
+| AWS (EKS / ECS / EC2) | `aws` | kubectl + AWS CLI v2 | ~500 MB |
+| GCP (GKE / GCE) | `gcp` | kubectl + gcloud | ~400 MB |
+| Azure (AKS) | `azure` | kubectl + Azure CLI | ~300 MB |
+| Multi-cloud | `cloud` | kubectl + all three | ~1.2 GB |
+
+kubectl is always included — it auto-detects `amd64` / `arm64` at build time. Cloud CLI credentials are still mounted at runtime via volumes or env vars (see comments in `docker-compose.yml`).
+
 ---
 
 ## Slack app setup
