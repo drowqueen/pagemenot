@@ -16,9 +16,10 @@ services:
       - appdata:/app/data
       - chromadata:/app/data/chroma
       - chromacache:/root/.cache/chroma
-      # Kubernetes (local dev only): uncomment and set KUBECONFIG_PATH=/app/kubeconfig in .env
-      # In production: run pagemenot as a pod with a ServiceAccount — no kubeconfig mount needed
-      # - /path/to/your/kubeconfig:/app/kubeconfig:ro
+      # Kubernetes (local dev): mount kubeconfig file and set KUBECONFIG_PATH=/app/kubeconfig in .env
+      # Generate with: scripts/gen-kubeconfig.sh (remaps 127.0.0.1 → host.docker.internal)
+      # In production: run as a pod with a ServiceAccount — no kubeconfig mount needed
+      - /tmp/kubeconfig-container:/app/kubeconfig:ro
       # AWS credentials (for aws target): mount ~/.aws or use IAM role / env vars
       # - ~/.aws:/root/.aws:ro
       # GCP credentials (for gcp target): mount service account key or use Workload Identity
