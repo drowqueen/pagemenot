@@ -210,11 +210,11 @@ SCENARIOS = {
     },
 
     "cert-renewal": {
-        "name": "TLS Certificate Renewal Latency Storm",
+        "name": "TLS Certificate Expiry — api-gateway cert renewal failing",
         "pagerduty": {
             "id": "P7890123",
-            "title": "api-gateway: P99 latency >2s across all endpoints",
-            "description": "api-gateway P99 latency jumped from 50ms to 3.2s at 03:00 UTC. All downstream services affected. No recent deploys.",
+            "title": "api-gateway: TLS certificate renewal causing connection storm",
+            "description": "cert-manager renewed *.company.com at 03:00 UTC. api-gateway TLS session renegotiation storm started immediately — 5000 connections reset, P99 latency jumped from 50ms to 3.2s.",
             "urgency": "high",
             "service": {"name": "api-gateway", "id": "PSVC004"},
         },
@@ -273,6 +273,48 @@ SCENARIOS = {
             "restarts": 0,
             "events": "HPA scaling 4->10, CPU pressure detected",
             "resource_pressure": True,
+        },
+    },
+
+    "nginx-cache-flush": {
+        "name": "Nginx Cache Stale — Auto-Resolve Demo",
+        "pagerduty": {
+            "id": "P1111111",
+            "title": "nginx-cache: cache hit rate dropped to 12% (normal >85%)",
+            "description": "nginx-cache cache hit rate fell from 88% to 12% at 08:42 UTC. Origin request rate 4x normal. P99 latency increased from 80ms to 310ms. Suspected stale cache after last deploy invalidated all keys.",
+            "urgency": "high",
+            "service": {"name": "nginx-cache", "id": "PSVC006"},
+        },
+        "mock_metrics": {
+            "error_rate": {"before": 0.1, "after": 0.8, "unit": "%"},
+            "request_rate": {"before": 5000, "after": 5100, "unit": "req/s"},
+            "latency_p99": {"before": 0.08, "after": 0.31, "unit": "s"},
+            "cpu_percent": {"before": 15, "after": 62, "unit": "%"},
+            "memory_mb": {"before": 400, "after": 410, "unit": "MB"},
+            "pod_restarts": {"before": 0, "after": 0, "unit": ""},
+        },
+        "mock_logs": [
+            "2026-03-03T08:42:01Z WARN  nginx-cache cache MISS ratio 88% (last 5m)",
+            "2026-03-03T08:42:01Z INFO  nginx-cache origin upstream requests: 4x normal",
+            "2026-03-03T08:42:02Z WARN  nginx-cache /var/cache/nginx stale entries detected post-deploy",
+            "2026-03-03T08:42:10Z INFO  nginx-cache disk usage: 94% on /var/cache/nginx",
+            "2026-03-03T08:42:15Z INFO  nginx-cache all pods Running, no OOMKill events",
+        ],
+        "mock_deploys": [
+            {
+                "pr": 212,
+                "title": "bump cache key prefix to v3 (breaks v2 cache, intentional)",
+                "author": "deploy-bot",
+                "merged_at": "2026-03-03T08:40:00Z",
+                "files_changed": ["nginx.conf"],
+                "diff_preview": "- proxy_cache_key \"v2:$host$request_uri\";\n+ proxy_cache_key \"v3:$host$request_uri\";",
+            }
+        ],
+        "mock_k8s": {
+            "pods": "2/2 Running",
+            "restarts": 0,
+            "events": "No unusual events",
+            "resource_pressure": False,
         },
     },
 }

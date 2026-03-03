@@ -398,10 +398,21 @@ Set `WEBHOOK_SECRET_<SOURCE>` to enable HMAC verification per source. Unset = wa
 
 | Setting | Default | Effect |
 |---------|---------|--------|
-| `PAGEMENOT_EXEC_DRY_RUN` | `true` | `true` = simulate (log only); `false` = live execution |
+| `PAGEMENOT_EXEC_DRY_RUN` | `true` | `true` = simulate commands (log only) and skip Jira/PD; `false` = live execution + escalations |
 | `PAGEMENOT_EXEC_NAMESPACE` | `production` | k8s namespace for `{{ namespace }}` in exec tags |
 
-**The agent only executes what is scripted in runbooks.** The LLM reasons over the runbook and decides which steps to run, but it cannot generate or modify the commands — it can only trigger steps that already exist as `<!-- exec: -->` tags in your runbook files. If a command is not in a runbook, it does not execute.
+**The agent only executes what is scripted in runbooks.** Only steps tagged `<!-- exec: -->` or `<!-- exec:approve: -->` in your runbook files ever run. The LLM cannot generate or modify commands — if a command is not in a runbook tag, it does not execute. You control what goes in your runbooks.
+
+**Two independent safety layers:**
+
+| Layer | Setting | Default | Effect |
+|-------|---------|---------|--------|
+| 1 — Dry run | `PAGEMENOT_EXEC_DRY_RUN` | `true` | Simulates all exec tags — no real commands run |
+| 2 — Approval gate | `PAGEMENOT_APPROVAL_GATE` | `true` | Steps tagged `<!-- exec:approve: -->` in the runbook require human confirmation before executing |
+
+Both layers are independent. With both on (the default), nothing executes without a human pressing Approve. With only dry run off, tagged steps execute automatically. With only approval gate off, `<!-- exec:approve: -->` steps execute automatically. With both off, all runbook steps execute immediately.
+
+> **The LLM never decides what executes.** Only runbook tags (`<!-- exec: -->` or `<!-- exec:approve: -->`) determine what runs. LLM output is display text only — no matter what the crew writes in its remediation plan, it cannot cause a command to execute that isn't in a runbook tag.
 
 **Dry run mode** (`PAGEMENOT_EXEC_DRY_RUN=true`, the default) simulates every step without executing anything. Each step posts its output to Slack so you can verify what *would* happen:
 
@@ -421,12 +432,12 @@ Set `PAGEMENOT_EXEC_DRY_RUN=false` to run commands live. All other behaviour —
 
 ## Approval gate
 
-When the crew flags a step as `[NEEDS APPROVAL]` (risky operations: rollbacks, scale-down, delete), pagemenot posts **✅ Approve & Execute** / **❌ Reject** buttons as a top-level Slack message — immediately visible, not buried in a thread.
+Approval buttons appear when a runbook contains `<!-- exec:approve: -->` tags matching the incident's service/alert. The runbook author decides which steps need approval by choosing the tag — the LLM has no influence over this. Buttons are posted as a top-level Slack message (not buried in a thread), with Jira and PagerDuty already open so the oncall human has full context before deciding.
 
 | `PAGEMENOT_APPROVAL_GATE` | Behaviour |
 |--------------------------|-----------|
-| `true` (default) | Buttons posted; step waits for human decision |
-| `false` | `[NEEDS APPROVAL]` steps execute automatically without confirmation |
+| `true` (default) | Buttons posted; `<!-- exec:approve: -->` steps wait for human decision |
+| `false` | `<!-- exec:approve: -->` steps execute automatically without confirmation |
 
 **On Approve:** steps execute, outcome posted to Slack, postmortem written to `knowledge/postmortems/` and indexed in ChromaDB.
 
@@ -435,6 +446,16 @@ When the crew flags a step as `[NEEDS APPROVAL]` (risky operations: rollbacks, s
 **How the crew learns from approvals (works with Ollama):**
 
 When a human approves a risky step and it succeeds, the postmortem is indexed in ChromaDB. On the next similar incident, the DiagnoserAgent retrieves that postmortem as context. The LLM sees *"this rollback was approved and resolved the incident"* and reclassifies the same step as `[AUTO-SAFE]`. Over time, routinely approved remediations (rollbacks, restarts, scale adjustments) execute automatically without human confirmation. This is context-based learning (RAG), not model fine-tuning — it works identically with Ollama.
+
+**Expected paging during the learning period:**
+
+Until the RAG has seen enough successful approvals for a given remediation step, `<!-- exec:approve: -->` tagged steps will always require human confirmation. This is intentional — approvals are the signal the system learns from. Once a step has been approved and executed successfully multiple times, a runbook author can promote it by changing its tag from `<!-- exec:approve: -->` to `<!-- exec: -->`. Future versions will support automatic promotion after a configurable approval count threshold.
+
+| Phase | Behaviour |
+|-------|-----------|
+| Cold start (no postmortems) | All `<!-- exec:approve: -->` steps require human click |
+| After 1–2 successful approvals | LLM may classify it `[AUTO-SAFE]` in its reasoning — but the tag still gates it |
+| After runbook author promotes the tag | Step executes autonomously, no approval needed |
 
 **Postmortem indexing (full picture):**
 
@@ -520,36 +541,47 @@ Restart → auto-ingested into ChromaDB.
 ```markdown
 # Service — Issue Title
 
+service: my-service
+
 ## Symptoms
 - alert conditions
 
 ## Diagnosis
-1. what to check
+<!-- exec: kubectl get pods -n {{ namespace }} -l app={{ service }} -->
+<!-- exec: kubectl logs -n {{ namespace }} -l app={{ service }} --tail=50 -->
 
 ## Remediation
-<!-- exec: kubectl rollout undo deployment/{{ service }} -n {{ namespace }} -->
+<!-- exec:approve: kubectl rollout undo deployment/{{ service }} -n {{ namespace }} -->
 <!-- exec: kubectl rollout status deployment/{{ service }} -n {{ namespace }} -->
 
 ## Escalate if
 - conditions requiring human intervention
 ```
 
-| Template var | Value |
-|-------------|-------|
-| `{{ service }}` | service name detected from the alert |
-| `{{ namespace }}` | `PAGEMENOT_EXEC_NAMESPACE` |
+**Exec tag reference:**
 
-**SSM exec tags** — run diagnostic commands on EC2 instances without SSH or a bastion:
+| Tag | Behaviour |
+|-----|-----------|
+| `<!-- exec: cmd -->` | Runs automatically when `PAGEMENOT_EXEC_DRY_RUN=false` |
+| `<!-- exec:approve: cmd -->` | Requires human approval in Slack when `PAGEMENOT_APPROVAL_GATE=true`; runs automatically when gate is off |
+
+**Template variables:**
+
+| Variable | Value |
+|----------|-------|
+| `{{ service }}` | Service name extracted from the alert |
+| `{{ namespace }}` | `PAGEMENOT_EXEC_NAMESPACE` (default: `production`) |
+
+The `service:` frontmatter field narrows RAG retrieval — runbooks with a matching service are ranked higher. Omit it (or use `service: general`) to match any alert.
+
+**SSM exec tags** — run commands on EC2 instances without SSH:
 
 ```
 <!-- exec: ssm:i-1234567890abcdef0 journalctl -u {{ service }} --no-pager -n 100 -->
 <!-- exec: ssm:i-1234567890abcdef0 systemctl status {{ service }} -->
-<!-- exec: ssm:i-1234567890abcdef0 df -h -->
 ```
 
 Requires `AWS_ROLE_ARN` with SSM permissions. SSM agent must be running on the instance.
-
-Only `<!-- exec: -->` tags execute — never free-form LLM output.
 
 ---
 
@@ -566,9 +598,10 @@ python scripts/simulate_incident.py checkout-oom
 
 # High-risk scenario: deployment rollback requires human approval
 python scripts/simulate_incident.py payment-500s
-# → crew matches rollback-procedure.md, flags rollback as [NEEDS APPROVAL]
-# → Approve/Reject buttons appear in Slack thread
-# → Jira ticket opened, PagerDuty paged
+# → crew matches high-error-rate.md runbook
+# → diagnosis steps run automatically (kubectl get pods, logs, describe)
+# → kubectl rollout undo tagged <!-- exec:approve: --> → Approve/Reject buttons in Slack
+# → Jira ticket opened, PagerDuty paged before buttons appear
 
 python scripts/simulate_incident.py db-connection-pool
 python scripts/simulate_incident.py --random

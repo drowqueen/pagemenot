@@ -90,6 +90,7 @@ class Settings(BaseSettings):
     webhook_secret_opsgenie: Optional[str] = None
     webhook_secret_newrelic: Optional[str] = None
     webhook_secret_generic: Optional[str] = None
+    webhook_secret_jira: Optional[str] = None
 
     # External LLM compliance gate
     llm_external_enterprise_confirmed: bool = False  # must be true to use non-Ollama LLMs
@@ -101,6 +102,17 @@ class Settings(BaseSettings):
     azure_client_id: Optional[str] = None
     azure_client_secret: Optional[str] = None
     azure_subscription_id: Optional[str] = None
+
+    pagemenot_dedup_short_ttl_severities: str = "critical,high"  # severities that use dedup_ttl_short
+    pagemenot_http_timeout: int = 10            # seconds for all httpx calls
+    pagemenot_subprocess_timeout: int = 30      # seconds for kubectl/aws/shell exec
+    pagemenot_slack_chunk_size: int = 2900      # chars per Slack message block
+    pagemenot_slack_max_chunks: int = 3         # max blocks posted per triage result
+    pagemenot_approval_ttl: int = 3600          # seconds before an approval entry expires
+    pagemenot_rag_incidents_n_results: int = 5  # past incidents returned by RAG
+    pagemenot_rag_runbooks_n_results: int = 1   # runbooks returned by RAG — best match only
+    chroma_incidents_collection: str = "incidents"  # ChromaDB collection name for postmortems
+    chroma_runbooks_collection: str = "runbooks"    # ChromaDB collection name for runbooks
 
     log_level: str = "INFO"
 

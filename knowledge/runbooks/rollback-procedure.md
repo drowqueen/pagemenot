@@ -1,26 +1,17 @@
-# Runbook: Service Rollback Procedure
+# Service Rollback Procedure
 
-**Service:** any
-**Trigger:** Deploy-correlated errors, regression after release
+service: general
+date: 2026-01-01
 
-## Steps
+## Symptoms
+- Deploy-correlated errors or regression after release
 
-1. Confirm the issue correlates with a recent deploy:
-   - Check deploy history: `kubectl rollout history deployment/<service> -n {{ namespace }}`
-   - Compare error start time with deploy time
+## Diagnosis
+<!-- exec: kubectl rollout history deployment/{{ service }} -n {{ namespace }} -->
 
-2. Initiate rollback:
-   <!-- exec: kubectl rollout undo deployment/{{ service }} -n {{ namespace }} -->
+## Remediation
+<!-- exec:approve: kubectl rollout undo deployment/{{ service }} -n {{ namespace }} -->
+<!-- exec: kubectl rollout status deployment/{{ service }} -n {{ namespace }} -->
 
-3. Verify rollback:
-   <!-- exec: kubectl rollout status deployment/{{ service }} -n {{ namespace }} -->
-
-4. Confirm error rate returns to baseline in monitoring
-
-5. Notify the team in #incidents Slack channel
-
-6. Create a Jira ticket for the broken deploy
-
-## Escalation
-
-If rollback doesn't resolve the issue within 5 minutes, escalate to the service owner and platform team.
+## Escalate if
+- Rollback doesn't resolve in 5 minutes

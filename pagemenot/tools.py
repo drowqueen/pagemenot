@@ -91,9 +91,16 @@ def get_available_tools() -> dict[str, list]:
     remediator_tools.append(search_runbooks)
     remediator_tools.append(request_human_approval)
 
-    if settings.kubeconfig_path:
+    import os as _os
+    _in_cluster = bool(_os.environ.get("KUBERNETES_SERVICE_HOST"))
+    _kubeconfig_ok = settings.kubeconfig_path and _os.path.isfile(settings.kubeconfig_path)
+    if _in_cluster or _kubeconfig_ok:
         remediator_tools.append(kubectl_rollback)
-        logger.info("✅ Kubernetes connected")
+        _k8s_mode = "in-cluster service account" if _in_cluster else f"kubeconfig={settings.kubeconfig_path}"
+        logger.info(f"✅ Kubernetes connected ({_k8s_mode})")
+    elif settings.kubeconfig_path:
+        logger.warning(f"KUBECONFIG_PATH={settings.kubeconfig_path!r} is not a valid file — kubectl disabled. "
+                       "Set KUBECONFIG_PATH to a kubeconfig file, or run pagemenot as a pod with a ServiceAccount.")
 
     unconfigured = [
         v for v, s in [
@@ -154,7 +161,7 @@ def query_prometheus(service_name: str) -> str:
             headers["Authorization"] = f"Bearer {settings.prometheus_auth_token}"
 
         results = []
-        with httpx.Client(timeout=10, headers=headers) as client:
+        with httpx.Client(timeout=settings.pagemenot_http_timeout, headers=headers) as client:
             for name, query in queries.items():
                 resp = client.get(
                     f"{settings.prometheus_url}/api/v1/query",
@@ -182,7 +189,7 @@ def query_grafana_alerts(service_name: str) -> str:
         if settings.grafana_org_id:
             headers["X-Grafana-Org-Id"] = settings.grafana_org_id
 
-        with httpx.Client(timeout=10, headers=headers) as client:
+        with httpx.Client(timeout=settings.pagemenot_http_timeout, headers=headers) as client:
             # Query active firing alerts via Grafana-managed Alertmanager API
             resp = client.get(
                 f"{settings.grafana_url}/api/alertmanager/grafana/api/v2/alerts",
@@ -236,7 +243,7 @@ def search_logs_loki(query: str) -> str:
         if settings.loki_org_id:
             headers["X-Scope-OrgID"] = settings.loki_org_id
 
-        with httpx.Client(timeout=10, headers=headers) as client:
+        with httpx.Client(timeout=settings.pagemenot_http_timeout, headers=headers) as client:
             resp = client.get(
                 f"{settings.loki_url}/loki/api/v1/query_range",
                 params={
@@ -279,7 +286,7 @@ def get_pagerduty_incident(incident_id_or_description: str) -> str:
             "Accept": "application/vnd.pagerduty+json;version=2",
             "Content-Type": "application/json",
         }
-        with httpx.Client(timeout=10) as client:
+        with httpx.Client(timeout=settings.pagemenot_http_timeout) as client:
             # Try as incident ID first
             if incident_id_or_description.startswith("P"):
                 resp = client.get(
@@ -324,7 +331,7 @@ def get_pagerduty_incident(incident_id_or_description: str) -> str:
 def get_opsgenie_alert(alert_id_or_service: str) -> str:
     """Get OpsGenie alert details. Input: alert ID or service name."""
     try:
-        with httpx.Client(timeout=10) as client:
+        with httpx.Client(timeout=settings.pagemenot_http_timeout) as client:
             if len(alert_id_or_service) == 36 and "-" in alert_id_or_service:
                 resp = client.get(
                     f"https://api.opsgenie.com/v2/alerts/{alert_id_or_service}",
@@ -381,7 +388,7 @@ def query_datadog_metrics(service_name: str) -> str:
         base = f"https://api.{settings.datadog_site}"
 
         results = []
-        with httpx.Client(timeout=10) as client:
+        with httpx.Client(timeout=settings.pagemenot_http_timeout) as client:
             for name, query in queries.items():
                 resp = client.get(
                     f"{base}/api/v1/query",
@@ -433,7 +440,7 @@ def query_newrelic_metrics(service_name: str) -> str:
                 }
             }
         """
-        with httpx.Client(timeout=10) as client:
+        with httpx.Client(timeout=settings.pagemenot_http_timeout) as client:
             resp = client.post(
                 "https://api.newrelic.com/graphql",
                 headers={
@@ -491,7 +498,7 @@ def get_recent_deploys(repo_or_service: str) -> str:
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
         }
-        with httpx.Client(timeout=10) as client:
+        with httpx.Client(timeout=settings.pagemenot_http_timeout) as client:
             # Get recent merged PRs (proxy for deploys)
             resp = client.get(
                 f"https://api.github.com/repos/{repo}/pulls",
@@ -533,7 +540,7 @@ def get_pr_diff(repo_and_pr_number: str) -> str:
         if "/" not in repo and settings.github_org:
             repo = f"{settings.github_org}/{repo}"
 
-        with httpx.Client(timeout=10) as client:
+        with httpx.Client(timeout=settings.pagemenot_http_timeout) as client:
             resp = client.get(
                 f"https://api.github.com/repos/{repo}/pulls/{pr_num}/files",
                 headers={
@@ -575,11 +582,11 @@ def search_past_incidents(query: str) -> str:
         client = _chroma_client()
 
         try:
-            collection = client.get_collection("incidents")
+            collection = client.get_or_create_collection(settings.chroma_incidents_collection, metadata={"hnsw:space": "cosine"})
         except Exception:
             return "No past incidents in knowledge base yet. Pagemenot will learn as you use it."
 
-        results = collection.query(query_texts=[query], n_results=5)
+        results = collection.query(query_texts=[query], n_results=settings.pagemenot_rag_incidents_n_results)
 
         if not results["documents"] or not results["documents"][0]:
             return "No similar past incidents found."
@@ -609,14 +616,14 @@ def search_runbooks(query: str) -> str:
     try:
         client = _chroma_client()
         try:
-            collection = client.get_collection("runbooks")
+            collection = client.get_or_create_collection(settings.chroma_runbooks_collection, metadata={"hnsw:space": "cosine"})
         except Exception:
             return (
                 "No runbooks in knowledge base yet. "
                 "Add markdown files to ./knowledge/runbooks/ and restart."
             )
 
-        results = collection.query(query_texts=[query], n_results=3)
+        results = collection.query(query_texts=[query], n_results=settings.pagemenot_rag_runbooks_n_results)
 
         if not results["documents"] or not results["documents"][0]:
             return "No matching runbooks found."
@@ -675,66 +682,52 @@ def kubectl_rollback(deployment_name: str) -> str:
 # No destructive operations — only safe/reversible actions
 # ══════════════════════════════════════════════════════════════
 
-_KUBECTL_ALLOWED_VERBS = {"rollout", "scale", "get", "describe", "logs"}
-_KUBECTL_FORBIDDEN_VERBS = {"delete", "drain", "taint", "cordon", "exec"}
-
-_SHELL_WHITELIST = [
-    # Read-only / non-destructive only. FLUSHDB removed — destructive, requires human.
-    r"^curl\s+-sf\s+https?://\S+/health$",
-    r"^curl\s+-sf\s+https?://\S+/ready$",
-]
-
-# AWS: read-only actions only for autonomous execution.
-# update_service and set_desired_capacity removed — require human approval.
-_AWS_ALLOWED = {
-    "ecs": {"describe_services", "describe_tasks"},
-    "autoscaling": {"describe_auto_scaling_groups"},
-    "elasticache": {"describe_cache_clusters"},
-    "cloudwatch": {"get_metric_statistics", "get_metric_data"},
-}
-
-
 def _exec_enabled():
     if not settings.pagemenot_exec_enabled and not settings.pagemenot_exec_dry_run:
         raise RuntimeError("PAGEMENOT_EXEC_ENABLED is false — autonomous execution is disabled")
 
 
 def exec_kubectl(command: str) -> str:
-    """Execute a safe kubectl command. Allowed: rollout undo, scale (up), get, describe, logs."""
+    """Execute a kubectl command from a runbook exec tag.
+
+    Config resolution order (matches kubectl default):
+    1. KUBECONFIG_PATH env var → explicit file path
+    2. In-cluster service account → automatic when KUBERNETES_SERVICE_HOST is set
+    3. ~/.kube/config → local dev fallback
+    """
     _exec_enabled()
     if settings.pagemenot_exec_dry_run:
         return f"[DRY RUN] would execute: kubectl {command}"
-    if not settings.kubeconfig_path:
-        raise RuntimeError("KUBECONFIG_PATH not configured")
 
     parts = shlex.split(command)
-    verb = parts[0].lower() if parts else ""
+    kubeconfig = settings.kubeconfig_path
 
-    if verb in _KUBECTL_FORBIDDEN_VERBS:
-        raise ValueError(f"kubectl '{verb}' is forbidden for autonomous execution")
-    if verb not in _KUBECTL_ALLOWED_VERBS:
-        raise ValueError(f"kubectl '{verb}' not in allowed list")
-    if verb == "rollout" and (len(parts) < 2 or parts[1].lower() != "undo"):
-        raise ValueError("Only 'rollout undo' is allowed autonomously")
+    # Validate kubeconfig path is a file, not a directory (Docker creates dirs for missing mounts)
+    if kubeconfig:
+        import os as _os
+        if not _os.path.isfile(kubeconfig):
+            logger.warning(f"KUBECONFIG_PATH={kubeconfig!r} is not a file — falling back to default config discovery")
+            kubeconfig = None
 
-    cmd = ["kubectl", "--kubeconfig", settings.kubeconfig_path] + parts
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    if kubeconfig:
+        cmd = ["kubectl", "--kubeconfig", kubeconfig] + parts
+    else:
+        # In-cluster (KUBERNETES_SERVICE_HOST set) or ~/.kube/config — kubectl handles it
+        cmd = ["kubectl"] + parts
+
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=settings.pagemenot_subprocess_timeout)
     if result.returncode != 0:
         raise RuntimeError(f"kubectl failed: {result.stderr[:300]}")
     return result.stdout.strip()[:500]
 
 
 def exec_aws(service: str, action: str, params: dict) -> str:
-    """Execute a safe AWS operation via assumed IAM role."""
+    """Execute an AWS operation via assumed IAM role."""
     _exec_enabled()
     if settings.pagemenot_exec_dry_run:
         return f"[DRY RUN] would call: aws {service} {action}({params})"
     if not settings.aws_role_arn:
         raise RuntimeError("AWS_ROLE_ARN not configured")
-
-    allowed = _AWS_ALLOWED.get(service, set())
-    if action not in allowed:
-        raise ValueError(f"AWS {service}:{action} not in allowed list")
 
     try:
         import boto3
@@ -759,14 +752,11 @@ def exec_aws(service: str, action: str, params: dict) -> str:
 
 
 def exec_shell(command: str) -> str:
-    """Execute a whitelisted shell command (read-only health checks only)."""
+    """Execute a shell command from a runbook exec tag."""
     _exec_enabled()
     if settings.pagemenot_exec_dry_run:
         return f"[DRY RUN] would execute: {command}"
-    # re.fullmatch — prevents prefix-bypass attacks (e.g. "curl -sf http://x/health; rm -rf /")
-    if not any(re.fullmatch(pattern, command) for pattern in _SHELL_WHITELIST):
-        raise ValueError(f"Command not in whitelist: {command!r}")
-    result = subprocess.run(shlex.split(command), capture_output=True, text=True, timeout=30)
+    result = subprocess.run(shlex.split(command), capture_output=True, text=True, timeout=settings.pagemenot_subprocess_timeout)
     if result.returncode != 0:
         raise RuntimeError(f"Command failed: {result.stderr[:300]}")
     return result.stdout.strip()[:500]
@@ -795,7 +785,7 @@ def exec_http(method: str, url: str, headers: dict | None = None, body: dict | N
             f"Only explicitly configured service URLs are allowed."
         )
 
-    with httpx.Client(timeout=10, verify=True) as client:
+    with httpx.Client(timeout=settings.pagemenot_http_timeout, verify=True) as client:
         resp = client.request(method.upper(), url, headers=headers or {}, json=body)
         return f"{resp.status_code}: {resp.text[:200]}"
 
@@ -810,11 +800,11 @@ def _safe_service_name(service: str) -> str:
 def dispatch_exec_step(step: str, service: str = "") -> str:
     """Parse and route a single exec step from a runbook to the correct executor.
 
-    Only accepts <!-- exec: command --> tags from verified runbook files.
+    Accepts both <!-- exec: command --> (auto-safe) and <!-- exec:approve: command --> (risky).
     Template substitution ({{ service }}) happens after routing and validation.
     """
-    # Only exec tags from runbook files are accepted — raw LLM text rejected
-    match = re.match(r'<!--\s*exec:\s*(.+?)\s*-->', step)
+    # Match both <!-- exec: --> and <!-- exec:approve: --> — raw LLM text rejected
+    match = re.match(r'<!--\s*exec(?::approve)?:\s*(.+?)\s*-->', step)
     if not match:
         raise ValueError("Only <!-- exec: --> tagged steps from runbooks are allowed for autonomous execution")
     cmd = match.group(1).strip()
@@ -855,22 +845,27 @@ def dispatch_exec_step(step: str, service: str = "") -> str:
         return exec_shell(cmd)
 
 
-def get_runbook_exec_steps(query: str, service: str = "") -> list[str]:
-    """Search runbooks by query, return all <!-- exec: --> steps from matched files."""
+def get_runbook_exec_steps(query: str, service: str = "") -> dict[str, list[tuple[str, str]]]:
+    """Search runbooks by query, return exec steps split by approval requirement.
+
+    Returns {"auto": [(tag, filename), ...], "approve": [(tag, filename), ...]}
+      - auto: <!-- exec: cmd --> steps — run immediately, no human needed
+      - approve: <!-- exec:approve: cmd --> steps — queued for human approval when APPROVAL_GATE=true
+    """
     try:
         client = _chroma_client()
-        try:
-            collection = client.get_collection("runbooks")
-        except Exception:
-            return []
+        collection = client.get_or_create_collection(
+            settings.chroma_runbooks_collection, metadata={"hnsw:space": "cosine"}
+        )
 
-        results = collection.query(query_texts=[query], n_results=3)
+        results = collection.query(query_texts=[query], n_results=settings.pagemenot_rag_runbooks_n_results)
         if not results["documents"] or not results["documents"][0]:
-            return []
+            return {"auto": [], "approve": []}
 
         from pagemenot.knowledge.rag import RUNBOOKS_DIR
 
-        exec_steps: list[str] = []
+        auto_steps: list[tuple[str, str]] = []
+        approve_steps: list[tuple[str, str]] = []
         seen: set[str] = set()
         for meta in results["metadatas"][0]:
             filename = meta.get("filename", "")
@@ -880,12 +875,15 @@ def get_runbook_exec_steps(query: str, service: str = "") -> list[str]:
             runbook_path = RUNBOOKS_DIR / filename
             if runbook_path.exists():
                 content = runbook_path.read_text(encoding="utf-8")
-                # Return the full <!-- exec: ... --> tag so dispatch_exec_step can validate + substitute
-                for match in re.finditer(r'<!--\s*exec:\s*.+?\s*-->', content):
-                    exec_steps.append(match.group(0))
+                for match in re.finditer(r'<!--\s*exec(?::approve)?:\s*.+?\s*-->', content):
+                    tag = match.group(0)
+                    if re.match(r'<!--\s*exec:approve:', tag):
+                        approve_steps.append((tag, filename))
+                    else:
+                        auto_steps.append((tag, filename))
 
-        return exec_steps
+        return {"auto": auto_steps, "approve": approve_steps}
 
     except Exception as e:
         logger.warning(f"Runbook exec step lookup failed: {e}")
-        return []
+        return {"auto": [], "approve": []}

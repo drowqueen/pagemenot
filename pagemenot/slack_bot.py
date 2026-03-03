@@ -10,6 +10,7 @@ They see:
 import asyncio
 import json
 import logging
+import re
 import uuid
 
 from slack_bolt.async_app import AsyncApp
@@ -44,7 +45,7 @@ class _ApprovalStore:
                 logger.warning("redis package not installed — falling back to in-memory approval store")
         return self._redis
 
-    async def set(self, key: str, value: dict, ttl: int = 3600) -> None:
+    async def set(self, key: str, value: dict, ttl: int = settings.pagemenot_approval_ttl) -> None:
         r = await self._client()
         if r:
             await r.setex(key, ttl, json.dumps(value))
@@ -180,10 +181,31 @@ def create_slack_app() -> AsyncApp:
                 break
 
         if success:
+            alert_title = entry.get("alert_title", "Incident")
+            exec_log = [
+                f"Step {i}: `{s}`"
+                for i, s in enumerate(steps, 1)
+            ]
             await client.chat_postMessage(
                 channel=channel, thread_ts=thread,
                 text=f"✅ All {len(steps)} step(s) executed successfully.",
             )
+            # Channel-level resolved post
+            await client.chat_postMessage(
+                channel=channel,
+                text=f"🟢 *Resolved (human-approved):* {alert_title}",
+                blocks=[{"type": "section", "text": {"type": "mrkdwn",
+                    "text": f"🟢 *Resolved:* {alert_title}\n_Approved by <@{user_id}>, runbook executed successfully._"}}],
+            )
+            # Write postmortem + re-index for future RAG retrieval
+            asyncio.create_task(_write_and_index_postmortem(entry, user_id, exec_log))
+            # Resolve Jira/PD tickets (stubs until real creds wired on AWS/GCP)
+            from pagemenot.main import _resolve_jira_ticket, _resolve_pagerduty_incident
+            asyncio.create_task(_resolve_jira_ticket(entry.get("jira_url", ""), resolved_by=user_id))
+            asyncio.create_task(_resolve_pagerduty_incident(entry.get("pd_url", ""), resolved_by=user_id))
+        else:
+            if not settings.pagemenot_exec_dry_run:
+                await _escalate_unresolved(client, channel, entry, reason=f"Runbook execution failed after approval by <@{user_id}>")
 
     @app.action("reject_action")
     async def handle_reject(ack, body, client):
@@ -194,7 +216,7 @@ def create_slack_app() -> AsyncApp:
         channel = body["container"].get("channel_id") or body.get("channel", {}).get("id")
         msg_ts = body["message"]["ts"]
 
-        await _approval_store.pop(approval_id)  # discard
+        entry = await _approval_store.pop(approval_id)
 
         await client.chat_update(
             channel=channel, ts=msg_ts,
@@ -202,6 +224,9 @@ def create_slack_app() -> AsyncApp:
             blocks=[{"type": "section", "text": {"type": "mrkdwn",
                 "text": f"❌ *Rejected by <@{user_id}>* — steps will not execute."}}],
         )
+
+        if entry and not settings.pagemenot_exec_dry_run:
+            await _escalate_unresolved(client, channel, entry, reason=f"Runbook rejected by <@{user_id}>")
 
     @app.action("feedback_positive")
     async def handle_thumbs_up(ack, body):
@@ -248,6 +273,81 @@ def create_slack_app() -> AsyncApp:
     return app
 
 
+async def _escalate_unresolved(client, channel: str, entry: dict, reason: str):
+    """Open Jira/PD and ping oncall channel when a human-gated resolution fails or is rejected."""
+    from pagemenot.main import _open_jira_ticket, _page_pagerduty
+    import types
+
+    result = types.SimpleNamespace(
+        severity=entry.get("severity", "high"),
+        alert_title=entry.get("alert_title", "Incident"),
+        service=entry.get("service", ""),
+        root_cause=reason,
+        confidence="high",
+        duration_seconds=0.0,
+    )
+    _SEV = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+    sev_rank = _SEV.get(result.severity, 0)
+    jira_min = _SEV.get(settings.pagemenot_jira_min_severity, 2)
+    pd_min = _SEV.get(settings.pagemenot_pd_min_severity, 2)
+    tasks = [
+        _open_jira_ticket(result) if sev_rank >= jira_min else asyncio.sleep(0),
+        _page_pagerduty(result) if sev_rank >= pd_min else asyncio.sleep(0),
+    ]
+    jira_url, pd_url = await asyncio.gather(*tasks, return_exceptions=True)
+    if isinstance(jira_url, str):
+        await client.chat_postMessage(channel=channel, text=f"🎫 Jira ticket opened: {jira_url}")
+    if isinstance(pd_url, str):
+        await client.chat_postMessage(channel=channel, text=f"📟 On-call paged via PagerDuty: {pd_url}")
+    if settings.pagemenot_oncall_channel and sev_rank >= pd_min:
+        sev_emoji = {"critical": "🔴", "high": "🟠", "medium": "🟡"}.get(result.severity, "⚪")
+        pd_line = f"\n📟 PagerDuty: {pd_url}" if isinstance(pd_url, str) else ""
+        await client.chat_postMessage(
+            channel=settings.pagemenot_oncall_channel,
+            text=f"{sev_emoji} *ESCALATION:* {result.alert_title} ({result.service})\n_{reason}_{pd_line}",
+        )
+
+
+async def _write_and_index_postmortem(entry: dict, resolved_by: str, exec_log: list[str]) -> None:
+    """Write a postmortem markdown file and index it into ChromaDB for future RAG retrieval."""
+    import datetime
+    from pagemenot.knowledge.rag import index_incident, POSTMORTEMS_DIR
+
+    alert_title = entry.get("alert_title", "incident")
+    service = entry.get("service", "unknown")
+    root_cause = entry.get("root_cause", "")
+    jira_url = entry.get("jira_url", "")
+
+    safe_name = re.sub(r"[^a-z0-9-]", "-", alert_title.lower())[:50].strip("-")
+    ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S")
+    filename = f"{service}_{ts}.md"
+
+    steps_md = "\n".join(f"- `{s}`" for s in entry.get("steps", []))
+    log_md = "\n\n".join(exec_log)
+    content = (
+        f"# Postmortem: {alert_title}\n\n"
+        f"service: {service}\n"
+        f"date: {datetime.date.today()}\n"
+        f"root_cause: {root_cause or 'See analysis below.'}\n"
+        f"resolution: Human-approved runbook execution\n\n"
+        f"## Alert\n{alert_title}\n\n"
+        f"## Root Cause\n{root_cause}\n\n"
+        f"## Steps Executed\n{steps_md}\n\n"
+        f"## Execution Log\n{log_md}\n\n"
+        f"## Resolved By\n<@{resolved_by}>\n\n"
+        + (f"## Jira\n{jira_url}\n" if jira_url else "")
+    )
+
+    path = POSTMORTEMS_DIR / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.write_text(content, encoding="utf-8")
+        logger.info(f"Postmortem written: {filename}")
+        index_incident(content, filename, service)
+    except Exception as e:
+        logger.warning(f"Postmortem write/index failed: {e}")
+
+
 async def _do_triage(say, source: str, payload: dict, thread_ts: str | None = None):
     """Run triage and post results. This is the bridge between Slack and CrewAI."""
 
@@ -269,17 +369,51 @@ async def _do_triage(say, source: str, payload: dict, thread_ts: str | None = No
             await say(f"⚪ {label} suppressed: {result.alert_title}", thread_ts=thread)
             return
 
-        # Auto-resolved
+        # Auto-resolved — post analysis + exec log + resolved banner
         if result.resolved_automatically:
-            log_text = "\n".join(result.execution_log) if result.execution_log else ""
             dry = settings.pagemenot_exec_dry_run
+            label = "Would auto-resolve" if dry else "Auto-resolved"
+            # Analysis
+            clean_output = result.raw_output.replace("```sh\n", "").replace("```bash\n", "").replace("```\n", "").replace("```", "")
+            for i, chunk in enumerate(_chunk_text(clean_output, settings.pagemenot_slack_chunk_size)[:settings.pagemenot_slack_max_chunks]):
+                await say(
+                    text=f"Analysis (part {i + 1})",
+                    blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": chunk}}],
+                    thread_ts=thread,
+                )
+            # Exec log
+            if result.execution_log:
+                exec_text = "\n\n".join(result.execution_log[:10])
+                await say(
+                    text="Runbook execution",
+                    blocks=[{"type": "section", "text": {"type": "mrkdwn",
+                        "text": f"*Runbook execution:*\n\n{exec_text[:2800]}"}}],
+                    thread_ts=thread,
+                )
+            icon = "🟢" if not dry else "🔵"
+            resolve_label = "Resolved" if not dry else "Dry-run resolved"
+            resolve_detail = ("Runbook executed successfully" if not dry else "Dry-run complete — no real commands were run")
+            # Thread resolved message
             await say(
-                text=(
-                    f"{'🔵 *Dry run* —' if dry else '✅'} *{'Would have resolved' if dry else 'Auto-resolved'}:* {result.alert_title}\n"
-                    f"⏱️ {result.duration_seconds:.1f}s\n\n"
-                    + (f"*{'Steps that would execute' if dry else 'Steps executed'}:*\n{log_text}" if log_text else "")
-                ),
+                text=f"{icon} {resolve_label}: {result.alert_title}",
+                blocks=[
+                    {"type": "header", "text": {"type": "plain_text",
+                        "text": f"{icon} {resolve_label}: {result.alert_title[:80]}"}},
+                    {"type": "section", "text": {"type": "mrkdwn",
+                        "text": f"{resolve_detail}. Triage took {result.duration_seconds:.0f}s."}},
+                ],
                 thread_ts=thread,
+            )
+            # Channel-level resolved post (not in thread)
+            channel = working_msg.get("channel", settings.pagemenot_channel)
+            await _client.chat_postMessage(
+                channel=channel,
+                text=f"{icon} *{resolve_label}:* {result.alert_title}",
+                blocks=[
+                    {"type": "section", "text": {"type": "mrkdwn",
+                        "text": f"{icon} *{resolve_label}:* {result.alert_title}\n"
+                                f"_{resolve_detail} in {result.duration_seconds:.0f}s_"}},
+                ],
             )
             return
 
@@ -301,91 +435,106 @@ async def _do_triage(say, source: str, payload: dict, thread_ts: str | None = No
         ]
         await say(text=f"{sev} {result.alert_title}", blocks=blocks, thread_ts=thread)
 
-        for i, chunk in enumerate(_chunk_text(result.raw_output, 2900)[:3]):
+        # Strip markdown code fences from LLM output — Slack renders mrkdwn directly
+        clean_output = result.raw_output.replace("```sh\n", "").replace("```bash\n", "").replace("```\n", "").replace("```", "")
+        for i, chunk in enumerate(_chunk_text(clean_output, settings.pagemenot_slack_chunk_size)[:settings.pagemenot_slack_max_chunks]):
             await say(
                 text=f"Detailed analysis (part {i + 1})",
-                blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": f"```{chunk}```"}}],
+                blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": chunk}}],
                 thread_ts=thread,
             )
 
-        # Auto-approve timer for [AUTO-SAFE] steps (exec enabled + high confidence)
-        # When approval gate is disabled, [NEEDS APPROVAL] steps are treated identically
-        autosafe = [s for s in result.remediation_steps if "[AUTO-SAFE]" in s]
-        if not settings.pagemenot_approval_gate and result.needs_approval:
-            autosafe = autosafe + result.needs_approval
-        if (autosafe and result.confidence == "high" and settings.pagemenot_exec_enabled):
-            task_id = str(uuid.uuid4())[:8]
-            delay_min = settings.pagemenot_autoapprove_delay // 60
-            steps_text = "\n".join(f"• {s[:120]}" for s in autosafe[:5])
+        # Post runbook execution log (commands + outputs) to thread
+        if result.execution_log:
+            exec_text = "\n\n".join(result.execution_log[:10])
             await say(
-                text="Auto-safe steps pending",
-                blocks=[
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": (
-                                f"⚙️ *Auto-safe steps* (will execute in {delay_min} min unless cancelled):\n"
-                                f"{steps_text}"
-                            ),
-                        },
-                    },
-                    {
-                        "type": "actions",
-                        "elements": [{
-                            "type": "button",
-                            "text": {"type": "plain_text", "text": "❌ Cancel"},
-                            "action_id": "cancel_autoapprove",
-                            "value": task_id,
-                            "style": "danger",
-                        }],
-                    },
-                ],
+                text="Runbook execution",
+                blocks=[{"type": "section", "text": {"type": "mrkdwn",
+                    "text": f"*Runbook execution:*\n\n{exec_text[:2800]}"}}],
                 thread_ts=thread,
             )
+
+        # Approval gate: pending runbook exec steps require human sign-off.
+        # High confidence + exec enabled → auto-approve after delay (cancellable).
+        # Otherwise → show approve/reject buttons.
+        if result.pending_exec_steps and settings.pagemenot_approval_gate:
             channel = working_msg.get("channel", settings.pagemenot_channel)
-            task = asyncio.create_task(
-                _autoapprove_timer(channel, thread, autosafe, result.service, task_id)
-            )
-            _pending_autoapprove[task_id] = task
-
-        # Approval buttons for [NEEDS APPROVAL] steps (or auto-execute if gate disabled)
-        elif result.needs_approval and settings.pagemenot_approval_gate:
-            approval_id = str(uuid.uuid4())[:8]
-            await _approval_store.set(approval_id, {
-                "steps": result.needs_approval,
-                "service": result.service or "",
-            })
-            approval_text = "\n".join(f"• {a}" for a in result.needs_approval)
-            await say(
-                text="Actions requiring approval",
-                blocks=[
-                    {
-                        "type": "section",
-                        "text": {"type": "mrkdwn", "text": f"*⚠️ Actions requiring approval:*\n{approval_text}"},
-                    },
-                    {
-                        "type": "actions",
-                        "elements": [
-                            {
-                                "type": "button",
-                                "text": {"type": "plain_text", "text": "✅ Approve"},
-                                "action_id": "approve_action",
-                                "value": approval_id,
-                                "style": "primary",
+            if result.confidence == "high" and settings.pagemenot_exec_enabled:
+                task_id = str(uuid.uuid4())[:8]
+                delay_min = settings.pagemenot_autoapprove_delay // 60
+                steps_text = "\n".join(f"• `{s[:100]}`" for s in result.pending_exec_steps[:5])
+                await say(
+                    text="Runbook steps pending auto-approval",
+                    blocks=[
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": (
+                                    f"⚙️ *Runbook steps will auto-execute in {delay_min} min* (cancel to block):\n"
+                                    f"{steps_text}"
+                                ),
                             },
-                            {
+                        },
+                        {
+                            "type": "actions",
+                            "elements": [{
                                 "type": "button",
-                                "text": {"type": "plain_text", "text": "❌ Reject"},
-                                "action_id": "reject_action",
-                                "value": approval_id,
+                                "text": {"type": "plain_text", "text": "❌ Cancel"},
+                                "action_id": "cancel_autoapprove",
+                                "value": task_id,
                                 "style": "danger",
-                            },
-                        ],
-                    },
-                ],
-                thread_ts=thread,
-            )
+                            }],
+                        },
+                    ],
+                    thread_ts=thread,
+                )
+                task = asyncio.create_task(
+                    _autoapprove_timer(channel, thread, result.pending_exec_steps, result.service, task_id)
+                )
+                _pending_autoapprove[task_id] = task
+            else:
+                approval_id = str(uuid.uuid4())[:8]
+                await _approval_store.set(approval_id, {
+                    "steps": result.pending_exec_steps,
+                    "service": result.service or "",
+                    "alert_title": result.alert_title or "",
+                    "severity": result.severity or "high",
+                    "root_cause": result.root_cause or "",
+                    "jira_url": "",
+                    "pd_url": "",
+                })
+                steps_text = "\n".join(f"• `{s[:100]}`" for s in result.pending_exec_steps[:5])
+                await _client.chat_postMessage(
+                    channel=channel,
+                    text=f"⚠️ Approval required: {result.alert_title}",
+                    blocks=[
+                        {
+                            "type": "section",
+                            "text": {"type": "mrkdwn",
+                                "text": f"*⚠️ Approval required:* {result.alert_title}\n{steps_text}"},
+                        },
+                        {
+                            "type": "actions",
+                            "elements": [
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": "✅ Approve & Execute"},
+                                    "action_id": "approve_action",
+                                    "value": approval_id,
+                                    "style": "primary",
+                                },
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": "❌ Reject"},
+                                    "action_id": "reject_action",
+                                    "value": approval_id,
+                                    "style": "danger",
+                                },
+                            ],
+                        },
+                    ],
+                )
 
         # Feedback buttons
         await say(

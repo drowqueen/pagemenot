@@ -91,43 +91,49 @@ def build_triage_crew(alert_summary: str) -> Crew:
         allow_delegation=False,
     )
 
+    FORMAT_RULES = (
+        "OUTPUT RULES — MUST FOLLOW:\n"
+        "- No prose, no paragraphs, no explanations, no summaries.\n"
+        "- Use `inline code` for commands. NEVER use ``` code fences.\n"
+        "- Bullet points and labeled fields only.\n"
+        "- No phrases like 'By following these steps', 'In order to', 'It is worth noting'.\n"
+    )
+
     monitor_task = Task(
         description=(
-            f"An incident has been reported:\n\n{alert_summary}\n\n"
-            f"Use ALL your monitoring tools to gather:\n"
-            f"1. Current metrics (error rates, latency, CPU, memory)\n"
-            f"2. Recent log entries with errors/warnings\n"
-            f"3. Alert details and severity\n"
-            f"4. Anomalies in the 30-minute window before the incident\n\n"
-            f"If a tool fails, skip it and note what you couldn't check."
+            f"Incident:\n\n{alert_summary}\n\n"
+            f"Gather using all available tools:\n"
+            f"- Current metrics (error rate, latency, CPU, memory, pod restarts)\n"
+            f"- Recent logs (errors, stack traces, warnings)\n"
+            f"- Any anomalies in the 30-min window before the alert\n"
+            f"Skip failed tools, note which couldn't be checked.\n\n"
+            f"{FORMAT_RULES}"
         ),
         expected_output=(
-            "A structured monitoring report with:\n"
-            "- Metrics summary (what's normal vs anomalous, with numbers)\n"
-            "- Key log entries (errors, stack traces)\n"
-            "- Alert context\n"
-            "- Pre-incident anomalies"
+            "Metrics: error_rate=X%, latency_p99=Xms, cpu=X%, memory=XMB, restarts=N\n"
+            "Logs: [timestamp] LEVEL message (top 3 relevant lines)\n"
+            "Anomalies: [what changed just before the incident, or 'none detected']\n"
+            "Unavailable: [tools that failed, or 'all tools available']"
         ),
         agent=monitor,
     )
 
     diagnose_task = Task(
         description=(
-            "Using the monitoring data above, identify the root cause:\n"
-            "1. Check for recent deployments or code changes that correlate\n"
-            "2. Search past incidents for similar patterns\n"
-            "3. Correlate metrics with changes\n"
-            "4. Form a specific root cause hypothesis\n\n"
-            "Be SPECIFIC. Not 'something is wrong' but 'Deploy #4521 introduced "
-            "a KeyError in the Stripe webhook handler'."
+            "Using monitoring data, identify root cause:\n"
+            "- Check recent deploys and code changes for correlation\n"
+            "- Search past incidents for similar patterns\n"
+            "- Be SPECIFIC: name the deploy, PR, config change, or code path\n\n"
+            f"{FORMAT_RULES}"
         ),
         expected_output=(
-            "Root cause analysis with:\n"
-            "- Root cause (specific and actionable)\n"
-            "- Confidence level: high / medium / low\n"
-            "- Evidence (what data supports this)\n"
-            "- Similar past incidents (if found)\n"
-            "- What changed (deploy, config, traffic)"
+            "Root cause: [one specific sentence — name the deploy/change/code path]\n"
+            "Confidence: high | medium | low\n"
+            "Evidence:\n"
+            "- [data point 1]\n"
+            "- [data point 2]\n"
+            "Similar incidents: [ref or 'none found']\n"
+            "What changed: [deploy/config/traffic spike, with timestamp]"
         ),
         agent=diagnoser,
         context=[monitor_task],
@@ -135,21 +141,20 @@ def build_triage_crew(alert_summary: str) -> Crew:
 
     remediate_task = Task(
         description=(
-            "Based on the diagnosis, propose remediation:\n"
-            "1. Search runbooks for established procedures\n"
-            "2. List ordered fix steps (safest/fastest first)\n"
-            "3. Tag each step as [AUTO-SAFE] or [NEEDS APPROVAL]\n"
-            "4. Include a rollback plan\n"
-            "5. Draft a 3-sentence postmortem summary\n\n"
-            "NEVER recommend destructive actions without [NEEDS APPROVAL] tag."
+            "Propose remediation based on the diagnosis:\n"
+            "- Search runbooks for existing procedures\n"
+            "- List steps in order, safest first\n"
+            "- Tag every step [AUTO-SAFE] or [NEEDS APPROVAL]\n"
+            "- [NEEDS APPROVAL] = destructive/irreversible (rollback, restart, delete, scale-down)\n"
+            "- Draft 3-sentence postmortem\n\n"
+            f"{FORMAT_RULES}"
         ),
         expected_output=(
-            "Remediation plan:\n"
-            "- Ordered steps with [AUTO-SAFE] or [NEEDS APPROVAL] tags\n"
-            "- Expected impact of each step\n"
-            "- Rollback plan\n"
-            "- Postmortem draft (3 sentences)\n"
-            "- Estimated time to resolution"
+            "Remediation:\n"
+            "1. [AUTO-SAFE] `command` — what it checks/fixes\n"
+            "2. [NEEDS APPROVAL] `command` — why approval needed\n"
+            "3. [AUTO-SAFE] `command` — verification step\n\n"
+            "Postmortem: [sentence 1: what happened]. [sentence 2: root cause]. [sentence 3: fix applied]."
         ),
         agent=remediator,
         context=[monitor_task, diagnose_task],
