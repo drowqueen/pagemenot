@@ -135,7 +135,7 @@ No integrations configured → mock layer activates. Crew runs end-to-end with s
 | **OpenAI** | — | `OPENAI_API_KEY` — requires signed enterprise DPA |
 | **Anthropic** | — | `ANTHROPIC_API_KEY` — requires signed enterprise DPA |
 | **Gemini** | — | `GEMINI_API_KEY` — requires signed enterprise DPA |
-| Kubernetes (optional) | — | kubectl baked into image; mount kubeconfig via `docker-compose.yml` |
+| Kubernetes (optional) | — | kubectl baked into image; in-cluster ServiceAccount or `KUBECONFIG_PATH` file |
 | Prometheus/Grafana (optional) | — | URLs set in `.env` |
 
 > **Recommended for self-hosted/air-gapped:** Ollama with `llama3.1` (LLM) + `nomic-embed-text` (embeddings). No data leaves your network.
@@ -203,7 +203,17 @@ This is the first decision. Pagemenot builds a Docker image with the CLI tools y
 | Azure — AKS | `azure` | kubectl + Azure CLI | +~300 MB |
 | Multi-cloud | `cloud` | kubectl + AWS CLI + gcloud + Azure CLI | +~1.2 GB |
 
-kubectl is always included and auto-detects `amd64` / `arm64` at build time. Credentials (kubeconfig, `~/.aws`, SA keys) are still provided at runtime via `docker-compose.yml` volume mounts — baking in the CLI only removes the binary dependency.
+kubectl is always included and auto-detects `amd64` / `arm64` at build time.
+
+**Kubernetes credential resolution (in priority order):**
+
+| Environment | How to provide credentials |
+|-------------|---------------------------|
+| Running as a Kubernetes pod | No config needed — in-cluster ServiceAccount token auto-detected |
+| EC2 / ECS / GCP Compute / bare metal | Set `KUBECONFIG_PATH` to a kubeconfig file path (mount from secrets manager) |
+| Local dev | Set `KUBECONFIG_PATH` to your local kubeconfig file |
+
+When `KUBECONFIG_PATH` is unset or points to an invalid path, kubectl falls back to its default discovery chain (`KUBECONFIG` env var → `~/.kube/config` → in-cluster ServiceAccount).
 
 **The wizard sets this for you** — it asks which cloud environment you run and writes the right value to `.env`. To set it manually:
 
@@ -366,7 +376,8 @@ Set vars in `.env` → integration activates. Unset → mock fallback.
 | On-call | PagerDuty | `PAGERDUTY_API_KEY` |
 | Deploys | GitHub | `GITHUB_TOKEN` + `GITHUB_ORG` |
 | Deploy mapping | Monorepo / name mismatch | `config/services.yaml` |
-| Execution | Kubernetes | `KUBECONFIG_PATH` |
+| Execution | Kubernetes (pod) | No config — in-cluster ServiceAccount auto-detected |
+| Execution | Kubernetes (EC2/ECS/GCP/bare metal) | `KUBECONFIG_PATH` — path to a kubeconfig file |
 | Ticketing | Jira Service Management | `JIRA_SM_URL` + `JIRA_SM_EMAIL` + `JIRA_SM_API_TOKEN` |
 | Alerts | Azure Monitor | Action Group → Webhook → `/webhooks/generic` |
 
