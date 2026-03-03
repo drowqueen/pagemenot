@@ -38,7 +38,8 @@ def _dedup_key(service: str, title: str) -> tuple[str, str]:
 
 def _check_and_register(service: str, title: str, severity: str) -> bool:
     """Return True if this is a duplicate (within TTL). Register if not."""
-    ttl = settings.pagemenot_dedup_ttl_short if severity in ("critical", "high") else settings.pagemenot_dedup_ttl_long
+    _short_sevs = {s.strip() for s in settings.pagemenot_dedup_short_ttl_severities.split(",")}
+    ttl = settings.pagemenot_dedup_ttl_short if severity in _short_sevs else settings.pagemenot_dedup_ttl_long
     key = _dedup_key(service, title)
     now = time.monotonic()
     with _dedup_lock:
@@ -93,6 +94,7 @@ class TriageResult:
     similar_incidents: list[str] = field(default_factory=list)
     remediation_steps: list[str] = field(default_factory=list)
     needs_approval: list[str] = field(default_factory=list)
+    pending_exec_steps: list[str] = field(default_factory=list)  # runbook <!-- exec: --> steps awaiting approval
     postmortem_draft: str = ""
     raw_output: str = ""
     duration_seconds: float = 0.0
@@ -257,9 +259,11 @@ def _parse_crew_output(raw: str, parsed_alert: dict) -> TriageResult:
                                  else lines[0].split(":", 1)[-1].strip())[:300]
             break
 
-    # Confidence
+    # Confidence — match any "confidence" label adjacent to high/medium/low
     for level in ["high", "medium", "low"]:
-        if f"confidence: {level}" in lower or f"confidence level: {level}" in lower:
+        if (f"confidence: {level}" in lower or f"confidence level: {level}" in lower
+                or f"confidence*: {level}" in lower or f"| {level}" in lower
+                or re.search(rf'\bconfidence\b[^:\n]{{0,10}}:?\s*\*?{level}\b', lower)):
             result.confidence = level
             break
 
@@ -277,36 +281,59 @@ def _parse_crew_output(raw: str, parsed_alert: dict) -> TriageResult:
     return result
 
 
-def _try_runbook_exec(result: TriageResult):
-    """Attempt autonomous runbook execution. Mutates result in place."""
+async def _try_runbook_exec(result: TriageResult):
+    """Attempt autonomous runbook execution. Mutates result in place.
+
+    <!-- exec: cmd -->         → always runs immediately (DRY_RUN aware)
+    <!-- exec:approve: cmd --> → runs immediately when APPROVAL_GATE=false,
+                                 or queued in result.pending_exec_steps when APPROVAL_GATE=true
+    """
     if not settings.pagemenot_exec_enabled:
         return
 
     from pagemenot.tools import get_runbook_exec_steps, dispatch_exec_step
 
-    # Only use <!-- exec: --> tagged steps from verified runbook files.
-    # LLM-generated [AUTO-SAFE] text is NEVER used for autonomous execution
-    # (prompt injection risk: attacker could craft alert text to inject commands).
-    steps = get_runbook_exec_steps(result.alert_title, service=result.service)
+    # Only use tagged steps from verified runbook files.
+    # LLM-generated text is NEVER passed to dispatch_exec_step — prompt injection risk.
+    # Query with alert title + root cause — crew diagnosis improves runbook matching
+    query = result.alert_title
+    if result.root_cause and result.root_cause != "See detailed analysis below.":
+        query = f"{result.alert_title}. {result.root_cause}"
+    step_map = get_runbook_exec_steps(query, service=result.service)
+    auto_steps: list[tuple[str, str]] = step_map["auto"]
+    approve_steps: list[tuple[str, str]] = step_map["approve"]
 
-    if not steps:
+    if not auto_steps and not approve_steps:
+        return
+
+    # Queue approve steps for human review if gate is enabled
+    if settings.pagemenot_approval_gate and approve_steps:
+        result.pending_exec_steps = [tag for tag, _ in approve_steps]
+        approve_runbooks = sorted({fn for _, fn in approve_steps})
+        logger.info(f"[APPROVAL GATE] {len(approve_steps)} step(s) queued for approval from: {approve_runbooks}")
+
+    # Run auto steps + (approve steps when gate is off)
+    pairs_to_run = auto_steps + ([] if settings.pagemenot_approval_gate else approve_steps)
+    if not pairs_to_run:
         return
 
     mode = "DRY RUN" if settings.pagemenot_exec_dry_run else "EXEC"
-    logger.info(f"[{mode}] Attempting runbook exec: {len(steps)} step(s) for {result.service}")
+    runbooks_used = sorted({fn for _, fn in pairs_to_run})
+    logger.info(f"[{mode}] {len(pairs_to_run)} step(s) from {runbooks_used} for {result.service}")
+    loop = asyncio.get_running_loop()
     all_ok = True
-    for step in steps:
+    for tag, filename in pairs_to_run:
         try:
-            output = dispatch_exec_step(step, service=result.service)
-            result.execution_log.append(f"✅ {step[:100]}: {output[:150]}")
-            logger.info(f"Exec step succeeded: {step[:80]}")
+            output = await loop.run_in_executor(_executor, dispatch_exec_step, tag, result.service)
+            result.execution_log.append(f"📖 *{filename}*\n✅ `{tag[:120]}`\n```{output[:300]}```")
+            logger.info(f"Exec step succeeded [{filename}]: {tag[:80]}")
         except Exception as e:
-            result.execution_log.append(f"❌ {step[:100]}: {e}")
-            logger.warning(f"Exec step failed: {step[:80]} — {e}")
+            result.execution_log.append(f"📖 *{filename}*\n❌ `{tag[:120]}`\n```{e}```")
+            logger.warning(f"Exec step failed [{filename}]: {tag[:80]} — {e}")
             all_ok = False
-            break  # stop on first failure, escalate with context
+            break
 
-    if all_ok and steps:
+    if all_ok and pairs_to_run and not result.pending_exec_steps:
         result.resolved_automatically = True
         logger.info(f"Incident auto-resolved: {result.alert_title}")
 
@@ -362,7 +389,7 @@ async def run_triage(source: str, payload: dict[str, Any]) -> TriageResult:
     result = _parse_crew_output(raw, parsed)
 
     # 8. Attempt runbook-driven resolution (only if exec is enabled)
-    _try_runbook_exec(result)
+    await _try_runbook_exec(result)
 
     result.duration_seconds = (datetime.now(timezone.utc) - start).total_seconds()
     logger.info(

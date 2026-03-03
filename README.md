@@ -398,10 +398,21 @@ Set `WEBHOOK_SECRET_<SOURCE>` to enable HMAC verification per source. Unset = wa
 
 | Setting | Default | Effect |
 |---------|---------|--------|
-| `PAGEMENOT_EXEC_DRY_RUN` | `true` | `true` = simulate (log only); `false` = live execution |
+| `PAGEMENOT_EXEC_DRY_RUN` | `true` | `true` = simulate commands (log only) and skip Jira/PD; `false` = live execution + escalations |
 | `PAGEMENOT_EXEC_NAMESPACE` | `production` | k8s namespace for `{{ namespace }}` in exec tags |
 
-**The agent only executes what is scripted in runbooks.** The LLM reasons over the runbook and decides which steps to run, but it cannot generate or modify the commands — it can only trigger steps that already exist as `<!-- exec: -->` tags in your runbook files. If a command is not in a runbook, it does not execute.
+**The agent only executes what is scripted in runbooks.** Only steps tagged `<!-- exec: -->` or `<!-- exec:approve: -->` in your runbook files ever run. The LLM cannot generate or modify commands — if a command is not in a runbook tag, it does not execute. You control what goes in your runbooks.
+
+**Two independent safety layers:**
+
+| Layer | Setting | Default | Effect |
+|-------|---------|---------|--------|
+| 1 — Dry run | `PAGEMENOT_EXEC_DRY_RUN` | `true` | Simulates all `<!-- exec: -->` steps — no real commands run |
+| 2 — Approval gate | `PAGEMENOT_APPROVAL_GATE` | `true` | Steps tagged `[NEEDS APPROVAL]` in the runbook require human confirmation before executing |
+
+Both layers are independent. With both on (the default), nothing executes without a human pressing Approve. With only dry run off, tagged steps execute automatically. With only approval gate off, all runbook steps execute without confirmation. With both off, all runbook steps execute immediately.
+
+> **`[NEEDS APPROVAL]` in the Slack thread is the LLM's assessment label — it is display text only.** The LLM includes it in its remediation plan to indicate which steps it considers risky. Approval buttons appear only when the system also finds matching `<!-- exec: -->` tags in a runbook file. If no runbook exec tags exist for the alert, no commands ever run regardless of what the LLM writes.
 
 **Dry run mode** (`PAGEMENOT_EXEC_DRY_RUN=true`, the default) simulates every step without executing anything. Each step posts its output to Slack so you can verify what *would* happen:
 
@@ -421,7 +432,7 @@ Set `PAGEMENOT_EXEC_DRY_RUN=false` to run commands live. All other behaviour —
 
 ## Approval gate
 
-When the crew flags a step as `[NEEDS APPROVAL]` (risky operations: rollbacks, scale-down, delete), pagemenot posts **✅ Approve & Execute** / **❌ Reject** buttons as a top-level Slack message — immediately visible, not buried in a thread.
+When the crew's remediation plan includes a `[NEEDS APPROVAL]` step **and** a matching `<!-- exec: -->` tag exists in the runbook, pagemenot posts **✅ Approve & Execute** / **❌ Reject** buttons as a top-level Slack message — immediately visible, not buried in a thread. If the LLM labels a step `[NEEDS APPROVAL]` but no matching runbook exec tag exists, only the text is displayed — no buttons, no execution.
 
 | `PAGEMENOT_APPROVAL_GATE` | Behaviour |
 |--------------------------|-----------|
@@ -435,6 +446,16 @@ When the crew flags a step as `[NEEDS APPROVAL]` (risky operations: rollbacks, s
 **How the crew learns from approvals (works with Ollama):**
 
 When a human approves a risky step and it succeeds, the postmortem is indexed in ChromaDB. On the next similar incident, the DiagnoserAgent retrieves that postmortem as context. The LLM sees *"this rollback was approved and resolved the incident"* and reclassifies the same step as `[AUTO-SAFE]`. Over time, routinely approved remediations (rollbacks, restarts, scale adjustments) execute automatically without human confirmation. This is context-based learning (RAG), not model fine-tuning — it works identically with Ollama.
+
+**Expected paging during the learning period:**
+
+Until the RAG has seen enough successful approvals for a given remediation step, `<!-- exec:approve: -->` tagged steps will always require human confirmation. This is intentional — approvals are the signal the system learns from. Once a step has been approved and executed successfully multiple times, a runbook author can promote it by changing its tag from `<!-- exec:approve: -->` to `<!-- exec: -->`. Future versions will support automatic promotion after a configurable approval count threshold.
+
+| Phase | Behaviour |
+|-------|-----------|
+| Cold start (no postmortems) | All `<!-- exec:approve: -->` steps require human click |
+| After 1–2 successful approvals | LLM may classify it `[AUTO-SAFE]` in its reasoning — but the tag still gates it |
+| After runbook author promotes the tag | Step executes autonomously, no approval needed |
 
 **Postmortem indexing (full picture):**
 

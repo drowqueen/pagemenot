@@ -30,8 +30,8 @@ def ingest_all():
         os.makedirs(settings.chroma_path, exist_ok=True)
         client = chromadb.PersistentClient(path=settings.chroma_path)
 
-        _ingest_directory(client, POSTMORTEMS_DIR, "incidents", "postmortem")
-        _ingest_directory(client, RUNBOOKS_DIR, "runbooks", "runbook")
+        _ingest_directory(client, POSTMORTEMS_DIR, settings.chroma_incidents_collection, "postmortem")
+        _ingest_directory(client, RUNBOOKS_DIR, settings.chroma_runbooks_collection, "runbook")
 
     except Exception as e:
         logger.warning(f"Knowledge ingestion failed (non-fatal): {e}")

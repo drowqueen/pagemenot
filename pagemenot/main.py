@@ -31,7 +31,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("pagemenot")
 
-limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
+limiter = Limiter(key_func=get_remote_address, default_limits=[settings.pagemenot_webhook_rate_limit])
 
 
 def _verify_hmac(secret: str, body: bytes, sig_header: str, prefix: str = "") -> bool:
@@ -99,7 +99,7 @@ async def lifespan(app: FastAPI):
     yield
 
     task.cancel()
-    _executor.shutdown(wait=False)
+    _executor.shutdown(wait=True)  # drain in-progress triages before exit
 
 
 app = FastAPI(title="Pagemenot", version="0.1.0", lifespan=lifespan)
@@ -121,7 +121,7 @@ async def health():
 # here. Pagemenot auto-detects the format and triages.
 
 @app.post("/webhooks/pagerduty")
-@limiter.limit("60/minute")
+@limiter.limit(settings.pagemenot_webhook_rate_limit)
 async def pagerduty_webhook(
     request: Request,
     x_pagerduty_signature: Optional[str] = Header(default=None),
@@ -137,7 +137,7 @@ async def pagerduty_webhook(
 
 
 @app.post("/webhooks/grafana")
-@limiter.limit("60/minute")
+@limiter.limit(settings.pagemenot_webhook_rate_limit)
 async def grafana_webhook(
     request: Request,
     x_grafana_signature: Optional[str] = Header(default=None),
@@ -152,7 +152,7 @@ async def grafana_webhook(
 
 
 @app.post("/webhooks/alertmanager")
-@limiter.limit("60/minute")
+@limiter.limit(settings.pagemenot_webhook_rate_limit)
 async def alertmanager_webhook(
     request: Request,
     x_alertmanager_token: Optional[str] = Header(default=None),
@@ -167,7 +167,7 @@ async def alertmanager_webhook(
 
 
 @app.post("/webhooks/generic")
-@limiter.limit("60/minute")
+@limiter.limit(settings.pagemenot_webhook_rate_limit)
 async def generic_webhook(
     request: Request,
     x_pagemenot_signature: Optional[str] = Header(default=None),
@@ -181,7 +181,7 @@ async def generic_webhook(
 
 
 @app.post("/webhooks/opsgenie")
-@limiter.limit("60/minute")
+@limiter.limit(settings.pagemenot_webhook_rate_limit)
 async def opsgenie_webhook(
     request: Request,
     x_og_hash: Optional[str] = Header(default=None),
@@ -196,7 +196,7 @@ async def opsgenie_webhook(
 
 
 @app.post("/webhooks/datadog")
-@limiter.limit("60/minute")
+@limiter.limit(settings.pagemenot_webhook_rate_limit)
 async def datadog_webhook(
     request: Request,
     x_datadog_signature: Optional[str] = Header(default=None),
@@ -210,7 +210,7 @@ async def datadog_webhook(
 
 
 @app.post("/webhooks/newrelic")
-@limiter.limit("60/minute")
+@limiter.limit(settings.pagemenot_webhook_rate_limit)
 async def newrelic_webhook(
     request: Request,
     x_nr_webhook_token: Optional[str] = Header(default=None),
@@ -224,6 +224,64 @@ async def newrelic_webhook(
     return {"status": "accepted"}
 
 
+async def _post_resolved_to_slack(title: str, source: str, resolved_by: str = ""):
+    """Post a resolved banner to the alerts channel when a human closes PD/Jira."""
+    from pagemenot.slack_bot import _client
+    if not _client:
+        return
+    detail = f"Closed by {resolved_by} on {source}." if resolved_by else f"Closed on {source}."
+    try:
+        await _client.chat_postMessage(
+            channel=settings.pagemenot_channel,
+            text=f"🟢 *Resolved ({source}):* {title}",
+            blocks=[{"type": "section", "text": {"type": "mrkdwn",
+                "text": f"🟢 *Resolved ({source}):* {title}\n_{detail}_"}}],
+        )
+    except Exception as e:
+        logger.warning(f"Failed to post resolve notification to Slack: {e}")
+
+
+@app.post("/webhooks/pagerduty/resolve")
+@limiter.limit(settings.pagemenot_webhook_rate_limit)
+async def pagerduty_resolve_webhook(
+    request: Request,
+    x_pagerduty_signature: Optional[str] = Header(default=None),
+):
+    """Receives PagerDuty incident.resolve events and posts resolved banner to Slack."""
+    body = await request.body()
+    await _check_sig("pagerduty", settings.webhook_secret_pagerduty, body, x_pagerduty_signature, prefix="v1=")
+    payload = await request.json()
+    for msg in payload.get("messages", []):
+        event = msg.get("event", "")
+        if event in ("incident.resolve", "incident.resolved"):
+            incident = msg.get("incident", {})
+            title = incident.get("title", incident.get("description", "Unknown incident"))
+            resolved_by = ""
+            if incident.get("resolved_by"):
+                resolved_by = incident["resolved_by"].get("summary", "")
+            asyncio.create_task(_post_resolved_to_slack(title, "PagerDuty", resolved_by))
+    return {"status": "accepted"}
+
+
+@app.post("/webhooks/jira")
+@limiter.limit(settings.pagemenot_webhook_rate_limit)
+async def jira_webhook(
+    request: Request,
+    x_atlassian_token: Optional[str] = Header(default=None),
+):
+    """Receives Jira issue webhooks. Posts resolved banner when issue transitions to Done/Resolved."""
+    body = await request.body()
+    await _check_sig("jira", settings.webhook_secret_jira, body, x_atlassian_token)
+    payload = await request.json()
+    issue = payload.get("issue", {})
+    status = issue.get("fields", {}).get("status", {}).get("name", "")
+    if status.lower() in ("done", "resolved", "closed"):
+        title = issue.get("fields", {}).get("summary", issue.get("key", "Unknown issue"))
+        resolved_by = payload.get("user", {}).get("displayName", "")
+        asyncio.create_task(_post_resolved_to_slack(title, "Jira", resolved_by))
+    return {"status": "accepted"}
+
+
 async def _page_pagerduty(result) -> Optional[str]:
     """Create a PagerDuty incident to page the on-call human. Returns incident URL or None."""
     if not settings.pagerduty_api_key:
@@ -232,7 +290,7 @@ async def _page_pagerduty(result) -> Optional[str]:
 
     # Resolve the requester: fetch first user from account
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=settings.pagemenot_http_timeout) as client:
             r = await client.get(
                 "https://api.pagerduty.com/users?limit=1",
                 headers={
@@ -250,7 +308,7 @@ async def _page_pagerduty(result) -> Optional[str]:
 
     # Fetch default service id
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=settings.pagemenot_http_timeout) as client:
             r = await client.get(
                 "https://api.pagerduty.com/services?limit=1",
                 headers={
@@ -285,7 +343,7 @@ async def _page_pagerduty(result) -> Optional[str]:
         }
     }
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=settings.pagemenot_http_timeout) as client:
             resp = await client.post(
                 "https://api.pagerduty.com/incidents",
                 json=body,
@@ -326,7 +384,7 @@ async def _open_jira_ticket(result) -> Optional[str]:
     }
 
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=settings.pagemenot_http_timeout) as client:
             # Resolve service desk ID
             sd_id = settings.jira_sm_service_desk_id
             if not sd_id:
@@ -405,15 +463,20 @@ async def _auto_triage(source: str, payload: dict):
 
         # Auto-resolved by runbook execution
         if result.resolved_automatically:
-            log_text = "\n".join(result.execution_log) if result.execution_log else "No steps logged."
             dry = settings.pagemenot_exec_dry_run
+            icon = "🔵" if dry else "🟢"
+            label = "Dry-run resolved" if dry else "Auto-resolved"
+            log_text = "\n\n".join(result.execution_log[:10]) if result.execution_log else "No steps logged."
             await client.chat_postMessage(
                 channel=channel,
-                text=(
-                    f"{'🔵 *Dry run* —' if dry else '✅'} *{'Would have resolved' if dry else 'Auto-resolved'}:* {result.alert_title}\n"
-                    f"Service: {result.service} | ⏱️ {result.duration_seconds:.1f}s\n\n"
-                    f"*{'Steps that would execute' if dry else 'Steps executed'}:*\n{log_text}"
-                ),
+                text=f"{icon} *{label}:* {result.alert_title}",
+                blocks=[
+                    {"type": "section", "text": {"type": "mrkdwn",
+                        "text": f"{icon} *{label}:* {result.alert_title}\n"
+                                f"_Service: {result.service} | ⏱️ {result.duration_seconds:.0f}s_"}},
+                    {"type": "section", "text": {"type": "mrkdwn",
+                        "text": f"*Runbook execution:*\n\n{log_text[:2800]}"}},
+                ],
             )
             return
 
@@ -447,21 +510,64 @@ async def _auto_triage(source: str, payload: dict):
         )
 
         if result.raw_output:
-            for i, chunk in enumerate(_chunk_text(result.raw_output, 2900)[:3]):
+            clean = result.raw_output.replace("```sh\n", "").replace("```bash\n", "").replace("```\n", "").replace("```", "")
+            for i, chunk in enumerate(_chunk_text(clean, settings.pagemenot_slack_chunk_size)[:settings.pagemenot_slack_max_chunks]):
                 await client.chat_postMessage(
                     channel=channel,
                     thread_ts=thread,
-                    text=f"Detailed analysis (part {i + 1})\n```{chunk}```",
+                    text=f"Analysis (part {i + 1})",
+                    blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": chunk}}],
                 )
 
-        # Open Jira SM ticket + page PagerDuty for critical/high incidents
-        jira_url = pd_url = None
-        if result.severity in ("critical", "high"):
-            jira_url, pd_url = await asyncio.gather(
-                _open_jira_ticket(result),
-                _page_pagerduty(result),
-                return_exceptions=True,
+        if result.execution_log:
+            exec_text = "\n\n".join(result.execution_log[:10])
+            await client.chat_postMessage(
+                channel=channel,
+                thread_ts=thread,
+                text="Runbook execution",
+                blocks=[{"type": "section", "text": {"type": "mrkdwn",
+                    "text": f"*Runbook execution:*\n\n{exec_text[:2800]}"}}],
             )
+
+        # Approval buttons — channel-level, same as _do_triage
+        if result.pending_exec_steps and settings.pagemenot_approval_gate:
+            from pagemenot.slack_bot import _approval_store
+            import uuid as _uuid
+            approval_id = str(_uuid.uuid4())[:8]
+            await _approval_store.set(approval_id, {
+                "steps": result.pending_exec_steps,
+                "service": result.service or "",
+                "alert_title": result.alert_title or "",
+                "severity": result.severity or "high",
+            })
+            steps_text = "\n".join(f"• `{s[:100]}`" for s in result.pending_exec_steps[:5])
+            await client.chat_postMessage(
+                channel=channel,
+                text=f"⚠️ Approval required: {result.alert_title}",
+                blocks=[
+                    {"type": "section", "text": {"type": "mrkdwn",
+                        "text": f"*⚠️ Approval required:* {result.alert_title}\n{steps_text}"}},
+                    {"type": "actions", "elements": [
+                        {"type": "button", "text": {"type": "plain_text", "text": "✅ Approve & Execute"},
+                         "action_id": "approve_action", "value": approval_id, "style": "primary"},
+                        {"type": "button", "text": {"type": "plain_text", "text": "❌ Reject"},
+                         "action_id": "reject_action", "value": approval_id, "style": "danger"},
+                    ]},
+                ],
+            )
+
+        # Open Jira SM ticket + page PagerDuty — only for unresolved incidents above threshold
+        _SEV = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+        sev_rank = _SEV.get(result.severity, 0)
+        jira_url = pd_url = None
+        if not settings.pagemenot_exec_dry_run and not result.resolved_automatically and not result.pending_exec_steps:
+            jira_min = _SEV.get(settings.pagemenot_jira_min_severity, 2)
+            pd_min = _SEV.get(settings.pagemenot_pd_min_severity, 2)
+            tasks = [
+                _open_jira_ticket(result) if sev_rank >= jira_min else asyncio.sleep(0),
+                _page_pagerduty(result) if sev_rank >= pd_min else asyncio.sleep(0),
+            ]
+            jira_url, pd_url = await asyncio.gather(*tasks, return_exceptions=True)
             if isinstance(jira_url, str):
                 await client.chat_postMessage(
                     channel=channel,
@@ -475,8 +581,9 @@ async def _auto_triage(source: str, payload: dict):
                     text=f"📟 On-call paged via PagerDuty: {pd_url}",
                 )
 
-        # Escalate critical/high to on-call channel
-        if result.severity in ("critical", "high") and settings.pagemenot_oncall_channel:
+        # Escalate to on-call channel — only for unresolved incidents above PD threshold
+        _pd_min_rank = _SEV.get(settings.pagemenot_pd_min_severity, 2)
+        if not settings.pagemenot_exec_dry_run and not result.resolved_automatically and not result.pending_exec_steps and sev_rank >= _pd_min_rank and settings.pagemenot_oncall_channel:
             pd_line = f"\n📟 PagerDuty: {pd_url}" if isinstance(pd_url, str) else ""
             await client.chat_postMessage(
                 channel=settings.pagemenot_oncall_channel,

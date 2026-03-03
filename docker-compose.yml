@@ -17,7 +17,7 @@ services:
       - chromadata:/app/data/chroma
       - chromacache:/root/.cache/chroma
       # Kubernetes: mount your kubeconfig and set KUBECONFIG_PATH=/app/kubeconfig in .env
-      # - /path/to/kubeconfig:/app/kubeconfig:ro
+      - /tmp/kubeconfig-container:/app/kubeconfig:ro
       # AWS credentials (for aws target): mount ~/.aws or use IAM role / env vars
       # - ~/.aws:/root/.aws:ro
       # GCP credentials (for gcp target): mount service account key or use Workload Identity

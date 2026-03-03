@@ -11,6 +11,7 @@ RUN python -m venv /venv
 ENV PATH="/venv/bin:$PATH"
 
 COPY pyproject.toml ./
+COPY pagemenot/ pagemenot/
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --upgrade pip setuptools wheel && pip install .
 
@@ -46,8 +47,12 @@ RUN ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') && \
 
 RUN groupadd --system appgroup && \
     useradd --system --gid appgroup --no-create-home appuser && \
+    mkdir -p /app/data/chroma /app/.config/crewai && \
+    echo '{"show_tracing_ui": false}' > /app/.config/crewai/settings.json && \
     chown -R appuser:appgroup /app /venv
 
+ENV HOME=/app
+ENV CREWAI_TRACING_ENABLED=false
 USER appuser
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
