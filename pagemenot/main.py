@@ -567,7 +567,6 @@ async def _auto_triage(source: str, payload: dict):
                 )
 
         # Approval buttons — after Jira/PD so urls are stored in entry
-        logger.info(f"[APPROVAL CHECK] pending_exec_steps={result.pending_exec_steps} gate={settings.pagemenot_approval_gate}")
         if result.pending_exec_steps and settings.pagemenot_approval_gate:
             from pagemenot.slack_bot import _approval_store
             import uuid as _uuid

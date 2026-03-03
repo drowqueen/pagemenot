@@ -91,9 +91,16 @@ def get_available_tools() -> dict[str, list]:
     remediator_tools.append(search_runbooks)
     remediator_tools.append(request_human_approval)
 
-    if settings.kubeconfig_path:
+    import os as _os
+    _in_cluster = bool(_os.environ.get("KUBERNETES_SERVICE_HOST"))
+    _kubeconfig_ok = settings.kubeconfig_path and _os.path.isfile(settings.kubeconfig_path)
+    if _in_cluster or _kubeconfig_ok:
         remediator_tools.append(kubectl_rollback)
-        logger.info("✅ Kubernetes connected")
+        _k8s_mode = "in-cluster service account" if _in_cluster else f"kubeconfig={settings.kubeconfig_path}"
+        logger.info(f"✅ Kubernetes connected ({_k8s_mode})")
+    elif settings.kubeconfig_path:
+        logger.warning(f"KUBECONFIG_PATH={settings.kubeconfig_path!r} is not a valid file — kubectl disabled. "
+                       "Set KUBECONFIG_PATH to a kubeconfig file, or run pagemenot as a pod with a ServiceAccount.")
 
     unconfigured = [
         v for v, s in [
@@ -681,15 +688,33 @@ def _exec_enabled():
 
 
 def exec_kubectl(command: str) -> str:
-    """Execute a kubectl command from a runbook exec tag."""
+    """Execute a kubectl command from a runbook exec tag.
+
+    Config resolution order (matches kubectl default):
+    1. KUBECONFIG_PATH env var → explicit file path
+    2. In-cluster service account → automatic when KUBERNETES_SERVICE_HOST is set
+    3. ~/.kube/config → local dev fallback
+    """
     _exec_enabled()
     if settings.pagemenot_exec_dry_run:
         return f"[DRY RUN] would execute: kubectl {command}"
-    if not settings.kubeconfig_path:
-        raise RuntimeError("KUBECONFIG_PATH not configured")
 
     parts = shlex.split(command)
-    cmd = ["kubectl", "--kubeconfig", settings.kubeconfig_path] + parts
+    kubeconfig = settings.kubeconfig_path
+
+    # Validate kubeconfig path is a file, not a directory (Docker creates dirs for missing mounts)
+    if kubeconfig:
+        import os as _os
+        if not _os.path.isfile(kubeconfig):
+            logger.warning(f"KUBECONFIG_PATH={kubeconfig!r} is not a file — falling back to default config discovery")
+            kubeconfig = None
+
+    if kubeconfig:
+        cmd = ["kubectl", "--kubeconfig", kubeconfig] + parts
+    else:
+        # In-cluster (KUBERNETES_SERVICE_HOST set) or ~/.kube/config — kubectl handles it
+        cmd = ["kubectl"] + parts
+
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=settings.pagemenot_subprocess_timeout)
     if result.returncode != 0:
         raise RuntimeError(f"kubectl failed: {result.stderr[:300]}")
