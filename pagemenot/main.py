@@ -443,6 +443,18 @@ async def _open_jira_ticket(result) -> Optional[str]:
     return None
 
 
+async def _resolve_jira_ticket(jira_url: str, resolution_note: str = "") -> None:
+    """Transition Jira ticket to Done. Stub — wire to real API on AWS/GCP."""
+    # TODO: extract ticket key from jira_url, POST /rest/api/2/issue/{key}/transitions
+    logger.info(f"[STUB] Would resolve Jira ticket: {jira_url}")
+
+
+async def _resolve_pagerduty_incident(pd_url: str, resolved_by: str = "") -> None:
+    """Resolve PagerDuty incident. Stub — wire to real API on AWS/GCP."""
+    # TODO: extract incident id from pd_url, PUT /incidents/{id} status=resolved
+    logger.info(f"[STUB] Would resolve PagerDuty incident: {pd_url}")
+
+
 async def _auto_triage(source: str, payload: dict):
     """Run triage and route result based on severity and resolution status."""
     try:
@@ -529,38 +541,11 @@ async def _auto_triage(source: str, payload: dict):
                     "text": f"*Runbook execution:*\n\n{exec_text[:2800]}"}}],
             )
 
-        # Approval buttons — channel-level, same as _do_triage
-        if result.pending_exec_steps and settings.pagemenot_approval_gate:
-            from pagemenot.slack_bot import _approval_store
-            import uuid as _uuid
-            approval_id = str(_uuid.uuid4())[:8]
-            await _approval_store.set(approval_id, {
-                "steps": result.pending_exec_steps,
-                "service": result.service or "",
-                "alert_title": result.alert_title or "",
-                "severity": result.severity or "high",
-            })
-            steps_text = "\n".join(f"• `{s[:100]}`" for s in result.pending_exec_steps[:5])
-            await client.chat_postMessage(
-                channel=channel,
-                text=f"⚠️ Approval required: {result.alert_title}",
-                blocks=[
-                    {"type": "section", "text": {"type": "mrkdwn",
-                        "text": f"*⚠️ Approval required:* {result.alert_title}\n{steps_text}"}},
-                    {"type": "actions", "elements": [
-                        {"type": "button", "text": {"type": "plain_text", "text": "✅ Approve & Execute"},
-                         "action_id": "approve_action", "value": approval_id, "style": "primary"},
-                        {"type": "button", "text": {"type": "plain_text", "text": "❌ Reject"},
-                         "action_id": "reject_action", "value": approval_id, "style": "danger"},
-                    ]},
-                ],
-            )
-
-        # Open Jira SM ticket + page PagerDuty — only for unresolved incidents above threshold
+        # Open Jira SM ticket + page PagerDuty first — so urls are available for the approval entry
         _SEV = {"low": 0, "medium": 1, "high": 2, "critical": 3}
         sev_rank = _SEV.get(result.severity, 0)
         jira_url = pd_url = None
-        if not settings.pagemenot_exec_dry_run and not result.resolved_automatically and not result.pending_exec_steps:
+        if not settings.pagemenot_exec_dry_run and not result.resolved_automatically:
             jira_min = _SEV.get(settings.pagemenot_jira_min_severity, 2)
             pd_min = _SEV.get(settings.pagemenot_pd_min_severity, 2)
             tasks = [
@@ -581,9 +566,40 @@ async def _auto_triage(source: str, payload: dict):
                     text=f"📟 On-call paged via PagerDuty: {pd_url}",
                 )
 
-        # Escalate to on-call channel — only for unresolved incidents above PD threshold
+        # Approval buttons — after Jira/PD so urls are stored in entry
+        logger.info(f"[APPROVAL CHECK] pending_exec_steps={result.pending_exec_steps} gate={settings.pagemenot_approval_gate}")
+        if result.pending_exec_steps and settings.pagemenot_approval_gate:
+            from pagemenot.slack_bot import _approval_store
+            import uuid as _uuid
+            approval_id = str(_uuid.uuid4())[:8]
+            await _approval_store.set(approval_id, {
+                "steps": result.pending_exec_steps,
+                "service": result.service or "",
+                "alert_title": result.alert_title or "",
+                "severity": result.severity or "high",
+                "root_cause": result.root_cause or "",
+                "jira_url": jira_url if isinstance(jira_url, str) else "",
+                "pd_url": pd_url if isinstance(pd_url, str) else "",
+            })
+            steps_text = "\n".join(f"• `{s[:100]}`" for s in result.pending_exec_steps[:5])
+            await client.chat_postMessage(
+                channel=channel,
+                text=f"⚠️ Approval required: {result.alert_title}",
+                blocks=[
+                    {"type": "section", "text": {"type": "mrkdwn",
+                        "text": f"*⚠️ Approval required:* {result.alert_title}\n{steps_text}"}},
+                    {"type": "actions", "elements": [
+                        {"type": "button", "text": {"type": "plain_text", "text": "✅ Approve & Execute"},
+                         "action_id": "approve_action", "value": approval_id, "style": "primary"},
+                        {"type": "button", "text": {"type": "plain_text", "text": "❌ Reject"},
+                         "action_id": "reject_action", "value": approval_id, "style": "danger"},
+                    ]},
+                ],
+            )
+
+        # Escalate to on-call channel
         _pd_min_rank = _SEV.get(settings.pagemenot_pd_min_severity, 2)
-        if not settings.pagemenot_exec_dry_run and not result.resolved_automatically and not result.pending_exec_steps and sev_rank >= _pd_min_rank and settings.pagemenot_oncall_channel:
+        if not settings.pagemenot_exec_dry_run and not result.resolved_automatically and sev_rank >= _pd_min_rank and settings.pagemenot_oncall_channel:
             pd_line = f"\n📟 PagerDuty: {pd_url}" if isinstance(pd_url, str) else ""
             await client.chat_postMessage(
                 channel=settings.pagemenot_oncall_channel,

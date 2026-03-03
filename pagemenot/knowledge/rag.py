@@ -98,6 +98,37 @@ def _ingest_directory(
         logger.info(f"Ingested {len(md_files)} {doc_type}s ({len(docs)} chunks) into '{collection_name}'")
 
 
+def index_incident(content: str, filename: str, service: str) -> None:
+    """Index a single postmortem into ChromaDB incidents collection. Called after human-approved resolution."""
+    try:
+        client = chromadb.PersistentClient(path=settings.chroma_path)
+        collection = client.get_or_create_collection(
+            name=settings.chroma_incidents_collection,
+            metadata={"hnsw:space": "cosine"},
+        )
+        stem = Path(filename).stem
+        title = stem.replace("-", " ").replace("_", " ").title()
+        meta = {
+            "type": "postmortem",
+            "title": title,
+            "filename": filename,
+            "service": service,
+            "root_cause": _extract_field(content, "root_cause") or "",
+            "resolution": _extract_field(content, "resolution") or "",
+            "date": _extract_field(content, "date") or "",
+        }
+        chunks = _chunk_document(content)
+        doc_id = f"postmortem_{stem}"
+        collection.upsert(
+            documents=chunks,
+            ids=[f"{doc_id}_chunk{i}" for i in range(len(chunks))],
+            metadatas=[meta] * len(chunks),
+        )
+        logger.info(f"Indexed postmortem: {filename} ({len(chunks)} chunks)")
+    except Exception as e:
+        logger.warning(f"Postmortem indexing failed: {e}")
+
+
 def _extract_field(content: str, field: str) -> str | None:
     """Extract a field value from markdown-ish content."""
     for line in content.split("\n")[:20]:

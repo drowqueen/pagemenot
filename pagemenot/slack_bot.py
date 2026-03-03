@@ -10,6 +10,7 @@ They see:
 import asyncio
 import json
 import logging
+import re
 import uuid
 
 from slack_bolt.async_app import AsyncApp
@@ -181,6 +182,10 @@ def create_slack_app() -> AsyncApp:
 
         if success:
             alert_title = entry.get("alert_title", "Incident")
+            exec_log = [
+                f"Step {i}: `{s}`"
+                for i, s in enumerate(steps, 1)
+            ]
             await client.chat_postMessage(
                 channel=channel, thread_ts=thread,
                 text=f"✅ All {len(steps)} step(s) executed successfully.",
@@ -192,6 +197,12 @@ def create_slack_app() -> AsyncApp:
                 blocks=[{"type": "section", "text": {"type": "mrkdwn",
                     "text": f"🟢 *Resolved:* {alert_title}\n_Approved by <@{user_id}>, runbook executed successfully._"}}],
             )
+            # Write postmortem + re-index for future RAG retrieval
+            asyncio.create_task(_write_and_index_postmortem(entry, user_id, exec_log))
+            # Resolve Jira/PD tickets (stubs until real creds wired on AWS/GCP)
+            from pagemenot.main import _resolve_jira_ticket, _resolve_pagerduty_incident
+            asyncio.create_task(_resolve_jira_ticket(entry.get("jira_url", ""), resolved_by=user_id))
+            asyncio.create_task(_resolve_pagerduty_incident(entry.get("pd_url", ""), resolved_by=user_id))
         else:
             if not settings.pagemenot_exec_dry_run:
                 await _escalate_unresolved(client, channel, entry, reason=f"Runbook execution failed after approval by <@{user_id}>")
@@ -295,6 +306,46 @@ async def _escalate_unresolved(client, channel: str, entry: dict, reason: str):
             channel=settings.pagemenot_oncall_channel,
             text=f"{sev_emoji} *ESCALATION:* {result.alert_title} ({result.service})\n_{reason}_{pd_line}",
         )
+
+
+async def _write_and_index_postmortem(entry: dict, resolved_by: str, exec_log: list[str]) -> None:
+    """Write a postmortem markdown file and index it into ChromaDB for future RAG retrieval."""
+    import datetime
+    from pagemenot.knowledge.rag import index_incident, POSTMORTEMS_DIR
+
+    alert_title = entry.get("alert_title", "incident")
+    service = entry.get("service", "unknown")
+    root_cause = entry.get("root_cause", "")
+    jira_url = entry.get("jira_url", "")
+
+    safe_name = re.sub(r"[^a-z0-9-]", "-", alert_title.lower())[:50].strip("-")
+    ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S")
+    filename = f"{service}_{ts}.md"
+
+    steps_md = "\n".join(f"- `{s}`" for s in entry.get("steps", []))
+    log_md = "\n\n".join(exec_log)
+    content = (
+        f"# Postmortem: {alert_title}\n\n"
+        f"service: {service}\n"
+        f"date: {datetime.date.today()}\n"
+        f"root_cause: {root_cause or 'See analysis below.'}\n"
+        f"resolution: Human-approved runbook execution\n\n"
+        f"## Alert\n{alert_title}\n\n"
+        f"## Root Cause\n{root_cause}\n\n"
+        f"## Steps Executed\n{steps_md}\n\n"
+        f"## Execution Log\n{log_md}\n\n"
+        f"## Resolved By\n<@{resolved_by}>\n\n"
+        + (f"## Jira\n{jira_url}\n" if jira_url else "")
+    )
+
+    path = POSTMORTEMS_DIR / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.write_text(content, encoding="utf-8")
+        logger.info(f"Postmortem written: {filename}")
+        index_incident(content, filename, service)
+    except Exception as e:
+        logger.warning(f"Postmortem write/index failed: {e}")
 
 
 async def _do_triage(say, source: str, payload: dict, thread_ts: str | None = None):
@@ -449,6 +500,9 @@ async def _do_triage(say, source: str, payload: dict, thread_ts: str | None = No
                     "service": result.service or "",
                     "alert_title": result.alert_title or "",
                     "severity": result.severity or "high",
+                    "root_cause": result.root_cause or "",
+                    "jira_url": "",
+                    "pd_url": "",
                 })
                 steps_text = "\n".join(f"• `{s[:100]}`" for s in result.pending_exec_steps[:5])
                 await _client.chat_postMessage(
