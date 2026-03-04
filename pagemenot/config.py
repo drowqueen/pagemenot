@@ -67,7 +67,8 @@ class Settings(BaseSettings):
     github_org: Optional[str] = None
     # Execution
     kubeconfig_path: Optional[str] = None
-    pagemenot_exec_namespace: str = "production"  # default k8s namespace for runbook {{ namespace }}
+    pagemenot_exec_namespace: str = "default"  # fallback k8s namespace for runbook {{ namespace }}
+    pagemenot_service_namespaces: str = ""      # per-service overrides: "payment-service=payments,checkout-service=checkout"
     pagemenot_webhook_rate_limit: str = "60/minute"  # slowapi rate limit string for all webhook endpoints
     pagemenot_exec_enabled: bool = True         # master switch for autonomous execution
     pagemenot_exec_dry_run: bool = True         # true = simulate; false = real execution

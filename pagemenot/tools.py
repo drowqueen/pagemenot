@@ -814,7 +814,9 @@ def dispatch_exec_step(step: str, service: str = "") -> str:
 
     # Substitute template variables
     from pagemenot.config import settings as _s
-    namespace = _s.pagemenot_exec_namespace
+    ns_map = {k: v for pair in _s.pagemenot_service_namespaces.split(",")
+              if "=" in pair for k, v in [pair.strip().split("=", 1)]}
+    namespace = ns_map.get(service, _s.pagemenot_exec_namespace) if service else _s.pagemenot_exec_namespace
     for _raw, _sub in [("{{ service }}", _safe_service_name(service) if service else ""),
                        ("{{service}}", service),
                        ("{{ namespace }}", namespace),
