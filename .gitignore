@@ -70,3 +70,4 @@ Thumbs.db
 # ── Claude Code / Serena ──────────────────────────────────────────────────────
 .claude/settings.local.json
 .serena/
+docker-compose.override.yml
