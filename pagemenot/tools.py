@@ -792,7 +792,7 @@ def exec_http(method: str, url: str, headers: dict | None = None, body: dict | N
 
 def _safe_service_name(service: str) -> str:
     """Validate service name used in template substitution — only safe chars allowed."""
-    if not re.fullmatch(r'[a-zA-Z0-9_\-]+', service):
+    if not re.fullmatch(r'[a-zA-Z0-9_\-\.]+', service):
         raise ValueError(f"Unsafe service name for template substitution: {service!r}")
     return service
 
