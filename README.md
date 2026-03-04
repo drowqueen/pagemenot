@@ -543,12 +543,21 @@ Jira tickets open only when the crew cannot resolve the incident (escalation gat
 | Unresolved — low/medium | ✗ |
 | Unresolved — high/critical | ✓ open once |
 
-When the monitoring system sends `status=resolved` (alertmanager) or `incident.resolved` (PagerDuty), pagemenot:
+Tickets are closed (transitioned to Done/Resolved/Closed) in two ways:
 
-1. Closes the open Jira ticket (transitions to Done/Resolved/Closed, adds resolution comment)
-2. Clears the dedup registry (future occurrences trigger fresh triage)
-3. Clears PD tracking
-4. Posts outcome to Slack
+| Trigger | Jira closed | PagerDuty resolved |
+|---------|-------------|-------------------|
+| Human clicks **Approve** in Slack + runbook executes successfully | ✅ | ✅ |
+| Monitoring system sends `status=resolved` / `incident.resolved` | ✅ | ✅ |
+
+On close, pagemenot:
+
+1. Looks up the Jira issue key from the stored ticket URL
+2. Fetches available transitions and selects the first matching Done/Resolved/Closed transition
+3. Adds a resolution comment (approver's Slack user ID or "auto-resolved")
+4. Resolves the PagerDuty incident (`PUT /incidents/{id}` with `status=resolved`)
+5. Clears the dedup registry
+6. Posts outcome to Slack
 
 ---
 
