@@ -8,17 +8,24 @@ Teams just drop markdown files into:
 Pagemenot ingests them on startup. No commands, no config.
 """
 
+import datetime
 import logging
 import os
+import re
+import uuid
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import chromadb
 
 from pagemenot.config import settings
 
-logger = logging.getLogger("pagemenot.knowledge")
+if TYPE_CHECKING:
+    from pagemenot.triage import TriageResult
 
-_REPO_ROOT = Path(__file__).parent.parent.parent
+logger = logging.getLogger("pagemenot.rag")
+
+_REPO_ROOT = Path(__file__).parent.parent
 _KNOWLEDGE_BASE = Path(os.environ.get("KNOWLEDGE_DIR", str(_REPO_ROOT / "knowledge")))
 POSTMORTEMS_DIR = _KNOWLEDGE_BASE / "postmortems"
 RUNBOOKS_DIR = _KNOWLEDGE_BASE / "runbooks"
@@ -127,6 +134,53 @@ def index_incident(content: str, filename: str, service: str) -> None:
         logger.info(f"Indexed postmortem: {filename} ({len(chunks)} chunks)")
     except Exception as e:
         logger.warning(f"Postmortem indexing failed: {e}")
+
+
+def write_and_index_postmortem(
+    result: "TriageResult",
+    resolved_by: str = "agent",
+    jira_url: str = "",
+) -> None:
+    """Write a postmortem for any resolved incident (auto or human-approved) and index into ChromaDB."""
+    service = result.service or "unknown"
+    ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S")
+    filename = f"{service}_{ts}-{uuid.uuid4().hex[:6]}.md"
+
+    # Resolve template vars in execution log before persisting
+    resolved_log = [
+        re.sub(r"\{\{\s*service\s*\}\}", service,
+               re.sub(r"\{\{\s*namespace\s*\}\}", settings.pagemenot_exec_namespace, entry))
+        for entry in (result.execution_log or [])
+    ]
+    log_md = "\n\n".join(resolved_log) or "No steps logged."
+
+    root_cause = (result.root_cause or "").strip()
+    if not root_cause or root_cause == "See detailed analysis below.":
+        root_cause = "Not determined."
+
+    resolution = "Human-approved runbook execution" if resolved_by != "agent" else "Auto-resolved by runbook execution"
+
+    content = (
+        f"# Postmortem: {result.alert_title}\n\n"
+        f"service: {service}\n"
+        f"date: {datetime.date.today()}\n"
+        f"root_cause: {root_cause}\n"
+        f"resolution: {resolution}\n\n"
+        f"## Alert\n{result.alert_title}\n\n"
+        f"## Root Cause\n{root_cause}\n\n"
+        f"## Execution Log\n{log_md}\n\n"
+        f"## Resolved By\n{resolved_by}\n"
+        + (f"\n## Jira\n{jira_url}\n" if jira_url else "")
+    )
+
+    path = POSTMORTEMS_DIR / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.write_text(content, encoding="utf-8")
+        logger.info(f"Postmortem written: {filename}")
+        index_incident(content, filename, service)
+    except Exception as e:
+        logger.warning(f"Postmortem write/index failed: {e}")
 
 
 def _extract_field(content: str, field: str) -> str | None:
