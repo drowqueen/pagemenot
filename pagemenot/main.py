@@ -21,7 +21,7 @@ from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 from typing import Optional
 
 from pagemenot.config import settings
-from pagemenot.knowledge.rag import ingest_all
+from pagemenot.rag import ingest_all
 from pagemenot.slack_bot import create_slack_app, _chunk_text
 from pagemenot.triage import run_triage, _executor
 

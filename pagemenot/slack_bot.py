@@ -311,7 +311,7 @@ async def _escalate_unresolved(client, channel: str, entry: dict, reason: str):
 async def _write_and_index_postmortem(entry: dict, resolved_by: str, exec_log: list[str]) -> None:
     """Write a postmortem markdown file and index it into ChromaDB for future RAG retrieval."""
     import datetime
-    from pagemenot.knowledge.rag import index_incident, POSTMORTEMS_DIR
+    from pagemenot.rag import index_incident, POSTMORTEMS_DIR
 
     alert_title = entry.get("alert_title", "incident")
     service = entry.get("service", "unknown")

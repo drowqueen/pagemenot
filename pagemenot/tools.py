@@ -864,7 +864,7 @@ def get_runbook_exec_steps(query: str, service: str = "") -> dict[str, list[tupl
         if not results["documents"] or not results["documents"][0]:
             return {"auto": [], "approve": []}
 
-        from pagemenot.knowledge.rag import RUNBOOKS_DIR
+        from pagemenot.rag import RUNBOOKS_DIR
 
         auto_steps: list[tuple[str, str]] = []
         approve_steps: list[tuple[str, str]] = []
