@@ -752,14 +752,20 @@ def exec_aws(service: str, action: str, params: dict) -> str:
 
 
 def exec_shell(command: str) -> str:
-    """Execute a shell command from a runbook exec tag."""
+    """Execute a shell command from a runbook exec tag.
+
+    Uses shell=True so runbook steps can use &&, ||, pipes, etc.
+    Safe: commands come exclusively from operator-owned runbook files (never LLM output),
+    and template variables are validated by _safe_service_name() before substitution.
+    """
     _exec_enabled()
     if settings.pagemenot_exec_dry_run:
         return f"[DRY RUN] would execute: {command}"
-    result = subprocess.run(shlex.split(command), capture_output=True, text=True, timeout=settings.pagemenot_subprocess_timeout)
+    result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=settings.pagemenot_subprocess_timeout)
     if result.returncode != 0:
-        raise RuntimeError(f"Command failed: {result.stderr[:300]}")
-    return result.stdout.strip()[:500]
+        detail = (result.stderr or result.stdout or "no output").strip()
+        raise RuntimeError(f"Command failed: {detail[:300]}")
+    return (result.stdout or result.stderr).strip()[:500]
 
 
 def exec_http(method: str, url: str, headers: dict | None = None, body: dict | None = None) -> str:

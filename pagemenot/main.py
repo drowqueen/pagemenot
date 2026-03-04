@@ -759,7 +759,7 @@ async def _auto_triage(source: str, payload: dict):
                 "pd_url": pd_url if isinstance(pd_url, str) else "",
             })
             steps_text = "\n".join(f"• `{s[:100]}`" for s in result.pending_exec_steps[:5])
-            await client.chat_postMessage(
+            approval_msg = await client.chat_postMessage(
                 channel=channel,
                 text=f"⚠️ Approval required: {result.alert_title}",
                 blocks=[
@@ -767,9 +767,9 @@ async def _auto_triage(source: str, payload: dict):
                         "text": f"*⚠️ Approval required:* {result.alert_title}\n{steps_text}"}},
                     {"type": "actions", "elements": [
                         {"type": "button", "text": {"type": "plain_text", "text": "✅ Approve & Execute"},
-                         "action_id": "approve_action", "value": approval_id, "style": "primary"},
+                         "action_id": "approve_action", "value": f"{approval_id}:{approval_msg['ts']}", "style": "primary"},
                         {"type": "button", "text": {"type": "plain_text", "text": "❌ Reject"},
-                         "action_id": "reject_action", "value": approval_id, "style": "danger"},
+                         "action_id": "reject_action", "value": f"{approval_id}:{approval_msg['ts']}", "style": "danger"},
                     ]},
                 ],
             )

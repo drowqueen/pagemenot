@@ -30,11 +30,33 @@ _pending_autoapprove: dict[str, asyncio.Task] = {}
 
 
 class _ApprovalStore:
-    """Pending approval store — Redis if REDIS_URL is set, in-memory fallback."""
+    """Pending approval store — Redis → JSON file → in-memory (in priority order)."""
+
+    _FILE = "/app/data/approvals.json"
 
     def __init__(self):
         self._mem: dict[str, dict] = {}
         self._redis = None
+        self._load_file()
+
+    def _load_file(self):
+        try:
+            import os
+            if os.path.exists(self._FILE):
+                with open(self._FILE) as f:
+                    self._mem = json.load(f)
+                logger.info("Loaded %d pending approvals from %s", len(self._mem), self._FILE)
+        except Exception as e:
+            logger.warning("Could not load approvals file: %s", e)
+
+    def _save_file(self):
+        try:
+            import os
+            os.makedirs(os.path.dirname(self._FILE), exist_ok=True)
+            with open(self._FILE, "w") as f:
+                json.dump(self._mem, f)
+        except Exception as e:
+            logger.warning("Could not save approvals file: %s", e)
 
     async def _client(self):
         if self._redis is None and settings.redis_url:
@@ -42,7 +64,7 @@ class _ApprovalStore:
                 import redis.asyncio as aioredis
                 self._redis = aioredis.from_url(settings.redis_url, decode_responses=True)
             except ImportError:
-                logger.warning("redis package not installed — falling back to in-memory approval store")
+                logger.warning("redis package not installed — falling back to file approval store")
         return self._redis
 
     async def set(self, key: str, value: dict, ttl: int = settings.pagemenot_approval_ttl) -> None:
@@ -51,6 +73,7 @@ class _ApprovalStore:
             await r.setex(key, ttl, json.dumps(value))
         else:
             self._mem[key] = value
+            self._save_file()
 
     async def pop(self, key: str) -> dict | None:
         r = await self._client()
@@ -60,7 +83,10 @@ class _ApprovalStore:
                 pipe.delete(key)
                 result, _ = await pipe.execute()
             return json.loads(result) if result else None
-        return self._mem.pop(key, None)
+        value = self._mem.pop(key, None)
+        if value is not None:
+            self._save_file()
+        return value
 
 
 _approval_store = _ApprovalStore()
@@ -132,19 +158,30 @@ def create_slack_app() -> AsyncApp:
         from pagemenot.tools import dispatch_exec_step
         from pagemenot.triage import _redact_sensitive
 
-        approval_id = body["actions"][0]["value"]
+        raw_value = body["actions"][0]["value"]
+        # Value format: "approval_id:msg_ts" (msg_ts embedded to always target the right message)
+        if ":" in raw_value:
+            approval_id, embedded_ts = raw_value.split(":", 1)
+        else:
+            approval_id, embedded_ts = raw_value, None
         user_id = body["user"]["id"]
         user = body["user"]["name"]
         channel = body["container"].get("channel_id") or body.get("channel", {}).get("id")
         thread = body["container"].get("thread_ts") or body["container"].get("message_ts")
-        msg_ts = body["message"]["ts"]
+        msg_ts = embedded_ts or body["message"]["ts"]
 
         entry = await _approval_store.pop(approval_id)
         if not entry:
-            await client.chat_postMessage(
-                channel=channel, thread_ts=thread,
-                text="⚠️ This approval has already been handled or expired.",
-            )
+            # Silently remove the stale buttons — no noisy message
+            try:
+                await client.chat_update(
+                    channel=channel, ts=msg_ts,
+                    text="(Approval already handled)",
+                    blocks=[{"type": "section", "text": {"type": "mrkdwn",
+                        "text": "_(Approval already handled or expired)_"}}],
+                )
+            except Exception:
+                pass
             return
 
         steps = entry["steps"]
@@ -215,11 +252,15 @@ def create_slack_app() -> AsyncApp:
     @app.action("reject_action")
     async def handle_reject(ack, body, client):
         await ack()
-        approval_id = body["actions"][0]["value"]
+        raw_value = body["actions"][0]["value"]
+        if ":" in raw_value:
+            approval_id, embedded_ts = raw_value.split(":", 1)
+        else:
+            approval_id, embedded_ts = raw_value, None
         user_id = body["user"]["id"]
         user = body["user"]["name"]
         channel = body["container"].get("channel_id") or body.get("channel", {}).get("id")
-        msg_ts = body["message"]["ts"]
+        msg_ts = embedded_ts or body["message"]["ts"]
 
         entry = await _approval_store.pop(approval_id)
 
@@ -472,7 +513,7 @@ async def _do_triage(say, source: str, payload: dict, thread_ts: str | None = No
                     "pd_url": "",
                 })
                 steps_text = "\n".join(f"• `{s[:100]}`" for s in result.pending_exec_steps[:5])
-                await _client.chat_postMessage(
+                approval_msg = await _client.chat_postMessage(
                     channel=channel,
                     text=f"⚠️ Approval required: {result.alert_title}",
                     blocks=[
@@ -488,14 +529,14 @@ async def _do_triage(say, source: str, payload: dict, thread_ts: str | None = No
                                     "type": "button",
                                     "text": {"type": "plain_text", "text": "✅ Approve & Execute"},
                                     "action_id": "approve_action",
-                                    "value": approval_id,
+                                    "value": f"{approval_id}:{approval_msg['ts']}",
                                     "style": "primary",
                                 },
                                 {
                                     "type": "button",
                                     "text": {"type": "plain_text", "text": "❌ Reject"},
                                     "action_id": "reject_action",
-                                    "value": approval_id,
+                                    "value": f"{approval_id}:{approval_msg['ts']}",
                                     "style": "danger",
                                 },
                             ],
