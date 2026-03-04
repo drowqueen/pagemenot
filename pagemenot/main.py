@@ -216,9 +216,6 @@ async def sns_webhook(
             message = {"detail": message_str}
 
         new_state = message.get("NewStateValue", "")
-        if new_state != "ALARM":
-            return {"status": "ignored", "state": new_state}
-
         alarm_name = message.get("AlarmName", "CloudWatch Alarm")
         region = message.get("Region", "")
         trigger = message.get("Trigger", {})
@@ -227,8 +224,31 @@ async def sns_webhook(
         instance_id = dims.get("InstanceId", "")
         service = dims.get("AutoScalingGroupName") or instance_id or "aws-ec2"
 
+        if new_state == "OK":
+            entry = _alarm_incidents.pop(alarm_name, None)
+            if entry:
+                asyncio.create_task(_resolve_jira_ticket(entry["jira_url"], resolution_note="CloudWatch alarm recovered"))
+                asyncio.create_task(_resolve_pagerduty_incident(entry["pd_url"], resolved_by="cloudwatch"))
+                try:
+                    from pagemenot.slack_bot import get_client as _gc
+                    _client = _gc()
+                    await _client.chat_postMessage(
+                        channel=entry["channel"],
+                        thread_ts=entry["thread_ts"],
+                        text=f"✅ *Recovered:* `{alarm_name}` — CloudWatch alarm back to OK. Jira closed, PD resolved.",
+                    )
+                except Exception as e:
+                    logger.warning("SNS OK: Slack notify failed: %s", e)
+            else:
+                logger.info("SNS OK for '%s' — no tracked incident to close", alarm_name)
+            return {"status": "recovered"}
+
+        if new_state != "ALARM":
+            return {"status": "ignored", "state": new_state}
+
         triage_payload = {
-            "title": f"{alarm_name}",
+            "title": alarm_name,
+            "alarm_name": alarm_name,
             "message": message.get("NewStateReason", ""),
             "service": service,
             "region": region,
@@ -594,6 +614,10 @@ async def _resolve_pagerduty_incident(pd_url: str, resolved_by: str = "") -> Non
         logger.warning("PD resolve error: %s", e)
 
 
+# alarm_name → {jira_url, pd_url, channel, thread_ts} — populated for SNS/CloudWatch alarms
+_alarm_incidents: dict[str, dict] = {}
+
+
 async def _auto_triage(source: str, payload: dict):
     """Run triage and route result based on severity and resolution status."""
     try:
@@ -710,6 +734,15 @@ async def _auto_triage(source: str, payload: dict):
                     thread_ts=thread,
                     text=f"📟 On-call paged via PagerDuty: {pd_url}",
                 )
+
+        # Track alarm → Jira/PD URLs for CloudWatch OK recovery
+        if source == "sns" and payload.get("alarm_name"):
+            _alarm_incidents[payload["alarm_name"]] = {
+                "jira_url": jira_url if isinstance(jira_url, str) else "",
+                "pd_url": pd_url if isinstance(pd_url, str) else "",
+                "channel": channel,
+                "thread_ts": thread,
+            }
 
         # Approval buttons — after Jira/PD so urls are stored in entry
         if result.pending_exec_steps and settings.pagemenot_approval_gate:
