@@ -11,6 +11,7 @@ Usage:
   python scripts/simulate_incident.py db-connection-pool
   python scripts/simulate_incident.py cert-renewal
   python scripts/simulate_incident.py traffic-spike
+  python scripts/simulate_incident.py ec2-nginx-down
   python scripts/simulate_incident.py --list
   python scripts/simulate_incident.py --random
 """
@@ -34,7 +35,7 @@ if _env_file.exists():
     except ImportError:
         pass
 
-PAGEMENOT_URL = "http://localhost:8080"
+PAGEMENOT_URL = os.environ.get("PAGEMENOT_URL", "http://localhost:8080")
 
 # Webhook HMAC secrets — read from env (same vars as pagemenot config)
 _SECRETS = {
@@ -314,6 +315,38 @@ SCENARIOS = {
             "pods": "2/2 Running",
             "restarts": 0,
             "events": "No unusual events",
+            "resource_pressure": False,
+        },
+    },
+    "ec2-nginx-down": {
+        "name": "EC2 Nginx Service Down — Requires Approval to Restart",
+        "pagerduty": {
+            "id": "P9999991",
+            "title": "EC2 nginx service not responding — health check failing",
+            "description": "HTTP health check on 3.249.183.159 returning connection refused. Nginx process appears to have crashed. Last successful check 4 minutes ago. CloudWatch StatusCheckFailed=0 (instance is up), application-level failure only.",
+            "urgency": "high",
+            "service": {"name": "3.249.183.159", "id": "PSVC009"},
+        },
+        "mock_metrics": {
+            "error_rate": {"before": 0.1, "after": 100.0, "unit": "%"},
+            "request_rate": {"before": 120, "after": 0, "unit": "req/s"},
+            "latency_p99": {"before": 0.05, "after": 30.0, "unit": "s"},
+            "cpu_percent": {"before": 12, "after": 8, "unit": "%"},
+            "memory_mb": {"before": 180, "after": 175, "unit": "MB"},
+            "pod_restarts": {"before": 0, "after": 0, "unit": ""},
+        },
+        "mock_logs": [
+            "2026-03-04T18:00:01Z ERROR nginx: [emerg] bind() to 0.0.0.0:80 failed (98: Address already in use)",
+            "2026-03-04T18:00:01Z ERROR nginx: configuration file /etc/nginx/nginx.conf test failed",
+            "2026-03-04T18:00:02Z WARN  healthcheck: GET http://3.249.183.159/ — connection refused",
+            "2026-03-04T18:00:10Z WARN  healthcheck: GET http://3.249.183.159/ — connection refused (retry 2/3)",
+            "2026-03-04T18:00:20Z ERROR healthcheck: service unreachable after 3 retries — alerting",
+        ],
+        "mock_deploys": [],
+        "mock_k8s": {
+            "pods": "N/A — EC2 workload",
+            "restarts": 0,
+            "events": "EC2 instance running, nginx process down",
             "resource_pressure": False,
         },
     },
