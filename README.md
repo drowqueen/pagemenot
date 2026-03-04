@@ -736,6 +736,26 @@ For Kubernetes, add ChromaDB as a StatefulSet with a `ReadWriteOnce` PVC. For EC
 
 Configure at your firewall, security group, or load balancer — not in pagemenot itself.
 
+**Secret storage** — never use `.env` in production. Use a secrets manager:
+
+| Platform | Service | How |
+|----------|---------|-----|
+| AWS | Secrets Manager | Attach an IAM role to the EC2 instance or ECS task. Fetch secrets at startup via `boto3.client('secretsmanager').get_secret_value(...)`. No static credentials anywhere. |
+| GCP | Secret Manager | Attach a service account to the VM/GKE pod. Fetch via `google-cloud-secret-manager` SDK. |
+| HashiCorp Vault | Any | Use the Vault Agent sidecar or `VAULT_ADDR` + `VAULT_TOKEN` (short-lived, auto-renewed). |
+| Self-hosted | Any | At minimum, mount secrets as read-only files (`docker secret` or k8s `Secret` volume) rather than environment variables. |
+
+IAM role on the instance grants access to secrets — no API keys, tokens, or `.env` files stored on disk.
+
+**Jira authentication** — pagemenot uses `Authorization: Basic base64(email:token)` by default (Jira API token). For production:
+- Use OAuth 2.0 (3-legged) via a Jira Connect or Forge app — tokens are short-lived, scoped to specific projects, and no user email is exposed in API calls.
+- The Jira API token tied to a personal account inherits that account's full permissions and is long-lived. A Forge app OAuth token is scoped at install time to exactly what the app declares.
+
+**Least-privilege credentials** — create a dedicated service account for pagemenot:
+- **Jira**: service account with only `TRANSITION_ISSUES` + `ADD_COMMENTS` on the incident project. Not a developer account.
+- **PagerDuty**: scoped REST API key with `incidents:write` only. Not a full user API key.
+- **Slack**: bot token with only the scopes pagemenot requests. Review in your Slack app settings.
+
 ---
 
 ## Cloud IAM
