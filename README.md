@@ -207,11 +207,19 @@ kubectl is always included and auto-detects `amd64` / `arm64` at build time.
 
 **Kubernetes credential resolution (in priority order):**
 
-| Environment | How to provide credentials |
-|-------------|---------------------------|
-| Running as a Kubernetes pod | No config needed — in-cluster ServiceAccount token auto-detected |
-| EC2 / ECS / GCP Compute / bare metal | Set `KUBECONFIG_PATH` to a kubeconfig file path (mount from secrets manager) |
-| Local dev | Set `KUBECONFIG_PATH` to your local kubeconfig file |
+| Environment | Steps |
+|-------------|-------|
+| Running as a Kubernetes pod | Nothing — in-cluster ServiceAccount token auto-detected |
+| EC2 / ECS / GCP Compute / bare metal | Mount kubeconfig from secrets manager; set `KUBECONFIG_PATH=/app/kubeconfig` in `.env`; uncomment the kubeconfig volume in `docker-compose.yml` |
+| Local dev (minikube / kind) | Run `scripts/gen-kubeconfig.sh`, then set `KUBECONFIG_PATH=/app/kubeconfig` in `.env` and uncomment the kubeconfig volume in `docker-compose.yml` |
+
+`docker-compose.yml` ships with the kubeconfig volume commented out. Uncomment and set the host path for your environment:
+
+```yaml
+# docker-compose.yml
+volumes:
+  - /path/to/your/kubeconfig:/app/kubeconfig:ro
+```
 
 When `KUBECONFIG_PATH` is unset or points to an invalid path, kubectl falls back to its default discovery chain (`KUBECONFIG` env var → `~/.kube/config` → in-cluster ServiceAccount).
 
