@@ -490,6 +490,12 @@ async def _auto_triage(source: str, payload: dict):
                         "text": f"*Runbook execution:*\n\n{log_text[:2800]}"}},
                 ],
             )
+            if not dry:
+                import asyncio as _asyncio
+                from pagemenot.rag import write_and_index_postmortem
+                _asyncio.create_task(_asyncio.get_running_loop().run_in_executor(
+                    None, write_and_index_postmortem, result, "agent", ""
+                ))
             return
 
         sev = {"critical": "🔴", "high": "🟠", "medium": "🟡"}.get(result.severity, "⚪")

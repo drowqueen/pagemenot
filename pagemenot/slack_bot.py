@@ -198,7 +198,12 @@ def create_slack_app() -> AsyncApp:
                     "text": f"🟢 *Resolved:* {alert_title}\n_Approved by <@{user_id}>, runbook executed successfully._"}}],
             )
             # Write postmortem + re-index for future RAG retrieval
-            asyncio.create_task(_write_and_index_postmortem(entry, user_id, exec_log))
+            from pagemenot.rag import write_and_index_postmortem as _wip
+            from pagemenot.triage import TriageResult as _TR
+            _r = _TR(alert_title=alert_title, service=entry.get("service", ""),
+                     root_cause=entry.get("root_cause", ""), execution_log=exec_log)
+            asyncio.create_task(asyncio.get_running_loop().run_in_executor(
+                None, _wip, _r, user_id, entry.get("jira_url", "")))
             # Resolve Jira/PD tickets (stubs until real creds wired on AWS/GCP)
             from pagemenot.main import _resolve_jira_ticket, _resolve_pagerduty_incident
             asyncio.create_task(_resolve_jira_ticket(entry.get("jira_url", ""), resolved_by=user_id))
@@ -308,44 +313,6 @@ async def _escalate_unresolved(client, channel: str, entry: dict, reason: str):
         )
 
 
-async def _write_and_index_postmortem(entry: dict, resolved_by: str, exec_log: list[str]) -> None:
-    """Write a postmortem markdown file and index it into ChromaDB for future RAG retrieval."""
-    import datetime
-    from pagemenot.rag import index_incident, POSTMORTEMS_DIR
-
-    alert_title = entry.get("alert_title", "incident")
-    service = entry.get("service", "unknown")
-    root_cause = entry.get("root_cause", "")
-    jira_url = entry.get("jira_url", "")
-
-    safe_name = re.sub(r"[^a-z0-9-]", "-", alert_title.lower())[:50].strip("-")
-    ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S")
-    filename = f"{service}_{ts}.md"
-
-    steps_md = "\n".join(f"- `{s}`" for s in entry.get("steps", []))
-    log_md = "\n\n".join(exec_log)
-    content = (
-        f"# Postmortem: {alert_title}\n\n"
-        f"service: {service}\n"
-        f"date: {datetime.date.today()}\n"
-        f"root_cause: {root_cause or 'See analysis below.'}\n"
-        f"resolution: Human-approved runbook execution\n\n"
-        f"## Alert\n{alert_title}\n\n"
-        f"## Root Cause\n{root_cause}\n\n"
-        f"## Steps Executed\n{steps_md}\n\n"
-        f"## Execution Log\n{log_md}\n\n"
-        f"## Resolved By\n<@{resolved_by}>\n\n"
-        + (f"## Jira\n{jira_url}\n" if jira_url else "")
-    )
-
-    path = POSTMORTEMS_DIR / filename
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        path.write_text(content, encoding="utf-8")
-        logger.info(f"Postmortem written: {filename}")
-        index_incident(content, filename, service)
-    except Exception as e:
-        logger.warning(f"Postmortem write/index failed: {e}")
 
 
 async def _do_triage(say, source: str, payload: dict, thread_ts: str | None = None):
