@@ -444,15 +444,92 @@ async def _open_jira_ticket(result) -> Optional[str]:
 
 
 async def _resolve_jira_ticket(jira_url: str, resolution_note: str = "") -> None:
-    """Transition Jira ticket to Done. Stub — wire to real API on AWS/GCP."""
-    # TODO: extract ticket key from jira_url, POST /rest/api/2/issue/{key}/transitions
-    logger.info(f"[STUB] Would resolve Jira ticket: {jira_url}")
+    """Transition Jira ticket to Done."""
+    if not (jira_url and settings.jira_sm_url and settings.jira_sm_email and settings.jira_sm_api_token):
+        return
+    import httpx, re
+    m = re.search(r"/browse/([A-Z]+-\d+)", jira_url)
+    if not m:
+        logger.warning("Jira resolve: could not extract issue key from %s", jira_url)
+        return
+    key = m.group(1)
+    base = settings.jira_sm_url.rstrip("/")
+    credentials = base64.b64encode(
+        f"{settings.jira_sm_email}:{settings.jira_sm_api_token}".encode()
+    ).decode()
+    headers = {
+        "Authorization": f"Basic {credentials}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=settings.pagemenot_http_timeout) as client:
+            r = await client.get(f"{base}/rest/api/2/issue/{key}/transitions", headers=headers)
+            transitions = r.json().get("transitions", [])
+            done_id = next(
+                (t["id"] for t in transitions if t["name"].lower() in ("done", "resolved", "closed")),
+                None,
+            )
+            if not done_id:
+                logger.warning("Jira resolve: no Done/Resolved transition found for %s", key)
+                return
+            body: dict = {"transition": {"id": done_id}}
+            if resolution_note:
+                body["update"] = {"comment": [{"add": {"body": resolution_note}}]}
+            resp = await client.post(f"{base}/rest/api/2/issue/{key}/transitions", headers=headers, json=body)
+        if resp.status_code in (200, 204):
+            logger.info("Jira ticket resolved: %s", key)
+        else:
+            logger.warning("Jira resolve failed: %s %s", resp.status_code, resp.text[:200])
+    except Exception as e:
+        logger.warning("Jira resolve error: %s", e)
 
 
 async def _resolve_pagerduty_incident(pd_url: str, resolved_by: str = "") -> None:
-    """Resolve PagerDuty incident. Stub — wire to real API on AWS/GCP."""
-    # TODO: extract incident id from pd_url, PUT /incidents/{id} status=resolved
-    logger.info(f"[STUB] Would resolve PagerDuty incident: {pd_url}")
+    """Resolve PagerDuty incident."""
+    if not (pd_url and settings.pagerduty_api_key):
+        return
+    import httpx, re
+    m = re.search(r"/incidents/([A-Z0-9]+)", pd_url)
+    if not m:
+        logger.warning("PD resolve: could not extract incident ID from %s", pd_url)
+        return
+    inc_id = m.group(1)
+    from_email = settings.pagerduty_from_email
+    if not from_email:
+        try:
+            async with httpx.AsyncClient(timeout=settings.pagemenot_http_timeout) as client:
+                r = await client.get(
+                    "https://api.pagerduty.com/users?limit=1",
+                    headers={
+                        "Authorization": f"Token token={settings.pagerduty_api_key}",
+                        "Accept": "application/vnd.pagerduty+json;version=2",
+                    },
+                )
+                from_email = r.json()["users"][0]["email"] if r.status_code == 200 else None
+        except Exception:
+            from_email = None
+    if not from_email:
+        logger.warning("PD resolve skipped — no from email")
+        return
+    try:
+        async with httpx.AsyncClient(timeout=settings.pagemenot_http_timeout) as client:
+            resp = await client.put(
+                f"https://api.pagerduty.com/incidents/{inc_id}",
+                headers={
+                    "Authorization": f"Token token={settings.pagerduty_api_key}",
+                    "Accept": "application/vnd.pagerduty+json;version=2",
+                    "Content-Type": "application/json",
+                    "From": from_email,
+                },
+                json={"incident": {"type": "incident_reference", "status": "resolved"}},
+            )
+        if resp.status_code in (200, 201):
+            logger.info("PagerDuty incident resolved: %s", inc_id)
+        else:
+            logger.warning("PD resolve failed: %s %s", resp.status_code, resp.text[:200])
+    except Exception as e:
+        logger.warning("PD resolve error: %s", e)
 
 
 async def _auto_triage(source: str, payload: dict):
