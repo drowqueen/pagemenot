@@ -16,9 +16,9 @@ import chromadb
 
 from pagemenot.config import settings
 
-logger = logging.getLogger("pagemenot.knowledge")
+logger = logging.getLogger("pagemenot.rag")
 
-_REPO_ROOT = Path(__file__).parent.parent.parent
+_REPO_ROOT = Path(__file__).parent.parent
 _KNOWLEDGE_BASE = Path(os.environ.get("KNOWLEDGE_DIR", str(_REPO_ROOT / "knowledge")))
 POSTMORTEMS_DIR = _KNOWLEDGE_BASE / "postmortems"
 RUNBOOKS_DIR = _KNOWLEDGE_BASE / "runbooks"
