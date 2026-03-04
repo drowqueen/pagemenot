@@ -223,6 +223,22 @@ volumes:
 
 When `KUBECONFIG_PATH` is unset or points to an invalid path, kubectl falls back to its default discovery chain (`KUBECONFIG` env var → `~/.kube/config` → in-cluster ServiceAccount).
 
+**Namespace configuration:**
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `PAGEMENOT_EXEC_NAMESPACE` | `default` | Fallback namespace for `{{ namespace }}` in runbooks |
+| `PAGEMENOT_SERVICE_NAMESPACES` | _(empty)_ | Per-service overrides — takes precedence over the fallback |
+
+```bash
+# .env — single namespace
+PAGEMENOT_EXEC_NAMESPACE=production
+
+# .env — per-service namespaces (comma-separated key=value)
+PAGEMENOT_SERVICE_NAMESPACES=payment-service=payments,checkout-service=checkout,api-gateway=platform
+# Services not listed fall back to PAGEMENOT_EXEC_NAMESPACE
+```
+
 **The wizard sets this for you** — it asks which cloud environment you run and writes the right value to `.env`. To set it manually:
 
 ```bash
