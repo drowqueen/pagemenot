@@ -420,7 +420,7 @@ Maps service names to GitHub repos for deploy correlation. Safe to commit — no
 | Datadog | `POST /webhooks/datadog` |
 | New Relic | `POST /webhooks/newrelic` |
 | PagerDuty | `POST /webhooks/pagerduty` |
-| AWS CloudWatch | SNS → `POST /webhooks/generic` (via Lambda or SNS HTTP subscription) |
+| AWS CloudWatch | SNS topic → HTTP subscription → `POST /webhooks/sns` |
 | GCP Alerting | Alerting policy → Webhook notification channel → `POST /webhooks/generic` |
 | Azure Monitor | Action Group → Webhook → `POST /webhooks/generic` |
 | OpsGenie / anything else | `POST /webhooks/generic` |

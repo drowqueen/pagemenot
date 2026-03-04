@@ -180,6 +180,68 @@ async def generic_webhook(
     return {"status": "accepted"}
 
 
+@app.post("/webhooks/sns")
+@limiter.limit(settings.pagemenot_webhook_rate_limit)
+async def sns_webhook(
+    request: Request,
+    x_amz_sns_message_type: Optional[str] = Header(default=None),
+):
+    """AWS SNS endpoint — handles CloudWatch alarm notifications and subscription confirmation."""
+    import httpx
+    body = await request.body()
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    msg_type = x_amz_sns_message_type or payload.get("Type", "")
+
+    if msg_type == "SubscriptionConfirmation":
+        url = payload.get("SubscribeURL")
+        if url:
+            try:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    await client.get(url)
+                logger.info("SNS subscription confirmed")
+            except Exception as e:
+                logger.warning("SNS subscription confirmation failed: %s", e)
+        return {"status": "confirmed"}
+
+    if msg_type == "Notification":
+        import json as _json
+        message_str = payload.get("Message", "{}")
+        try:
+            message = _json.loads(message_str)
+        except Exception:
+            message = {"detail": message_str}
+
+        new_state = message.get("NewStateValue", "")
+        if new_state != "ALARM":
+            return {"status": "ignored", "state": new_state}
+
+        alarm_name = message.get("AlarmName", "CloudWatch Alarm")
+        region = message.get("Region", "")
+        trigger = message.get("Trigger", {})
+        metric = trigger.get("MetricName", "")
+        dims = {d["name"]: d["value"] for d in trigger.get("Dimensions", [])}
+        instance_id = dims.get("InstanceId", "")
+        service = dims.get("AutoScalingGroupName") or instance_id or "aws-ec2"
+
+        triage_payload = {
+            "title": f"{alarm_name}",
+            "message": message.get("NewStateReason", ""),
+            "service": service,
+            "region": region,
+            "metric": metric,
+            "instance_id": instance_id,
+            "source": "cloudwatch",
+        }
+        asyncio.create_task(_auto_triage("sns", triage_payload))
+        return {"status": "accepted"}
+
+    return {"status": "ignored"}
+
+
 @app.post("/webhooks/opsgenie")
 @limiter.limit(settings.pagemenot_webhook_rate_limit)
 async def opsgenie_webhook(
