@@ -843,7 +843,57 @@ IAM role on the instance grants access to secrets — no API keys, tokens, or `.
 
 ## Cloud IAM
 
-Required for `aws ...` runbook exec steps. Credential priority: EC2 instance profile (no config) → `AWS_ROLE_ARN` in `.env` (STS assume-role) → boto3 default chain (env vars / `~/.aws`).
+Required for `aws ...` runbook exec steps. No credentials needed if you don't use AWS runbooks.
+
+### AWS
+
+Create the IAM role pagemenot will use for CloudWatch, Logs, and ECS access:
+
+```bash
+aws iam create-role --role-name pagemenot-exec \
+  --assume-role-policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Principal": { "AWS": "arn:aws:iam::YOUR_ACCOUNT_ID:root" },
+      "Action": "sts:AssumeRole"
+    }]
+  }'
+
+aws iam put-role-policy --role-name pagemenot-exec \
+  --policy-name pagemenot-policy \
+  --policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Action": [
+        "ecs:DescribeServices", "ecs:DescribeTasks",
+        "ecs:DescribeTaskDefinition", "ecs:ListTasks", "ecs:ListServices",
+        "cloudwatch:GetMetricStatistics", "cloudwatch:GetMetricData",
+        "cloudwatch:ListMetrics", "cloudwatch:DescribeAlarms",
+        "logs:GetLogEvents", "logs:FilterLogEvents",
+        "logs:DescribeLogGroups", "logs:DescribeLogStreams",
+        "lambda:GetFunction", "lambda:ListFunctions",
+        "ssm:SendCommand", "ssm:GetCommandInvocation",
+        "ssm:DescribeInstanceInformation",
+        "ec2:DescribeInstances", "ec2:DescribeInstanceStatus"
+      ],
+      "Resource": "*"
+    }]
+  }'
+```
+
+**Wiring the role depends on where pagemenot runs:**
+
+| Deployment | How to grant access | `.env` |
+|------------|--------------------|----|
+| EC2 | Create instance profile with this role, attach to instance | `AWS_ROLE_ARN` optional — boto3 uses instance metadata automatically |
+| ECS | Set role as ECS task role | `AWS_ROLE_ARN` optional — ECS injects credentials |
+| Kubernetes | IRSA (EKS) or Kiam/Karpenter annotation — bind role to service account | `AWS_ROLE_ARN` optional |
+| Docker / bare metal (no cloud identity) | Set `AWS_ROLE_ARN=arn:aws:iam::ACCOUNT:role/pagemenot-exec` + provide base credentials via `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` for a principal that can assume the role | Required |
+| Local dev | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` or `~/.aws/credentials` | `AWS_ROLE_ARN` optional |
+
+The instance profile / task role / IRSA approach is preferred — no static credentials stored anywhere.
 
 ### Azure Monitor alerts
 
@@ -855,47 +905,6 @@ No `.env` vars required. In the Azure portal:
 4. Enable **common alert schema**
 
 Optionally set `WEBHOOK_SECRET_GENERIC` in `.env` — pagemenot will verify the `X-Pagemenot-Signature` header. Azure doesn't natively sign webhook payloads, so leave unset unless you add your own signing proxy.
-
-### AWS
-
-Pagemenot assumes an IAM role to read ECS and CloudWatch. Create the role:
-
-```bash
-aws iam create-role --role-name pagemenot-exec \
-  --assume-role-policy-document '{
-    "Version": "2012-10-17",
-    "Statement": [{
-      "Effect": "Allow",
-      "Principal": { "AWS": "arn:aws:iam::YOUR_ACCOUNT_ID:root" },
-      "Action": "sts:AssumeRole",
-      "Condition": { "StringEquals": { "sts:ExternalId": "pagemenot" } }
-    }]
-  }'
-
-aws iam put-role-policy --role-name pagemenot-exec \
-  --policy-name pagemenot-policy \
-  --policy-document '{
-    "Version": "2012-10-17",
-    "Statement": [
-      {
-        "Effect": "Allow",
-        "Action": [
-          "ecs:DescribeServices", "ecs:DescribeTasks",
-          "ecs:DescribeTaskDefinition", "ecs:ListTasks", "ecs:ListServices",
-          "cloudwatch:GetMetricStatistics", "cloudwatch:GetMetricData",
-          "cloudwatch:ListMetrics", "cloudwatch:DescribeAlarms",
-          "logs:GetLogEvents", "logs:FilterLogEvents",
-          "logs:DescribeLogGroups", "logs:DescribeLogStreams",
-          "ssm:SendCommand", "ssm:GetCommandInvocation",
-          "ssm:DescribeInstanceInformation"
-        ],
-        "Resource": "*"
-      }
-    ]
-  }'
-```
-
-Set `AWS_ROLE_ARN=arn:aws:iam::YOUR_ACCOUNT_ID:role/pagemenot-exec` in `.env`.
 
 ### GCP
 
