@@ -14,11 +14,7 @@ COPY pyproject.toml ./
 # Install third-party dependencies only (cached); pyproject.toml parsed at build time
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --upgrade pip setuptools wheel && \
-    python3 -c "
-import tomllib, subprocess, sys
-deps = tomllib.load(open('pyproject.toml', 'rb'))['project']['dependencies']
-subprocess.check_call([sys.executable, '-m', 'pip', 'install'] + deps)
-"
+    python3 -c "import tomllib,subprocess,sys; deps=tomllib.load(open('pyproject.toml','rb'))['project']['dependencies']; subprocess.check_call([sys.executable,'-m','pip','install']+deps)"
 
 COPY pagemenot/ pagemenot/
 # Install local package only — no cache, no deps; always reflects current source
