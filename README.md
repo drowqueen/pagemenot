@@ -843,17 +843,7 @@ IAM role on the instance grants access to secrets — no API keys, tokens, or `.
 
 ## Cloud IAM
 
-Required for AWS runbook execution (`aws logs`, `aws ecs`, etc.). Without credentials, `aws ...` exec steps fail.
-
-**Credential resolution order for AWS:**
-
-| Method | How | When to use |
-|--------|-----|-------------|
-| EC2 instance profile | Attach `pagemenot-exec` role as instance profile — no config needed | EC2 / ECS deployments |
-| `AWS_ROLE_ARN` | Pagemenot assumes this role via STS — set in `.env` | Cross-account, or when instance profile can't carry enough permissions |
-| Env vars / `~/.aws` | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` — boto3 default chain | Local dev only |
-
-If neither an instance profile nor `AWS_ROLE_ARN` is configured, `aws ...` runbook steps will fail at runtime.
+Required for `aws ...` runbook exec steps. Credential priority: EC2 instance profile (no config) → `AWS_ROLE_ARN` in `.env` (STS assume-role) → boto3 default chain (env vars / `~/.aws`).
 
 ### Azure Monitor alerts
 
