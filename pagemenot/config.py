@@ -98,7 +98,7 @@ class Settings(BaseSettings):
     llm_external_enterprise_confirmed: bool = False  # must be true to use non-Ollama LLMs
     # Cloud execution credentials
     aws_role_arn: Optional[str] = None                    # IAM role pagemenot assumes for AWS ops
-    aws_region: str = "us-east-1"
+    aws_region: Optional[str] = None                      # required if using AWS runbook steps
     google_application_credentials: Optional[str] = None  # path to GCP service account JSON
     azure_tenant_id: Optional[str] = None
     azure_client_id: Optional[str] = None

@@ -139,7 +139,7 @@ OPSGENIE_API_KEY=""
 GITHUB_TOKEN="" GITHUB_ORG=""
 JIRA_SM_URL="" JIRA_SM_EMAIL="" JIRA_SM_API_TOKEN="" JIRA_SM_PROJECT_KEY="" WEBHOOK_SECRET_JIRA=""
 KUBECONFIG_PATH="" PAGEMENOT_EXEC_NAMESPACE="default" PAGEMENOT_SERVICE_NAMESPACES=""
-AWS_ROLE_ARN="" AWS_REGION="us-east-1"
+AWS_ROLE_ARN="" AWS_REGION=""
 GOOGLE_APPLICATION_CREDENTIALS=""
 AZURE_TENANT_ID="" AZURE_CLIENT_ID="" AZURE_CLIENT_SECRET="" AZURE_SUBSCRIPTION_ID=""
 REDIS_URL=""
@@ -209,8 +209,8 @@ if ask_yes "Kubernetes (runbook execution)"; then
 fi
 
 if ask_yes "AWS (SSM / ECS execution)"; then
-    prompt "IAM role ARN" "arn:aws:iam::ACCOUNT:role/pagemenot-exec"; AWS_ROLE_ARN="$_REPLY"
-    prompt "Region" "us-east-1"; AWS_REGION="$_REPLY"
+    prompt "IAM role ARN (blank if using instance profile/IRSA)" ""; AWS_ROLE_ARN="$_REPLY"
+    prompt "AWS region" "eu-west-1"; AWS_REGION="$_REPLY"
 fi
 
 if ask_yes "GCP (Cloud Logging / Monitoring)"; then
@@ -390,8 +390,8 @@ echo "# ── Integrations ─────────────────�
 [[ -n "$KUBECONFIG_PATH"  ]] && echo "KUBECONFIG_PATH=$(q "$KUBECONFIG_PATH")"
 [[ "$PAGEMENOT_EXEC_NAMESPACE" != "default" ]] && echo "PAGEMENOT_EXEC_NAMESPACE=$PAGEMENOT_EXEC_NAMESPACE"
 [[ -n "$PAGEMENOT_SERVICE_NAMESPACES" ]] && echo "PAGEMENOT_SERVICE_NAMESPACES=$(q "$PAGEMENOT_SERVICE_NAMESPACES")"
-[[ -n "$AWS_ROLE_ARN"     ]] && echo "AWS_ROLE_ARN=$(q "$AWS_ROLE_ARN")"
-[[ "$AWS_REGION" != "us-east-1" ]] && echo "AWS_REGION=$AWS_REGION"
+[[ -n "$AWS_ROLE_ARN" ]] && echo "AWS_ROLE_ARN=$(q "$AWS_ROLE_ARN")"
+[[ -n "$AWS_REGION"   ]] && echo "AWS_REGION=$(q "$AWS_REGION")"
 [[ -n "$GOOGLE_APPLICATION_CREDENTIALS" ]] && echo "GOOGLE_APPLICATION_CREDENTIALS=$(q "$GOOGLE_APPLICATION_CREDENTIALS")"
 [[ -n "$AZURE_TENANT_ID"  ]] && echo "AZURE_TENANT_ID=$(q "$AZURE_TENANT_ID")"
 [[ -n "$AZURE_CLIENT_ID"  ]] && echo "AZURE_CLIENT_ID=$(q "$AZURE_CLIENT_ID")"

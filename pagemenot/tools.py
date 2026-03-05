@@ -862,17 +862,44 @@ def dispatch_exec_step(step: str, service: str = "") -> str:
         kubectl_cmd = cmd[len("kubectl "):]
         return exec_kubectl(kubectl_cmd)
     elif cmd.startswith("aws "):
-        parts = shlex.split(cmd)
+        # Strip shell pipes before parsing (shlex runs after to avoid quoted-pipe edge cases)
+        pipe_idx = cmd.find(" | ")
+        cmd_clean = cmd[:pipe_idx].strip() if pipe_idx != -1 else cmd
+        parts = shlex.split(cmd_clean)
         if len(parts) < 3:
             raise ValueError(f"Invalid AWS command: {cmd!r}")
         aws_service, aws_action = parts[1], parts[2].replace("-", "_")
+        # CLI-only flags — no boto3 equivalent
+        _CLI_ONLY = {"region", "output", "query", "profile", "no_sign_request",
+                     "endpoint_url", "color", "no_paginate", "debug"}
+        # CLI flag → boto3 param overrides (where names differ)
+        _REMAP = {"max_items": "limit"}
+        # Integer params for type coercion
+        _INT_PARAMS = {"limit", "maxResults", "maxItems"}
         params: dict = {}
         i = 3
-        while i + 1 < len(parts):
-            if parts[i].startswith("--"):
-                params[parts[i].lstrip("-").replace("-", "_")] = parts[i + 1]
+        while i < len(parts):
+            token = parts[i]
+            if not token.startswith("--"):
+                i += 1
+                continue
+            snake = token.lstrip("-").replace("-", "_")
+            has_value = i + 1 < len(parts) and not parts[i + 1].startswith("--")
+            if snake in _CLI_ONLY:
+                i += 2 if has_value else 1
+                continue
+            snake = _REMAP.get(snake, snake)
+            words = snake.split("_")
+            camel = words[0] + "".join(w.capitalize() for w in words[1:])
+            if has_value:
+                val: object = parts[i + 1]
+                if camel in _INT_PARAMS:
+                    val = int(val)
+                params[camel] = val
                 i += 2
             else:
+                # Boolean flag (no value)
+                params[camel] = True
                 i += 1
         return exec_aws(aws_service, aws_action, params)
     elif cmd.startswith("http://") or cmd.startswith("https://"):
