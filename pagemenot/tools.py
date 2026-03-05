@@ -872,10 +872,10 @@ def dispatch_exec_step(step: str, service: str = "") -> str:
         # CLI-only flags — no boto3 equivalent
         _CLI_ONLY = {"region", "output", "query", "profile", "no_sign_request",
                      "endpoint_url", "color", "no_paginate", "debug"}
-        # CLI flag → boto3 param overrides (where names differ)
+        # CLI flag → boto3 param name overrides (where names differ)
         _REMAP = {"max_items": "limit"}
         # Integer params for type coercion
-        _INT_PARAMS = {"limit", "maxResults", "maxItems"}
+        _INT_PARAMS = {"Limit", "MaxResults", "MaxItems"}
         params: dict = {}
         i = 3
         while i < len(parts):
@@ -889,17 +889,17 @@ def dispatch_exec_step(step: str, service: str = "") -> str:
                 i += 2 if has_value else 1
                 continue
             snake = _REMAP.get(snake, snake)
-            words = snake.split("_")
-            camel = words[0] + "".join(w.capitalize() for w in words[1:])
+            # boto3 uses PascalCase — capitalise every word
+            pascal = "".join(w.capitalize() for w in snake.split("_"))
             if has_value:
                 val: object = parts[i + 1]
-                if camel in _INT_PARAMS:
+                if pascal in _INT_PARAMS:
                     val = int(val)
-                params[camel] = val
+                params[pascal] = val
                 i += 2
             else:
                 # Boolean flag (no value)
-                params[camel] = True
+                params[pascal] = True
                 i += 1
         return exec_aws(aws_service, aws_action, params)
     elif cmd.startswith("http://") or cmd.startswith("https://"):
