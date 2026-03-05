@@ -11,7 +11,7 @@ tags: lambda, errors, serverless
 
 Check last 5 error log events:
 
-<!-- exec: aws logs filter-log-events --log-group-name /aws/lambda/{{ service }} --filter-pattern ERROR --limit 5 -->
+<!-- exec: aws logs filter-log-events --log-group-name /aws/lambda/{{ service }} --filter-pattern ERROR -->
 
 Check current function configuration:
 
