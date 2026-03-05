@@ -737,7 +737,7 @@ def exec_aws(service: str, action: str, params: dict) -> str:
     import botocore.exceptions
 
     if not settings.aws_region:
-        raise RuntimeError("AWS_REGION not configured — set PAGEMENOT_AWS_REGION in .env")
+        raise RuntimeError("AWS_REGION not configured — set AWS_REGION in .env")
 
     if settings.aws_role_arn:
         try:
