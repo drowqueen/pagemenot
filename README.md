@@ -413,19 +413,73 @@ Maps service names to GitHub repos for deploy correlation. Safe to commit — no
 
 ## Webhook sources
 
-| Source | Endpoint |
-|--------|----------|
-| Grafana | `POST /webhooks/grafana` |
-| Alertmanager | `POST /webhooks/alertmanager` |
-| Datadog | `POST /webhooks/datadog` |
-| New Relic | `POST /webhooks/newrelic` |
-| PagerDuty | `POST /webhooks/pagerduty` |
-| AWS CloudWatch | SNS topic → HTTP subscription → `POST /webhooks/sns` |
-| GCP Alerting | Alerting policy → Webhook notification channel → `POST /webhooks/generic` |
-| Azure Monitor | Action Group → Webhook → `POST /webhooks/generic` |
-| OpsGenie / anything else | `POST /webhooks/generic` |
+| Source | Endpoint | Recovery (auto-close Jira / resolve PD) |
+|--------|----------|------------------------------------------|
+| Grafana | `POST /webhooks/grafana` | ✓ |
+| Alertmanager | `POST /webhooks/alertmanager` | ✓ |
+| Datadog | `POST /webhooks/datadog` | ✓ |
+| New Relic | `POST /webhooks/newrelic` | ✓ |
+| PagerDuty | `POST /webhooks/pagerduty` | ✓ |
+| AWS CloudWatch | `POST /webhooks/sns` | ✓ (SNS `OK` state) |
+| GCP Cloud Monitoring | `POST /webhooks/generic` | — |
+| Azure Monitor | `POST /webhooks/generic` | — |
+| OpsGenie | `POST /webhooks/opsgenie` | ✓ |
+| Anything else | `POST /webhooks/generic` | — |
 
 Set `WEBHOOK_SECRET_<SOURCE>` to enable HMAC verification per source. Unset = warn and accept.
+
+### AWS CloudWatch
+
+Pagemenot receives alarms via SNS. The endpoint requires HTTPS — use API Gateway, an ALB, or nginx+TLS as a terminator in front of the HTTP port.
+
+```
+CloudWatch Alarm → SNS Topic → HTTPS subscription → POST /webhooks/sns
+```
+
+**Required:**
+1. SNS topic in the same region as your alarms
+2. HTTPS endpoint reachable from SNS (API Gateway HTTP API recommended — free tier covers typical alert volume)
+3. Subscribe the endpoint to the topic — pagemenot auto-confirms the `SubscriptionConfirmation` POST
+
+**Severity** — embed in `AlarmDescription`:
+```
+severity: critical — CPU above 95% for 5 minutes
+```
+Values: `critical`, `high` (default if omitted), `medium`, `low`
+
+**Recovery** — add the same SNS topic to `--ok-actions` on your alarm. When CloudWatch returns to `OK`, pagemenot closes the Jira ticket and resolves the PD incident.
+
+**Alarm → SNS topic (example):**
+```bash
+aws cloudwatch put-metric-alarm \
+  --alarm-name "my-service-cpu-high" \
+  --alarm-description "severity: high — CPU above 90%" \
+  --alarm-actions  arn:aws:sns:REGION:ACCOUNT:pagemenot-alerts \
+  --ok-actions     arn:aws:sns:REGION:ACCOUNT:pagemenot-alerts \
+  ... # your metric, threshold, dimensions
+```
+
+### GCP Cloud Monitoring
+
+1. **Monitoring → Alerting → Notification Channels** → Add channel → **Webhook**
+2. URL: `https://your-pagemenot-url/webhooks/generic`
+3. (Optional) append `?token=YOUR_SECRET` and set `WEBHOOK_SECRET_GENERIC=YOUR_SECRET` in `.env`
+4. Add the channel to any existing alerting policy under **Notifications**
+
+GCP sends a JSON payload. Pagemenot extracts `incident.condition_name` as the alert title and `incident.resource.labels` for the service name.
+
+Recovery events (`incident.state = "closed"`) are received but do not yet auto-close Jira/PD — the agent posts the recovery message to Slack only.
+
+### Azure Monitor
+
+1. **Monitor → Alerts → Action Groups** → create or edit a group
+2. Add action: **Webhook**
+3. URL: `https://your-pagemenot-url/webhooks/generic`
+4. Enable **common alert schema**
+
+Azure Monitor does not natively sign webhook payloads. Leave `WEBHOOK_SECRET_GENERIC` unset, or add an API Management / Logic App proxy that adds an HMAC header.
+
+Recovery alerts (`data.status = "Resolved"`) are received but do not yet auto-close Jira/PD — recovery message posted to Slack only.
 
 ---
 
