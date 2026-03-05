@@ -31,7 +31,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger("pagemenot")
 
-limiter = Limiter(key_func=get_remote_address, default_limits=[settings.pagemenot_webhook_rate_limit])
+limiter = Limiter(
+    key_func=get_remote_address, default_limits=[settings.pagemenot_webhook_rate_limit]
+)
 
 
 def _verify_hmac(secret: str, body: bytes, sig_header: str, prefix: str = "") -> bool:
@@ -80,7 +82,9 @@ async def lifespan(app: FastAPI):
     logger.info(f"   LLM: {settings.llm_provider}/{settings.llm_model}")
     logger.info(f"   Integrations: {settings.enabled_integrations or ['none — add via .env']}")
     logger.info(f"   Slack channel: #{settings.pagemenot_channel}")
-    logger.info(f"   Exec: {'dry-run' if settings.pagemenot_exec_dry_run else 'enabled' if settings.pagemenot_exec_enabled else 'disabled'}")
+    logger.info(
+        f"   Exec: {'dry-run' if settings.pagemenot_exec_dry_run else 'enabled' if settings.pagemenot_exec_enabled else 'disabled'}"
+    )
     if settings.llm_provider != "ollama":
         if not settings.llm_external_enterprise_confirmed:
             raise RuntimeError(
@@ -133,6 +137,7 @@ async def health():
 # Teams point their PagerDuty/Grafana/Alertmanager webhooks
 # here. Pagemenot auto-detects the format and triages.
 
+
 @app.post("/webhooks/pagerduty")
 @limiter.limit(settings.pagemenot_webhook_rate_limit)
 async def pagerduty_webhook(
@@ -140,7 +145,9 @@ async def pagerduty_webhook(
     x_pagerduty_signature: Optional[str] = Header(default=None),
 ):
     body = await request.body()
-    await _check_sig("pagerduty", settings.webhook_secret_pagerduty, body, x_pagerduty_signature, prefix="v1=")
+    await _check_sig(
+        "pagerduty", settings.webhook_secret_pagerduty, body, x_pagerduty_signature, prefix="v1="
+    )
     payload = await request.json()
     for msg in payload.get("messages", []):
         # PagerDuty v2 webhook event type is "incident.triggered"
@@ -171,7 +178,9 @@ async def alertmanager_webhook(
     x_alertmanager_token: Optional[str] = Header(default=None),
 ):
     body = await request.body()
-    await _check_sig("alertmanager", settings.webhook_secret_alertmanager, body, x_alertmanager_token)
+    await _check_sig(
+        "alertmanager", settings.webhook_secret_alertmanager, body, x_alertmanager_token
+    )
     payload = await request.json()
     for alert in payload.get("alerts", []):
         if alert.get("status") == "firing":
@@ -187,7 +196,9 @@ async def generic_webhook(
 ):
     """Catch-all for any alert source. Just POST JSON with a 'title' or 'message'."""
     body = await request.body()
-    await _check_sig("generic", settings.webhook_secret_generic, body, x_pagemenot_signature, prefix="sha256=")
+    await _check_sig(
+        "generic", settings.webhook_secret_generic, body, x_pagemenot_signature, prefix="sha256="
+    )
     payload = await request.json()
     asyncio.create_task(_auto_triage("generic", payload))
     return {"status": "accepted"}
@@ -201,7 +212,7 @@ async def sns_webhook(
 ):
     """AWS SNS endpoint — handles CloudWatch alarm notifications and subscription confirmation."""
     import httpx
-    body = await request.body()
+
     try:
         payload = await request.json()
     except Exception:
@@ -222,6 +233,7 @@ async def sns_webhook(
 
     if msg_type == "Notification":
         import json as _json
+
         message_str = payload.get("Message", "{}")
         try:
             message = _json.loads(message_str)
@@ -235,22 +247,35 @@ async def sns_webhook(
         metric = trigger.get("MetricName", "")
         dims = {d["name"]: d["value"] for d in trigger.get("Dimensions", [])}
         instance_id = dims.get("InstanceId", "")
-        service = (dims.get("ServiceEndpoint") or dims.get("FunctionName")
-                   or dims.get("AutoScalingGroupName") or instance_id or "aws-ec2")
+        service = (
+            dims.get("ServiceEndpoint")
+            or dims.get("FunctionName")
+            or dims.get("AutoScalingGroupName")
+            or instance_id
+            or "aws-ec2"
+        )
 
         # Extract severity from alarm description (e.g. "severity: critical")
         import re as _re
+
         alarm_desc = message.get("AlarmDescription", "")
-        _sev_match = _re.search(r'\bseverity\s*:\s*(\w+)', alarm_desc, _re.IGNORECASE)
+        _sev_match = _re.search(r"\bseverity\s*:\s*(\w+)", alarm_desc, _re.IGNORECASE)
         alarm_severity = _sev_match.group(1).lower() if _sev_match else "high"
 
         if new_state == "OK":
             entry = _alarm_incidents.pop(alarm_name, None)
             if entry:
-                asyncio.create_task(_resolve_jira_ticket(entry["jira_url"], resolution_note="CloudWatch alarm recovered"))
-                asyncio.create_task(_resolve_pagerduty_incident(entry["pd_url"], resolved_by="cloudwatch"))
+                asyncio.create_task(
+                    _resolve_jira_ticket(
+                        entry["jira_url"], resolution_note="CloudWatch alarm recovered"
+                    )
+                )
+                asyncio.create_task(
+                    _resolve_pagerduty_incident(entry["pd_url"], resolved_by="cloudwatch")
+                )
                 try:
                     from pagemenot.slack_bot import get_client as _gc
+
                     _client = _gc()
                     await _client.chat_postMessage(
                         channel=entry["channel"],
@@ -330,6 +355,7 @@ async def newrelic_webhook(
 async def _post_resolved_to_slack(title: str, source: str, resolved_by: str = ""):
     """Post a resolved banner to the alerts channel when a human closes PD/Jira."""
     from pagemenot.slack_bot import _client
+
     if not _client:
         return
     detail = f"Closed by {resolved_by} on {source}." if resolved_by else f"Closed on {source}."
@@ -337,8 +363,15 @@ async def _post_resolved_to_slack(title: str, source: str, resolved_by: str = ""
         await _client.chat_postMessage(
             channel=settings.pagemenot_channel,
             text=f"🟢 *Resolved ({source}):* {title}",
-            blocks=[{"type": "section", "text": {"type": "mrkdwn",
-                "text": f"🟢 *Resolved ({source}):* {title}\n_{detail}_"}}],
+            blocks=[
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"🟢 *Resolved ({source}):* {title}\n_{detail}_",
+                    },
+                }
+            ],
         )
     except Exception as e:
         logger.warning(f"Failed to post resolve notification to Slack: {e}")
@@ -352,7 +385,9 @@ async def pagerduty_resolve_webhook(
 ):
     """Receives PagerDuty incident.resolve events and posts resolved banner to Slack."""
     body = await request.body()
-    await _check_sig("pagerduty", settings.webhook_secret_pagerduty, body, x_pagerduty_signature, prefix="v1=")
+    await _check_sig(
+        "pagerduty", settings.webhook_secret_pagerduty, body, x_pagerduty_signature, prefix="v1="
+    )
     payload = await request.json()
     for msg in payload.get("messages", []):
         event = msg.get("event", "")
@@ -462,7 +497,9 @@ async def _page_pagerduty(result) -> Optional[str]:
             url = inc["html_url"]
             logger.info("PagerDuty incident created: %s", url)
             return url
-        logger.warning("PagerDuty incident creation failed: %s %s", resp.status_code, resp.text[:200])
+        logger.warning(
+            "PagerDuty incident creation failed: %s %s", resp.status_code, resp.text[:200]
+        )
     except Exception as e:
         logger.warning("PagerDuty escalation error: %s", e)
     return None
@@ -470,8 +507,12 @@ async def _page_pagerduty(result) -> Optional[str]:
 
 async def _open_jira_ticket(result) -> Optional[str]:
     """Create a Jira SM service request. Returns the browser URL or None on failure."""
-    if not (settings.jira_sm_url and settings.jira_sm_email and
-            settings.jira_sm_api_token and settings.jira_sm_project_key):
+    if not (
+        settings.jira_sm_url
+        and settings.jira_sm_email
+        and settings.jira_sm_api_token
+        and settings.jira_sm_project_key
+    ):
         return None
     import httpx
 
@@ -498,7 +539,9 @@ async def _open_jira_ticket(result) -> Optional[str]:
                         break
 
             if not sd_id:
-                logger.warning("Jira SM: service desk not found for project %s", settings.jira_sm_project_key)
+                logger.warning(
+                    "Jira SM: service desk not found for project %s", settings.jira_sm_project_key
+                )
                 return None
 
             # Resolve request type ID
@@ -548,9 +591,13 @@ async def _open_jira_ticket(result) -> Optional[str]:
 
 async def _resolve_jira_ticket(jira_url: str, resolution_note: str = "") -> None:
     """Transition Jira ticket to Done."""
-    if not (jira_url and settings.jira_sm_url and settings.jira_sm_email and settings.jira_sm_api_token):
+    if not (
+        jira_url and settings.jira_sm_url and settings.jira_sm_email and settings.jira_sm_api_token
+    ):
         return
-    import httpx, re
+    import httpx
+    import re
+
     m = re.search(r"/browse/([A-Z]+-\d+)", jira_url)
     if not m:
         logger.warning("Jira resolve: could not extract issue key from %s", jira_url)
@@ -571,8 +618,11 @@ async def _resolve_jira_ticket(jira_url: str, resolution_note: str = "") -> None
             transitions = r.json().get("transitions", [])
             _done_keywords = ("done", "resolved", "closed", "complete", "fixed")
             done_id = next(
-                (t["id"] for t in transitions
-                 if any(kw in t["name"].lower() for kw in _done_keywords)),
+                (
+                    t["id"]
+                    for t in transitions
+                    if any(kw in t["name"].lower() for kw in _done_keywords)
+                ),
                 None,
             )
             if not done_id:
@@ -581,7 +631,9 @@ async def _resolve_jira_ticket(jira_url: str, resolution_note: str = "") -> None
             body: dict = {"transition": {"id": done_id}}
             if resolution_note:
                 body["update"] = {"comment": [{"add": {"body": resolution_note}}]}
-            resp = await client.post(f"{base}/rest/api/2/issue/{key}/transitions", headers=headers, json=body)
+            resp = await client.post(
+                f"{base}/rest/api/2/issue/{key}/transitions", headers=headers, json=body
+            )
         if resp.status_code in (200, 204):
             logger.info("Jira ticket resolved: %s", key)
         else:
@@ -594,7 +646,9 @@ async def _resolve_pagerduty_incident(pd_url: str, resolved_by: str = "") -> Non
     """Resolve PagerDuty incident."""
     if not (pd_url and settings.pagerduty_api_key):
         return
-    import httpx, re
+    import httpx
+    import re
+
     m = re.search(r"/incidents/([A-Z0-9]+)", pd_url)
     if not m:
         logger.warning("PD resolve: could not extract incident ID from %s", pd_url)
@@ -664,20 +718,35 @@ async def _auto_triage(source: str, payload: dict):
             dry = settings.pagemenot_exec_dry_run
             icon = "🔵" if dry else "🟢"
             label = "Dry-run resolved" if dry else "Auto-resolved"
-            log_text = "\n\n".join(result.execution_log[:10]) if result.execution_log else "No steps logged."
+            log_text = (
+                "\n\n".join(result.execution_log[:10])
+                if result.execution_log
+                else "No steps logged."
+            )
             await client.chat_postMessage(
                 channel=channel,
                 text=f"{icon} *{label}:* {result.alert_title}",
                 blocks=[
-                    {"type": "section", "text": {"type": "mrkdwn",
-                        "text": f"{icon} *{label}:* {result.alert_title}\n"
-                                f"_Service: {result.service} | ⏱️ {result.duration_seconds:.0f}s_"}},
-                    {"type": "section", "text": {"type": "mrkdwn",
-                        "text": f"*Runbook execution:*\n\n{log_text[:2800]}"}},
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"{icon} *{label}:* {result.alert_title}\n"
+                            f"_Service: {result.service} | ⏱️ {result.duration_seconds:.0f}s_",
+                        },
+                    },
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"*Runbook execution:*\n\n{log_text[:2800]}",
+                        },
+                    },
                 ],
             )
             # Always index, even in dry-run — crew analysis is useful for RAG
             from pagemenot.rag import write_and_index_postmortem as _wip
+
             asyncio.get_running_loop().run_in_executor(None, _wip, result, "agent", "")
             return
 
@@ -711,8 +780,17 @@ async def _auto_triage(source: str, payload: dict):
         )
 
         if result.raw_output:
-            clean = result.raw_output.replace("```sh\n", "").replace("```bash\n", "").replace("```\n", "").replace("```", "")
-            for i, chunk in enumerate(_chunk_text(clean, settings.pagemenot_slack_chunk_size)[:settings.pagemenot_slack_max_chunks]):
+            clean = (
+                result.raw_output.replace("```sh\n", "")
+                .replace("```bash\n", "")
+                .replace("```\n", "")
+                .replace("```", "")
+            )
+            for i, chunk in enumerate(
+                _chunk_text(clean, settings.pagemenot_slack_chunk_size)[
+                    : settings.pagemenot_slack_max_chunks
+                ]
+            ):
                 await client.chat_postMessage(
                     channel=channel,
                     thread_ts=thread,
@@ -726,8 +804,15 @@ async def _auto_triage(source: str, payload: dict):
                 channel=channel,
                 thread_ts=thread,
                 text="Runbook execution",
-                blocks=[{"type": "section", "text": {"type": "mrkdwn",
-                    "text": f"*Runbook execution:*\n\n{exec_text[:2800]}"}}],
+                blocks=[
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"*Runbook execution:*\n\n{exec_text[:2800]}",
+                        },
+                    }
+                ],
             )
 
         # Open Jira SM ticket + page PagerDuty first — so urls are available for the approval entry
@@ -766,73 +851,132 @@ async def _auto_triage(source: str, payload: dict):
 
         # Approval buttons — after Jira/PD so urls are stored in entry
         _approval_sev_min = _SEV.get(settings.pagemenot_approval_min_severity, 2)
-        if result.pending_exec_steps and settings.pagemenot_approval_gate and sev_rank >= _approval_sev_min:
+        if (
+            result.pending_exec_steps
+            and settings.pagemenot_approval_gate
+            and sev_rank >= _approval_sev_min
+        ):
             from pagemenot.slack_bot import _approval_store
             import uuid as _uuid
+
             approval_id = str(_uuid.uuid4())[:8]
-            await _approval_store.set(approval_id, {
-                "steps": result.pending_exec_steps,
-                "service": result.service or "",
-                "alert_title": result.alert_title or "",
-                "severity": result.severity or "high",
-                "root_cause": result.root_cause or "",
-                "jira_url": jira_url if isinstance(jira_url, str) else "",
-                "pd_url": pd_url if isinstance(pd_url, str) else "",
-            })
+            await _approval_store.set(
+                approval_id,
+                {
+                    "steps": result.pending_exec_steps,
+                    "service": result.service or "",
+                    "alert_title": result.alert_title or "",
+                    "severity": result.severity or "high",
+                    "root_cause": result.root_cause or "",
+                    "jira_url": jira_url if isinstance(jira_url, str) else "",
+                    "pd_url": pd_url if isinstance(pd_url, str) else "",
+                },
+            )
             steps_text = "\n".join(f"• `{s[:100]}`" for s in result.pending_exec_steps[:5])
             await client.chat_postMessage(
                 channel=channel,
                 text=f"⚠️ Approval required: {result.alert_title}",
                 blocks=[
-                    {"type": "section", "text": {"type": "mrkdwn",
-                        "text": f"*⚠️ Approval required:* {result.alert_title}\n{steps_text}"}},
-                    {"type": "actions", "elements": [
-                        {"type": "button", "text": {"type": "plain_text", "text": "✅ Approve & Execute"},
-                         "action_id": "approve_action", "value": approval_id, "style": "primary"},
-                        {"type": "button", "text": {"type": "plain_text", "text": "❌ Reject"},
-                         "action_id": "reject_action", "value": approval_id, "style": "danger"},
-                    ]},
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"*⚠️ Approval required:* {result.alert_title}\n{steps_text}",
+                        },
+                    },
+                    {
+                        "type": "actions",
+                        "elements": [
+                            {
+                                "type": "button",
+                                "text": {"type": "plain_text", "text": "✅ Approve & Execute"},
+                                "action_id": "approve_action",
+                                "value": approval_id,
+                                "style": "primary",
+                            },
+                            {
+                                "type": "button",
+                                "text": {"type": "plain_text", "text": "❌ Reject"},
+                                "action_id": "reject_action",
+                                "value": approval_id,
+                                "style": "danger",
+                            },
+                        ],
+                    },
                 ],
             )
 
         # Acknowledge button — no runbook matched but LLM flagged manual steps; user confirms manual fix
-        if (not result.pending_exec_steps and result.needs_approval
-                and settings.pagemenot_approval_gate and sev_rank >= _approval_sev_min):
+        if (
+            not result.pending_exec_steps
+            and result.needs_approval
+            and settings.pagemenot_approval_gate
+            and sev_rank >= _approval_sev_min
+        ):
             from pagemenot.slack_bot import _approval_store
             import uuid as _uuid
+
             ack_id = str(_uuid.uuid4())[:8]
-            await _approval_store.set(ack_id, {
-                "steps": [],
-                "service": result.service or "",
-                "alert_title": result.alert_title or "",
-                "severity": result.severity or "high",
-                "root_cause": result.root_cause or "",
-                "jira_url": jira_url if isinstance(jira_url, str) else "",
-                "pd_url": pd_url if isinstance(pd_url, str) else "",
-            })
+            await _approval_store.set(
+                ack_id,
+                {
+                    "steps": [],
+                    "service": result.service or "",
+                    "alert_title": result.alert_title or "",
+                    "severity": result.severity or "high",
+                    "root_cause": result.root_cause or "",
+                    "jira_url": jira_url if isinstance(jira_url, str) else "",
+                    "pd_url": pd_url if isinstance(pd_url, str) else "",
+                },
+            )
             manual_text = "\n".join(f"• {s[:120]}" for s in result.needs_approval[:5])
             await client.chat_postMessage(
                 channel=channel,
                 text=f"⚠️ Manual steps required: {result.alert_title}",
                 blocks=[
-                    {"type": "section", "text": {"type": "mrkdwn",
-                        "text": f"*⚠️ No runbook matched.* Suggested manual steps:\n{manual_text}"}},
-                    {"type": "actions", "elements": [
-                        {"type": "button", "text": {"type": "plain_text", "text": "✅ Done — Mark Resolved"},
-                         "action_id": "acknowledge_action", "value": ack_id, "style": "primary"},
-                    ]},
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"*⚠️ No runbook matched.* Suggested manual steps:\n{manual_text}",
+                        },
+                    },
+                    {
+                        "type": "actions",
+                        "elements": [
+                            {
+                                "type": "button",
+                                "text": {"type": "plain_text", "text": "✅ Done — Mark Resolved"},
+                                "action_id": "acknowledge_action",
+                                "value": ack_id,
+                                "style": "primary",
+                            },
+                        ],
+                    },
                 ],
             )
 
         # Always index triage result for RAG — unless pending human approval (written on approve)
-        _needs_human = bool(result.pending_exec_steps and settings.pagemenot_approval_gate and sev_rank >= _SEV.get(settings.pagemenot_approval_min_severity, 2))
+        _needs_human = bool(
+            result.pending_exec_steps
+            and settings.pagemenot_approval_gate
+            and sev_rank >= _SEV.get(settings.pagemenot_approval_min_severity, 2)
+        )
         if not _needs_human:
             from pagemenot.rag import write_and_index_postmortem as _wip
-            asyncio.get_event_loop().run_in_executor(None, _wip, result, "agent", jira_url if isinstance(jira_url, str) else "")
+
+            asyncio.get_event_loop().run_in_executor(
+                None, _wip, result, "agent", jira_url if isinstance(jira_url, str) else ""
+            )
 
         # Escalate to on-call channel
         _pd_min_rank = _SEV.get(settings.pagemenot_pd_min_severity, 2)
-        if not settings.pagemenot_exec_dry_run and not result.resolved_automatically and sev_rank >= _pd_min_rank and settings.pagemenot_oncall_channel:
+        if (
+            not settings.pagemenot_exec_dry_run
+            and not result.resolved_automatically
+            and sev_rank >= _pd_min_rank
+            and settings.pagemenot_oncall_channel
+        ):
             pd_line = f"\n📟 PagerDuty: {pd_url}" if isinstance(pd_url, str) else ""
             jira_line = f"\n🎫 Jira: {jira_url}" if isinstance(jira_url, str) else ""
             await client.chat_postMessage(

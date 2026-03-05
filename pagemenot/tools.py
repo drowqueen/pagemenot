@@ -23,7 +23,7 @@ from pagemenot.config import settings
 
 logger = logging.getLogger("pagemenot.tools")
 
-_SAFE_NAME_RE = re.compile(r'^[a-zA-Z0-9_.\-]+$')
+_SAFE_NAME_RE = re.compile(r"^[a-zA-Z0-9_.\-]+$")
 
 
 def _safe_name(name: str) -> str:
@@ -37,6 +37,7 @@ def _safe_name(name: str) -> str:
 # ══════════════════════════════════════════════════════════════
 # TOOL REGISTRY — auto-populates based on .env
 # ══════════════════════════════════════════════════════════════
+
 
 def get_available_tools() -> dict[str, list]:
     """Discover and return tools grouped by agent role.
@@ -92,18 +93,26 @@ def get_available_tools() -> dict[str, list]:
     remediator_tools.append(request_human_approval)
 
     import os as _os
+
     _in_cluster = bool(_os.environ.get("KUBERNETES_SERVICE_HOST"))
     _kubeconfig_ok = settings.kubeconfig_path and _os.path.isfile(settings.kubeconfig_path)
     if _in_cluster or _kubeconfig_ok:
         remediator_tools.append(kubectl_rollback)
-        _k8s_mode = "in-cluster service account" if _in_cluster else f"kubeconfig={settings.kubeconfig_path}"
+        _k8s_mode = (
+            "in-cluster service account"
+            if _in_cluster
+            else f"kubeconfig={settings.kubeconfig_path}"
+        )
         logger.info(f"✅ Kubernetes connected ({_k8s_mode})")
     elif settings.kubeconfig_path:
-        logger.warning(f"KUBECONFIG_PATH={settings.kubeconfig_path!r} is not a valid file — kubectl disabled. "
-                       "Set KUBECONFIG_PATH to a kubeconfig file, or run pagemenot as a pod with a ServiceAccount.")
+        logger.warning(
+            f"KUBECONFIG_PATH={settings.kubeconfig_path!r} is not a valid file — kubectl disabled. "
+            "Set KUBECONFIG_PATH to a kubeconfig file, or run pagemenot as a pod with a ServiceAccount."
+        )
 
     unconfigured = [
-        v for v, s in [
+        v
+        for v, s in [
             ("PROMETHEUS_URL", settings.prometheus_url),
             ("DATADOG_API_KEY", settings.datadog_api_key),
             ("NEWRELIC_API_KEY", settings.newrelic_api_key),
@@ -112,7 +121,8 @@ def get_available_tools() -> dict[str, list]:
             ("PAGERDUTY_API_KEY", settings.pagerduty_api_key),
             ("OPSGENIE_API_KEY", settings.opsgenie_api_key),
             ("GITHUB_TOKEN", settings.github_token),
-        ] if not s
+        ]
+        if not s
     ]
     if unconfigured:
         logger.info(f"💡 Not configured (all optional): {', '.join(unconfigured)}")
@@ -127,6 +137,7 @@ def get_available_tools() -> dict[str, list]:
 # ══════════════════════════════════════════════════════════════
 # MONITOR TOOLS
 # ══════════════════════════════════════════════════════════════
+
 
 @tool("Query Prometheus Metrics")
 def query_prometheus(service_name: str) -> str:
@@ -148,7 +159,7 @@ def query_prometheus(service_name: str) -> str:
             ),
             "request_rate": f'sum(rate(http_requests_total{{service="{service_name}"}}[5m]))',
             "latency_p99": (
-                f'histogram_quantile(0.99, '
+                f"histogram_quantile(0.99, "
                 f'sum(rate(http_request_duration_seconds_bucket{{service="{service_name}"}}[5m])) by (le))'
             ),
             "cpu_percent": f'avg(rate(container_cpu_usage_seconds_total{{pod=~"{service_name}.*"}}[5m])) * 100',
@@ -231,7 +242,7 @@ def search_logs_loki(query: str) -> str:
         except ValueError as e:
             return f"Invalid service name: {e}"
         # keywords: strip quotes to prevent LogQL injection
-        keywords = keywords.replace('"', '').replace("'", '')[:100]
+        keywords = keywords.replace('"', "").replace("'", "")[:100]
         logql = f'{{app="{service}"}} |= "{keywords}"'
 
         end = datetime.now(timezone.utc)
@@ -259,7 +270,9 @@ def search_logs_loki(query: str) -> str:
         if not streams:
             return f"No log entries found for query: {logql}"
 
-        _warn_err = re.compile(r'\b(warn|warning|error|err|fatal|critical|exception|traceback|panic)\b', re.IGNORECASE)
+        _warn_err = re.compile(
+            r"\b(warn|warning|error|err|fatal|critical|exception|traceback|panic)\b", re.IGNORECASE
+        )
         lines = []
         for stream in streams[:5]:
             for ts, line in stream.get("values", [])[:50]:
@@ -351,7 +364,12 @@ def get_opsgenie_alert(alert_id_or_service: str) -> str:
             resp = client.get(
                 "https://api.opsgenie.com/v2/alerts",
                 headers={"Authorization": f"GenieKey {settings.opsgenie_api_key}"},
-                params={"query": alert_id_or_service, "limit": 5, "sort": "createdAt", "order": "desc"},
+                params={
+                    "query": alert_id_or_service,
+                    "limit": 5,
+                    "sort": "createdAt",
+                    "order": "desc",
+                },
             )
             alerts = resp.json().get("data", [])
             if not alerts:
@@ -359,7 +377,9 @@ def get_opsgenie_alert(alert_id_or_service: str) -> str:
 
             lines = []
             for a in alerts:
-                lines.append(f"  [{a['id'][:8]}] {a.get('message', '?')} — {a.get('status', '?')} ({a.get('priority', '?')})")
+                lines.append(
+                    f"  [{a['id'][:8]}] {a.get('message', '?')} — {a.get('status', '?')} ({a.get('priority', '?')})"
+                )
             return "Recent OpsGenie alerts:\n" + "\n".join(lines)
 
     except Exception as e:
@@ -381,10 +401,14 @@ def query_datadog_metrics(service_name: str) -> str:
         }
 
         # Filter None values — httpx would send "None" as a string otherwise
-        headers = {k: v for k, v in {
-            "DD-API-KEY": settings.datadog_api_key,
-            "DD-APPLICATION-KEY": settings.datadog_app_key,
-        }.items() if v is not None}
+        headers = {
+            k: v
+            for k, v in {
+                "DD-API-KEY": settings.datadog_api_key,
+                "DD-APPLICATION-KEY": settings.datadog_app_key,
+            }.items()
+            if v is not None
+        }
         base = f"https://api.{settings.datadog_site}"
 
         results = []
@@ -467,7 +491,7 @@ def query_newrelic_metrics(service_name: str) -> str:
                 return f"No New Relic data for '{service_name}'."
 
             r = results[0]
-            avg = r.get('avg_duration')
+            avg = r.get("avg_duration")
             avg_str = f"{avg:.3f}s" if isinstance(avg, (int, float)) else "N/A"
             return (
                 f"New Relic metrics for '{service_name}' (last 30min):\n"
@@ -483,6 +507,7 @@ def query_newrelic_metrics(service_name: str) -> str:
 # ══════════════════════════════════════════════════════════════
 # DIAGNOSER TOOLS
 # ══════════════════════════════════════════════════════════════
+
 
 @tool("Get Recent Deploys from GitHub")
 def get_recent_deploys(repo_or_service: str) -> str:
@@ -558,8 +583,7 @@ def get_pr_diff(repo_and_pr_number: str) -> str:
             for f in files[:10]:
                 patch_preview = (f.get("patch", "")[:300] + "...") if f.get("patch") else "binary"
                 lines.append(
-                    f"  {f['filename']} (+{f['additions']} -{f['deletions']})\n"
-                    f"    {patch_preview}"
+                    f"  {f['filename']} (+{f['additions']} -{f['deletions']})\n    {patch_preview}"
                 )
             return f"PR #{pr_num} changes:\n" + "\n".join(lines)
 
@@ -570,6 +594,7 @@ def get_pr_diff(repo_and_pr_number: str) -> str:
 def _chroma_client():
     import chromadb
     import os
+
     os.makedirs(settings.chroma_path, exist_ok=True)
     return chromadb.PersistentClient(path=settings.chroma_path)
 
@@ -582,11 +607,15 @@ def search_past_incidents(query: str) -> str:
         client = _chroma_client()
 
         try:
-            collection = client.get_or_create_collection(settings.chroma_incidents_collection, metadata={"hnsw:space": "cosine"})
+            collection = client.get_or_create_collection(
+                settings.chroma_incidents_collection, metadata={"hnsw:space": "cosine"}
+            )
         except Exception:
             return "No past incidents in knowledge base yet. Pagemenot will learn as you use it."
 
-        results = collection.query(query_texts=[query], n_results=settings.pagemenot_rag_incidents_n_results)
+        results = collection.query(
+            query_texts=[query], n_results=settings.pagemenot_rag_incidents_n_results
+        )
 
         if not results["documents"] or not results["documents"][0]:
             return "No similar past incidents found."
@@ -599,7 +628,7 @@ def search_past_incidents(query: str) -> str:
                 f"    Resolution: {meta.get('resolution', 'Unknown')}\n"
                 f"    Excerpt: {doc[:150]}..."
             )
-        return f"Similar past incidents:\n" + "\n".join(lines)
+        return "Similar past incidents:\n" + "\n".join(lines)
 
     except Exception as e:
         return f"Incident search failed: {e}"
@@ -609,6 +638,7 @@ def search_past_incidents(query: str) -> str:
 # REMEDIATOR TOOLS
 # ══════════════════════════════════════════════════════════════
 
+
 @tool("Search Runbooks")
 def search_runbooks(query: str) -> str:
     """Search operational runbooks for fix procedures.
@@ -616,14 +646,18 @@ def search_runbooks(query: str) -> str:
     try:
         client = _chroma_client()
         try:
-            collection = client.get_or_create_collection(settings.chroma_runbooks_collection, metadata={"hnsw:space": "cosine"})
+            collection = client.get_or_create_collection(
+                settings.chroma_runbooks_collection, metadata={"hnsw:space": "cosine"}
+            )
         except Exception:
             return (
                 "No runbooks in knowledge base yet. "
                 "Add markdown files to ./knowledge/runbooks/ and restart."
             )
 
-        results = collection.query(query_texts=[query], n_results=settings.pagemenot_rag_runbooks_n_results)
+        results = collection.query(
+            query_texts=[query], n_results=settings.pagemenot_rag_runbooks_n_results
+        )
 
         if not results["documents"] or not results["documents"][0]:
             return "No matching runbooks found."
@@ -635,7 +669,7 @@ def search_runbooks(query: str) -> str:
                 f"    Service: {meta.get('service', 'General')}\n"
                 f"    Steps:\n    {doc[:300]}..."
             )
-        return f"Matching runbooks:\n" + "\n".join(lines)
+        return "Matching runbooks:\n" + "\n".join(lines)
 
     except Exception as e:
         return f"Runbook search failed: {e}"
@@ -682,6 +716,7 @@ def kubectl_rollback(deployment_name: str) -> str:
 # No destructive operations — only safe/reversible actions
 # ══════════════════════════════════════════════════════════════
 
+
 def _exec_enabled():
     if not settings.pagemenot_exec_enabled and not settings.pagemenot_exec_dry_run:
         raise RuntimeError("PAGEMENOT_EXEC_ENABLED is false — autonomous execution is disabled")
@@ -705,8 +740,11 @@ def exec_kubectl(command: str) -> str:
     # Validate kubeconfig path is a file, not a directory (Docker creates dirs for missing mounts)
     if kubeconfig:
         import os as _os
+
         if not _os.path.isfile(kubeconfig):
-            logger.warning(f"KUBECONFIG_PATH={kubeconfig!r} is not a file — falling back to default config discovery")
+            logger.warning(
+                f"KUBECONFIG_PATH={kubeconfig!r} is not a file — falling back to default config discovery"
+            )
             kubeconfig = None
 
     if kubeconfig:
@@ -715,7 +753,9 @@ def exec_kubectl(command: str) -> str:
         # In-cluster (KUBERNETES_SERVICE_HOST set) or ~/.kube/config — kubectl handles it
         cmd = ["kubectl"] + parts
 
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=settings.pagemenot_subprocess_timeout)
+    result = subprocess.run(
+        cmd, capture_output=True, text=True, timeout=settings.pagemenot_subprocess_timeout
+    )
     if result.returncode != 0:
         raise RuntimeError(f"kubectl failed: {result.stderr[:300]}")
     return result.stdout.strip()[:500]
@@ -789,7 +829,13 @@ def exec_shell(command: str) -> str:
     _exec_enabled()
     if settings.pagemenot_exec_dry_run:
         return f"[DRY RUN] would execute: {command}"
-    result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=settings.pagemenot_subprocess_timeout)
+    result = subprocess.run(
+        command,
+        shell=True,
+        capture_output=True,
+        text=True,
+        timeout=settings.pagemenot_subprocess_timeout,
+    )
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "no output").strip()
         raise RuntimeError(f"Command failed: {detail[:300]}")
@@ -805,10 +851,13 @@ def exec_http(method: str, url: str, headers: dict | None = None, body: dict | N
 
     # SSRF guard — only allow calls to configured integration domains
     from urllib.parse import urlparse
+
     allowed_hosts = {
         urlparse(u).hostname
         for u in [
-            settings.prometheus_url, settings.grafana_url, settings.loki_url,
+            settings.prometheus_url,
+            settings.grafana_url,
+            settings.loki_url,
         ]
         if u
     }
@@ -826,7 +875,7 @@ def exec_http(method: str, url: str, headers: dict | None = None, body: dict | N
 
 def _safe_service_name(service: str) -> str:
     """Validate service name used in template substitution — only safe chars allowed."""
-    if not re.fullmatch(r'[a-zA-Z0-9_\-\.]+', service):
+    if not re.fullmatch(r"[a-zA-Z0-9_\-\.]+", service):
         raise ValueError(f"Unsafe service name for template substitution: {service!r}")
     return service
 
@@ -838,44 +887,70 @@ def dispatch_exec_step(step: str, service: str = "") -> str:
     Template substitution ({{ service }}) happens after routing and validation.
     """
     # Match both <!-- exec: --> and <!-- exec:approve: --> — raw LLM text rejected
-    match = re.match(r'<!--\s*exec(?::approve)?:\s*(.+?)\s*-->', step)
+    match = re.match(r"<!--\s*exec(?::approve)?:\s*(.+?)\s*-->", step)
     if not match:
-        raise ValueError("Only <!-- exec: --> tagged steps from runbooks are allowed for autonomous execution")
+        raise ValueError(
+            "Only <!-- exec: --> tagged steps from runbooks are allowed for autonomous execution"
+        )
     cmd = match.group(1).strip()
 
     if not cmd:
         raise ValueError("Empty exec step")
 
-    # Substitute template variables
-    from pagemenot.config import settings as _s
-    ns_map = {k: v for pair in _s.pagemenot_service_namespaces.split(",")
-              if "=" in pair for k, v in [pair.strip().split("=", 1)]}
-    namespace = ns_map.get(service, _s.pagemenot_exec_namespace) if service else _s.pagemenot_exec_namespace
-    for _raw, _sub in [("{{ service }}", _safe_service_name(service) if service else ""),
-                       ("{{service}}", service),
-                       ("{{ namespace }}", namespace),
-                       ("{{namespace}}", namespace)]:
+    # Substitute template variables — always sanitize service name to prevent injection
+    safe_service = _safe_service_name(service) if service else ""
+    ns_map = {
+        k: v
+        for pair in settings.pagemenot_service_namespaces.split(",")
+        if "=" in pair
+        for k, v in [pair.strip().split("=", 1)]
+    }
+    namespace = (
+        ns_map.get(service, settings.pagemenot_exec_namespace)
+        if service
+        else settings.pagemenot_exec_namespace
+    )
+    for _raw, _sub in [
+        ("{{ service }}", safe_service),
+        ("{{service}}", safe_service),
+        ("{{ namespace }}", namespace),
+        ("{{namespace}}", namespace),
+    ]:
         cmd = cmd.replace(_raw, _sub)
 
     # Route to correct executor
     if cmd.startswith("kubectl "):
-        kubectl_cmd = cmd[len("kubectl "):]
-        return exec_kubectl(kubectl_cmd)
+        return exec_kubectl(cmd[len("kubectl ") :])
     elif cmd.startswith("aws "):
-        # Strip shell pipes before parsing (shlex runs after to avoid quoted-pipe edge cases)
+        # Strip pipes — boto3 handles response natively; strip on space-pipe boundary
         pipe_idx = cmd.find(" | ")
         cmd_clean = cmd[:pipe_idx].strip() if pipe_idx != -1 else cmd
         parts = shlex.split(cmd_clean)
         if len(parts) < 3:
             raise ValueError(f"Invalid AWS command: {cmd!r}")
         aws_service, aws_action = parts[1], parts[2].replace("-", "_")
-        # CLI-only flags — no boto3 equivalent
-        _CLI_ONLY = {"region", "output", "query", "profile", "no_sign_request",
-                     "endpoint_url", "color", "no_paginate", "debug"}
-        # CLI flag → boto3 param name overrides (where names differ)
+        # CLI-only flags — no boto3 equivalent; includes rarely-used ones
+        _CLI_ONLY = {
+            "region",
+            "output",
+            "query",
+            "profile",
+            "no_sign_request",
+            "endpoint_url",
+            "color",
+            "no_paginate",
+            "debug",
+            "cli_connect_timeout",
+            "cli_read_timeout",
+            "cli_binary_format",
+            "ca_bundle",
+            "no_verify_ssl",
+            "no_cli_pager",
+        }
+        # CLI flag names that differ from boto3 param names
         _REMAP = {"max_items": "limit"}
-        # Integer params for type coercion
-        _INT_PARAMS = {"Limit", "MaxResults", "MaxItems"}
+        # boto3 params that require int (not str)
+        _INT_PARAMS = {"Limit", "MaxResults", "MaxItems", "Count", "DurationSeconds"}
         params: dict = {}
         i = 3
         while i < len(parts):
@@ -889,16 +964,18 @@ def dispatch_exec_step(step: str, service: str = "") -> str:
                 i += 2 if has_value else 1
                 continue
             snake = _REMAP.get(snake, snake)
-            # boto3 uses PascalCase — capitalise every word
             pascal = "".join(w.capitalize() for w in snake.split("_"))
             if has_value:
-                val: object = parts[i + 1]
+                raw_val = parts[i + 1]
                 if pascal in _INT_PARAMS:
-                    val = int(val)
-                params[pascal] = val
+                    try:
+                        params[pascal] = int(raw_val)
+                    except ValueError:
+                        raise ValueError(f"Parameter {pascal} must be an integer, got {raw_val!r}")
+                else:
+                    params[pascal] = raw_val
                 i += 2
             else:
-                # Boolean flag (no value)
                 params[pascal] = True
                 i += 1
         return exec_aws(aws_service, aws_action, params)
@@ -921,7 +998,9 @@ def get_runbook_exec_steps(query: str, service: str = "") -> dict[str, list[tupl
             settings.chroma_runbooks_collection, metadata={"hnsw:space": "cosine"}
         )
 
-        results = collection.query(query_texts=[query], n_results=settings.pagemenot_rag_runbooks_n_results)
+        results = collection.query(
+            query_texts=[query], n_results=settings.pagemenot_rag_runbooks_n_results
+        )
         if not results["documents"] or not results["documents"][0]:
             return {"auto": [], "approve": []}
 
@@ -938,9 +1017,9 @@ def get_runbook_exec_steps(query: str, service: str = "") -> dict[str, list[tupl
             runbook_path = RUNBOOKS_DIR / filename
             if runbook_path.exists():
                 content = runbook_path.read_text(encoding="utf-8")
-                for match in re.finditer(r'<!--\s*exec(?::approve)?:\s*.+?\s*-->', content):
+                for match in re.finditer(r"<!--\s*exec(?::approve)?:\s*.+?\s*-->", content):
                     tag = match.group(0)
-                    if re.match(r'<!--\s*exec:approve:', tag):
+                    if re.match(r"<!--\s*exec:approve:", tag):
                         approve_steps.append((tag, filename))
                     else:
                         auto_steps.append((tag, filename))

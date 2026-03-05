@@ -9,6 +9,23 @@ NC='\033[0m'
 echo "Running pre-commit checks..."
 EXIT_CODE=0
 
+# 0. Ruff lint + format check — staged Python files only
+STAGED_PY=$(git diff --cached --name-only --diff-filter=ACM | grep '\.py$')
+if [ -n "$STAGED_PY" ]; then
+    if command -v ruff &>/dev/null; then
+        if ! ruff check $STAGED_PY; then
+            echo -e "${RED}❌ Ruff lint failed — run: ruff check --fix${NC}"
+            EXIT_CODE=1
+        fi
+        if ! ruff format --check $STAGED_PY; then
+            echo -e "${RED}❌ Ruff format failed — run: ruff format${NC}"
+            EXIT_CODE=1
+        fi
+    else
+        echo -e "${YELLOW}⚠️  ruff not found — skipping lint (pip install ruff)${NC}"
+    fi
+fi
+
 # 1. Hardcoded credentials
 if git diff --cached | grep -E '^\+.*(password|api_key|secret|token|key|database_url|db_url|connection).*=.*["'"'"'][A-Za-z0-9_\-]{20,}["'"'"']' | grep -v "os.getenv" | grep -v "os.environ" | grep -q .; then
     echo -e "${RED}❌ ERROR: Possible credentials in staged changes${NC}"
