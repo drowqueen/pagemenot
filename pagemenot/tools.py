@@ -722,31 +722,37 @@ def exec_kubectl(command: str) -> str:
 
 
 def exec_aws(service: str, action: str, params: dict) -> str:
-    """Execute an AWS operation via assumed IAM role."""
+    """Execute an AWS operation.
+
+    Credential order:
+    1. AWS_ROLE_ARN set → assume that role via STS (cross-account or least-privilege)
+    2. No role → use default boto3 chain (EC2 instance profile, env vars, ~/.aws/credentials)
+    """
     _exec_enabled()
     if settings.pagemenot_exec_dry_run:
         return f"[DRY RUN] would call: aws {service} {action}({params})"
-    if not settings.aws_role_arn:
-        raise RuntimeError("AWS_ROLE_ARN not configured")
 
     try:
         import boto3
     except ImportError:
         raise RuntimeError("boto3 not installed — add to requirements.txt")
 
-    sts = boto3.client("sts", region_name=settings.aws_region)
-    creds = sts.assume_role(
-        RoleArn=settings.aws_role_arn,
-        RoleSessionName="pagemenot-exec",
-    )["Credentials"]
+    if settings.aws_role_arn:
+        sts = boto3.client("sts", region_name=settings.aws_region)
+        creds = sts.assume_role(
+            RoleArn=settings.aws_role_arn,
+            RoleSessionName="pagemenot-exec",
+        )["Credentials"]
+        client = boto3.client(
+            service,
+            region_name=settings.aws_region,
+            aws_access_key_id=creds["AccessKeyId"],
+            aws_secret_access_key=creds["SecretAccessKey"],
+            aws_session_token=creds["SessionToken"],
+        )
+    else:
+        client = boto3.client(service, region_name=settings.aws_region)
 
-    client = boto3.client(
-        service,
-        region_name=settings.aws_region,
-        aws_access_key_id=creds["AccessKeyId"],
-        aws_secret_access_key=creds["SecretAccessKey"],
-        aws_session_token=creds["SessionToken"],
-    )
     response = getattr(client, action)(**params)
     return str(response)[:300]
 
