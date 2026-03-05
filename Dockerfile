@@ -11,9 +11,13 @@ RUN python -m venv /venv
 ENV PATH="/venv/bin:$PATH"
 
 COPY pyproject.toml ./
-COPY pagemenot/ pagemenot/
+# Install dependencies only (cached); skip the local package itself
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --upgrade pip setuptools wheel && pip install .
+    pip install --upgrade pip setuptools wheel && pip install --no-root .
+
+COPY pagemenot/ pagemenot/
+# Install local package without wheel cache so source changes always apply
+RUN pip install --no-cache-dir --no-deps .
 
 # ══════════════════════════════════════════════════════════════
 # base — clean runtime image: venv + app code + kubectl
