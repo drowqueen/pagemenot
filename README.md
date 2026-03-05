@@ -449,14 +449,37 @@ Values: `critical`, `high` (default if omitted), `medium`, `low`
 
 **Recovery** — add the same SNS topic to `--ok-actions` on your alarm. When CloudWatch returns to `OK`, pagemenot closes the Jira ticket and resolves the PD incident.
 
-**Alarm → SNS topic (example):**
+**Wire any existing alarm to pagemenot** — add the SNS topic as an action without touching the alarm's metric or threshold:
 ```bash
 aws cloudwatch put-metric-alarm \
   --alarm-name "my-service-cpu-high" \
   --alarm-description "severity: high — CPU above 90%" \
   --alarm-actions  arn:aws:sns:REGION:ACCOUNT:pagemenot-alerts \
   --ok-actions     arn:aws:sns:REGION:ACCOUNT:pagemenot-alerts \
-  ... # your metric, threshold, dimensions
+  ... # all other existing alarm params unchanged
+```
+
+Or update an existing alarm in-place (add the action without recreating):
+```bash
+# Get existing alarm config
+aws cloudwatch describe-alarms --alarm-names "my-service-cpu-high" > /tmp/alarm.json
+# Edit /tmp/alarm.json to add the SNS ARN to AlarmActions and OKActions, then re-apply:
+aws cloudwatch put-metric-alarm --cli-input-json file:///tmp/alarm.json
+```
+
+**Multiple alarms, one topic** — any number of alarms can send to the same SNS topic. Pagemenot handles all of them.
+
+**Multiple regions** — SNS topics are regional. Create one topic per region and subscribe each to the same `/webhooks/sns` endpoint:
+```bash
+# eu-west-1
+aws sns create-topic --name pagemenot-alerts --region eu-west-1
+aws sns subscribe --topic-arn arn:aws:sns:eu-west-1:ACCOUNT:pagemenot-alerts \
+  --protocol https --notification-endpoint https://YOUR_HOST/webhooks/sns --region eu-west-1
+
+# us-east-1
+aws sns create-topic --name pagemenot-alerts --region us-east-1
+aws sns subscribe --topic-arn arn:aws:sns:us-east-1:ACCOUNT:pagemenot-alerts \
+  --protocol https --notification-endpoint https://YOUR_HOST/webhooks/sns --region us-east-1
 ```
 
 ### GCP Cloud Monitoring
