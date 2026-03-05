@@ -10,10 +10,10 @@ date: 2026-01-01
 - Cache hit rate dropping
 
 ## Remediation
-<!-- exec: kubectl get pods -n {{ namespace }} -l app={{ service }} -->
-<!-- exec: kubectl describe pods -n {{ namespace }} -l app={{ service }} -->
-<!-- exec: kubectl logs -n {{ namespace }} -l app={{ service }} --tail=50 -->
-<!-- exec:approve: kubectl rollout restart deployment/{{ service }} -n {{ namespace }} -->
+<!-- exec: kubectl get pods -n {{ namespace }} -l app={{ service }} 2>&1 || echo "kubectl unavailable - no cluster configured" -->
+<!-- exec: kubectl describe pods -n {{ namespace }} -l app={{ service }} 2>&1 || echo "kubectl unavailable - no cluster configured" -->
+<!-- exec: kubectl logs -n {{ namespace }} -l app={{ service }} --tail=50 2>&1 || echo "kubectl unavailable - no cluster configured" -->
+<!-- exec:approve: kubectl rollout restart deployment/{{ service }} -n {{ namespace }} 2>&1 || echo "kubectl unavailable - manual action required" -->
 
 ## Escalate if
 - Redis is primary data store (eviction = data loss)

@@ -323,9 +323,9 @@ SCENARIOS = {
         "pagerduty": {
             "id": "P9999991",
             "title": "EC2 nginx service not responding — health check failing",
-            "description": "HTTP health check on 3.249.183.159 returning connection refused. Nginx process appears to have crashed. Last successful check 4 minutes ago. CloudWatch StatusCheckFailed=0 (instance is up), application-level failure only.",
+            "description": "HTTP health check on 52.49.55.249 returning connection refused. Nginx process appears to have crashed. Last successful check 4 minutes ago. CloudWatch StatusCheckFailed=0 (instance is up), application-level failure only.",
             "urgency": "high",
-            "service": {"name": "3.249.183.159", "id": "PSVC009"},
+            "service": {"name": "52.49.55.249", "id": "PSVC009"},
         },
         "mock_metrics": {
             "error_rate": {"before": 0.1, "after": 100.0, "unit": "%"},
@@ -338,8 +338,8 @@ SCENARIOS = {
         "mock_logs": [
             "2026-03-04T18:00:01Z ERROR nginx: [emerg] bind() to 0.0.0.0:80 failed (98: Address already in use)",
             "2026-03-04T18:00:01Z ERROR nginx: configuration file /etc/nginx/nginx.conf test failed",
-            "2026-03-04T18:00:02Z WARN  healthcheck: GET http://3.249.183.159/ — connection refused",
-            "2026-03-04T18:00:10Z WARN  healthcheck: GET http://3.249.183.159/ — connection refused (retry 2/3)",
+            "2026-03-04T18:00:02Z WARN  healthcheck: GET http://52.49.55.249/ — connection refused",
+            "2026-03-04T18:00:10Z WARN  healthcheck: GET http://52.49.55.249/ — connection refused (retry 2/3)",
             "2026-03-04T18:00:20Z ERROR healthcheck: service unreachable after 3 retries — alerting",
         ],
         "mock_deploys": [],

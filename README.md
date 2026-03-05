@@ -512,6 +512,35 @@ This is RAG (retrieval-augmented generation), not model fine-tuning. The LLM wei
 
 **Postmortem quality matters.** The `service`, `root_cause`, and `resolution` fields drive RAG retrieval accuracy. Drop structured postmortems into `knowledge/postmortems/` to pre-seed the knowledge base before your first incident.
 
+**All postmortems live in `knowledge/postmortems/`** — agent-written and human-written alike.
+
+| Source | Written when | Indexed when |
+|--------|-------------|--------------|
+| Agent auto-resolved | Runbook exec succeeds | Immediately |
+| Human approved runbook | Approve button clicked | Immediately |
+| Human wrote manually | You create the file | On next `/pagemenot reload` or hourly auto-reindex |
+
+Human-written postmortems (for incidents where no runbook matched, or where the team fixed things outside pagemenot) should be dropped into `knowledge/postmortems/` as Markdown files. Format:
+
+```markdown
+# <incident title>
+
+service: <service-name>
+date: YYYY-MM-DD
+severity: high
+
+## Root cause
+<what caused it>
+
+## Resolution
+<what fixed it, step by step>
+
+## Follow-up
+<runbook created, alert tuned, etc.>
+```
+
+Run `/pagemenot reload` in Slack after adding files to pick them up immediately without restart.
+
 **Approval state persistence:**
 
 Pagemenot uses a three-tier store for pending approvals — no approval is lost on container restart:

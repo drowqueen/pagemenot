@@ -96,9 +96,22 @@ async def lifespan(app: FastAPI):
         )
     logger.info("═" * 50)
 
+    # Periodically re-ingest knowledge base so human-written postmortems are picked up
+    async def _reindex_loop():
+        while True:
+            await asyncio.sleep(3600)  # every hour
+            try:
+                await asyncio.get_running_loop().run_in_executor(None, ingest_all)
+                logger.info("Knowledge base re-indexed")
+            except Exception as e:
+                logger.warning("Re-index failed: %s", e)
+
+    reindex_task = asyncio.create_task(_reindex_loop())
+
     yield
 
     task.cancel()
+    reindex_task.cancel()
     _executor.shutdown(wait=True)  # drain in-progress triages before exit
 
 
@@ -222,7 +235,14 @@ async def sns_webhook(
         metric = trigger.get("MetricName", "")
         dims = {d["name"]: d["value"] for d in trigger.get("Dimensions", [])}
         instance_id = dims.get("InstanceId", "")
-        service = dims.get("AutoScalingGroupName") or instance_id or "aws-ec2"
+        service = (dims.get("ServiceEndpoint") or dims.get("FunctionName")
+                   or dims.get("AutoScalingGroupName") or instance_id or "aws-ec2")
+
+        # Extract severity from alarm description (e.g. "severity: critical")
+        import re as _re
+        alarm_desc = message.get("AlarmDescription", "")
+        _sev_match = _re.search(r'\bseverity\s*:\s*(\w+)', alarm_desc, _re.IGNORECASE)
+        alarm_severity = _sev_match.group(1).lower() if _sev_match else "high"
 
         if new_state == "OK":
             entry = _alarm_incidents.pop(alarm_name, None)
@@ -251,6 +271,7 @@ async def sns_webhook(
             "alarm_name": alarm_name,
             "message": message.get("NewStateReason", ""),
             "service": service,
+            "severity": alarm_severity,
             "region": region,
             "metric": metric,
             "instance_id": instance_id,
@@ -548,8 +569,10 @@ async def _resolve_jira_ticket(jira_url: str, resolution_note: str = "") -> None
         async with httpx.AsyncClient(timeout=settings.pagemenot_http_timeout) as client:
             r = await client.get(f"{base}/rest/api/2/issue/{key}/transitions", headers=headers)
             transitions = r.json().get("transitions", [])
+            _done_keywords = ("done", "resolved", "closed", "complete", "fixed")
             done_id = next(
-                (t["id"] for t in transitions if t["name"].lower() in ("done", "resolved", "closed")),
+                (t["id"] for t in transitions
+                 if any(kw in t["name"].lower() for kw in _done_keywords)),
                 None,
             )
             if not done_id:
@@ -653,12 +676,9 @@ async def _auto_triage(source: str, payload: dict):
                         "text": f"*Runbook execution:*\n\n{log_text[:2800]}"}},
                 ],
             )
-            if not dry:
-                import asyncio as _asyncio
-                from pagemenot.rag import write_and_index_postmortem
-                _asyncio.create_task(_asyncio.get_running_loop().run_in_executor(
-                    None, write_and_index_postmortem, result, "agent", ""
-                ))
+            # Always index, even in dry-run — crew analysis is useful for RAG
+            from pagemenot.rag import write_and_index_postmortem as _wip
+            asyncio.get_running_loop().run_in_executor(None, _wip, result, "agent", "")
             return
 
         sev = {"critical": "🔴", "high": "🟠", "medium": "🟡"}.get(result.severity, "⚪")
@@ -745,7 +765,8 @@ async def _auto_triage(source: str, payload: dict):
             }
 
         # Approval buttons — after Jira/PD so urls are stored in entry
-        if result.pending_exec_steps and settings.pagemenot_approval_gate:
+        _approval_sev_min = _SEV.get(settings.pagemenot_approval_min_severity, 2)
+        if result.pending_exec_steps and settings.pagemenot_approval_gate and sev_rank >= _approval_sev_min:
             from pagemenot.slack_bot import _approval_store
             import uuid as _uuid
             approval_id = str(_uuid.uuid4())[:8]
@@ -759,7 +780,7 @@ async def _auto_triage(source: str, payload: dict):
                 "pd_url": pd_url if isinstance(pd_url, str) else "",
             })
             steps_text = "\n".join(f"• `{s[:100]}`" for s in result.pending_exec_steps[:5])
-            approval_msg = await client.chat_postMessage(
+            await client.chat_postMessage(
                 channel=channel,
                 text=f"⚠️ Approval required: {result.alert_title}",
                 blocks=[
@@ -767,23 +788,30 @@ async def _auto_triage(source: str, payload: dict):
                         "text": f"*⚠️ Approval required:* {result.alert_title}\n{steps_text}"}},
                     {"type": "actions", "elements": [
                         {"type": "button", "text": {"type": "plain_text", "text": "✅ Approve & Execute"},
-                         "action_id": "approve_action", "value": f"{approval_id}:{approval_msg['ts']}", "style": "primary"},
+                         "action_id": "approve_action", "value": approval_id, "style": "primary"},
                         {"type": "button", "text": {"type": "plain_text", "text": "❌ Reject"},
-                         "action_id": "reject_action", "value": f"{approval_id}:{approval_msg['ts']}", "style": "danger"},
+                         "action_id": "reject_action", "value": approval_id, "style": "danger"},
                     ]},
                 ],
             )
+
+        # Always index triage result for RAG — unless pending human approval (written on approve)
+        _needs_human = bool(result.pending_exec_steps and settings.pagemenot_approval_gate and sev_rank >= _SEV.get(settings.pagemenot_approval_min_severity, 2))
+        if not _needs_human:
+            from pagemenot.rag import write_and_index_postmortem as _wip
+            asyncio.get_event_loop().run_in_executor(None, _wip, result, "agent", jira_url if isinstance(jira_url, str) else "")
 
         # Escalate to on-call channel
         _pd_min_rank = _SEV.get(settings.pagemenot_pd_min_severity, 2)
         if not settings.pagemenot_exec_dry_run and not result.resolved_automatically and sev_rank >= _pd_min_rank and settings.pagemenot_oncall_channel:
             pd_line = f"\n📟 PagerDuty: {pd_url}" if isinstance(pd_url, str) else ""
+            jira_line = f"\n🎫 Jira: {jira_url}" if isinstance(jira_url, str) else ""
             await client.chat_postMessage(
                 channel=settings.pagemenot_oncall_channel,
                 text=(
                     f"{sev} *ESCALATION:* {result.alert_title} ({result.service})\n"
                     f"Confidence: {conf} {result.confidence} — see #{channel}"
-                    f"{pd_line}"
+                    f"{pd_line}{jira_line}"
                 ),
             )
 

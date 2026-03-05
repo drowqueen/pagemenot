@@ -9,14 +9,14 @@ date: 2026-01-01
 - Log writes failing, database refusing writes
 
 ## Diagnosis
-<!-- exec: kubectl get nodes -o wide -->
-<!-- exec: kubectl describe nodes -->
-<!-- exec: kubectl get pods -n {{ namespace }} -l app={{ service }} -->
-<!-- exec: kubectl get pods -n {{ namespace }} --field-selector=status.phase=Failed -->
+<!-- exec: kubectl get nodes -o wide 2>&1 || echo "kubectl unavailable - no cluster configured" -->
+<!-- exec: kubectl describe nodes 2>&1 || echo "kubectl unavailable - no cluster configured" -->
+<!-- exec: kubectl get pods -n {{ namespace }} -l app={{ service }} 2>&1 || echo "kubectl unavailable - no cluster configured" -->
+<!-- exec: kubectl get pods -n {{ namespace }} --field-selector=status.phase=Failed 2>&1 || echo "kubectl unavailable - no cluster configured" -->
 
 ## Remediation
-<!-- exec: kubectl delete pods -n {{ namespace }} --field-selector=status.phase=Succeeded -->
-<!-- exec: kubectl get nodes -->
+<!-- exec: kubectl delete pods -n {{ namespace }} --field-selector=status.phase=Succeeded 2>&1 || echo "kubectl unavailable - no cluster configured" -->
+<!-- exec: kubectl get nodes 2>&1 || echo "kubectl unavailable - no cluster configured" -->
 
 ## Escalate if
 - Disk full from database growth (volume expansion required)

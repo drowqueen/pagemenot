@@ -9,13 +9,13 @@ date: 2026-01-01
 - DB CPU normal, app CPU low (requests queued)
 
 ## Diagnosis
-<!-- exec: kubectl logs -n {{ namespace }} -l app={{ service }} --tail=100 -->
-<!-- exec: kubectl get pods -n {{ namespace }} -l app={{ service }} -->
+<!-- exec: kubectl logs -n {{ namespace }} -l app={{ service }} --tail=100 2>&1 || echo "kubectl unavailable - no cluster configured" -->
+<!-- exec: kubectl get pods -n {{ namespace }} -l app={{ service }} 2>&1 || echo "kubectl unavailable - no cluster configured" -->
 
 ## Remediation
-<!-- exec:approve: kubectl rollout restart deployment/{{ service }} -n {{ namespace }} -->
-<!-- exec: kubectl rollout status deployment/{{ service }} -n {{ namespace }} -->
-<!-- exec: kubectl describe service/{{ service }} -n {{ namespace }} -->
+<!-- exec:approve: kubectl rollout restart deployment/{{ service }} -n {{ namespace }} 2>&1 || echo "kubectl unavailable - manual action required" -->
+<!-- exec: kubectl rollout status deployment/{{ service }} -n {{ namespace }} 2>&1 || echo "kubectl unavailable - no cluster configured" -->
+<!-- exec: kubectl describe service/{{ service }} -n {{ namespace }} 2>&1 || echo "kubectl unavailable - no cluster configured" -->
 
 ## Escalate if
 - Restart does not clear backlog within 3 min

@@ -77,9 +77,10 @@ class Settings(BaseSettings):
     pagemenot_autoapprove_delay: int = 900      # seconds before auto-executing [AUTO-SAFE] steps
     pagemenot_dedup_ttl_short: int = 600        # dedup window for critical/high (seconds)
     pagemenot_dedup_ttl_long: int = 1800        # dedup window for medium/low (seconds)
-    # Escalation severity thresholds — controls when Jira/PD are triggered
-    pagemenot_jira_min_severity: str = "high"      # open Jira when agent cannot resolve: high/critical only
-    pagemenot_pd_min_severity: str = "high"        # page PD for: high and critical (P1/P2); not medium/low
+    # Severity thresholds — controls when each action triggers
+    pagemenot_jira_min_severity: str = "low"       # open Jira ticket: low/medium/high/critical
+    pagemenot_pd_min_severity: str = "high"        # page PD/escalate: low/medium/high/critical
+    pagemenot_approval_min_severity: str = "high"  # require human approval for risky commands: low/medium/high/critical
     # Approval state store
     redis_url: Optional[str] = None  # e.g. redis://localhost:6379/0 — for approval state persistence across restarts
 

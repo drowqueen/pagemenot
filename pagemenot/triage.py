@@ -163,6 +163,14 @@ def _parse_alert(source: str, payload: dict) -> dict:
             "severity": labels.get("severity", "medium"),
             "description": annotations.get("description", annotations.get("summary", "")),
         }
+    elif source == "sns":
+        return {
+            "title": payload.get("title", payload.get("alarm_name", "CloudWatch Alarm")),
+            "service": payload.get("service", "aws"),
+            "severity": payload.get("severity", "high"),
+            "description": payload.get("message", ""),
+            "external_id": payload.get("alarm_name", ""),
+        }
     else:
         text = payload.get("text", payload.get("description", str(payload)))
         return {
@@ -357,18 +365,7 @@ async def run_triage(source: str, payload: dict[str, Any]) -> TriageResult:
             duration_seconds=0.0,
         )
 
-    # 3. Severity gate — skip crew for low-severity noise
-    if parsed["severity"] == "low":
-        logger.info(f"Low-severity suppressed: {parsed['title']}")
-        return TriageResult(
-            alert_title=parsed["title"],
-            service=parsed["service"],
-            severity="low",
-            suppressed=True,
-            duration_seconds=0.0,
-        )
-
-    # 4. Seed mocks if real integrations aren't configured
+    # 3. Seed mocks if real integrations aren't configured
     _seed_mock_if_needed(parsed)
 
     # 5. Build summary for the crew — redact credentials before sending to LLM
