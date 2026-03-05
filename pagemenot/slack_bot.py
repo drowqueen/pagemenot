@@ -289,6 +289,47 @@ def create_slack_app() -> AsyncApp:
         if entry and not settings.pagemenot_exec_dry_run:
             await _escalate_unresolved(client, channel, entry, reason=f"Runbook rejected by <@{user_id}>")
 
+    @app.action("acknowledge_action")
+    async def handle_acknowledge(ack, body, client):
+        """Manual resolve — no runbook matched; user confirms they fixed it manually."""
+        await ack()
+        raw_value = body["actions"][0]["value"]
+        approval_id, embedded_ts = (raw_value.split(":", 1) if ":" in raw_value else (raw_value, None))
+        user_id = body["user"]["id"]
+        channel = body["container"].get("channel_id") or body.get("channel", {}).get("id")
+        msg_ts = embedded_ts or body["message"]["ts"]
+
+        entry = await _approval_store.pop(approval_id)
+        if not entry:
+            await client.chat_postEphemeral(channel=channel, user=user_id,
+                text="Already acknowledged or expired.")
+            return
+
+        await client.chat_update(
+            channel=channel, ts=msg_ts,
+            text=f"✅ Acknowledged by <@{user_id}>",
+            blocks=[{"type": "section", "text": {"type": "mrkdwn",
+                "text": f"✅ *Manually resolved by <@{user_id}>* — no runbook matched; steps executed manually."}}],
+        )
+        await client.chat_postMessage(
+            channel=channel,
+            text=f"🟢 *Resolved (manual):* {entry.get('alert_title', 'incident')}",
+            blocks=[{"type": "section", "text": {"type": "mrkdwn",
+                "text": f"🟢 *Resolved:* {entry.get('alert_title', 'incident')}\n"
+                        f"_Manually resolved by <@{user_id}>. No runbook matched — consider adding one._"}}],
+        )
+        from pagemenot.main import _resolve_jira_ticket, _resolve_pagerduty_incident
+        asyncio.create_task(_resolve_jira_ticket(entry.get("jira_url", "")))
+        asyncio.create_task(_resolve_pagerduty_incident(entry.get("pd_url", ""), resolved_by=user_id))
+        try:
+            from pagemenot.rag import write_and_index_postmortem as _wip
+            from pagemenot.triage import TriageResult as _TR
+            _r = _TR(alert_title=entry.get("alert_title", ""), service=entry.get("service", ""),
+                     severity=entry.get("severity", "unknown"), root_cause=entry.get("root_cause", ""))
+            asyncio.create_task(asyncio.get_running_loop().run_in_executor(None, _wip, _r, user_id, entry.get("jira_url", "")))
+        except Exception as _e:
+            logger.warning("Postmortem task setup failed (non-fatal): %s", _e)
+
     @app.action("feedback_positive")
     async def handle_thumbs_up(ack, body):
         await ack()

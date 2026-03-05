@@ -795,6 +795,35 @@ async def _auto_triage(source: str, payload: dict):
                 ],
             )
 
+        # Acknowledge button — no runbook matched but LLM flagged manual steps; user confirms manual fix
+        if (not result.pending_exec_steps and result.needs_approval
+                and settings.pagemenot_approval_gate and sev_rank >= _approval_sev_min):
+            from pagemenot.slack_bot import _approval_store
+            import uuid as _uuid
+            ack_id = str(_uuid.uuid4())[:8]
+            await _approval_store.set(ack_id, {
+                "steps": [],
+                "service": result.service or "",
+                "alert_title": result.alert_title or "",
+                "severity": result.severity or "high",
+                "root_cause": result.root_cause or "",
+                "jira_url": jira_url if isinstance(jira_url, str) else "",
+                "pd_url": pd_url if isinstance(pd_url, str) else "",
+            })
+            manual_text = "\n".join(f"• {s[:120]}" for s in result.needs_approval[:5])
+            await client.chat_postMessage(
+                channel=channel,
+                text=f"⚠️ Manual steps required: {result.alert_title}",
+                blocks=[
+                    {"type": "section", "text": {"type": "mrkdwn",
+                        "text": f"*⚠️ No runbook matched.* Suggested manual steps:\n{manual_text}"}},
+                    {"type": "actions", "elements": [
+                        {"type": "button", "text": {"type": "plain_text", "text": "✅ Done — Mark Resolved"},
+                         "action_id": "acknowledge_action", "value": ack_id, "style": "primary"},
+                    ]},
+                ],
+            )
+
         # Always index triage result for RAG — unless pending human approval (written on approve)
         _needs_human = bool(result.pending_exec_steps and settings.pagemenot_approval_gate and sev_rank >= _SEV.get(settings.pagemenot_approval_min_severity, 2))
         if not _needs_human:
