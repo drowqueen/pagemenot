@@ -753,7 +753,13 @@ def exec_aws(service: str, action: str, params: dict) -> str:
     else:
         client = boto3.client(service, region_name=settings.aws_region)
 
-    response = getattr(client, action)(**params)
+    try:
+        response = getattr(client, action)(**params)
+    except boto3.exceptions.botocore.exceptions.NoCredentialsError:
+        raise RuntimeError(
+            "No AWS credentials found. Set AWS_ROLE_ARN, attach an EC2/ECS instance profile, "
+            "or configure AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY."
+        )
     return str(response)[:300]
 
 
