@@ -803,6 +803,15 @@ def exec_aws(service: str, action: str, params: dict) -> str:
     if method is None:
         raise RuntimeError(f"Unknown AWS action '{action}' on service '{service}'")
 
+    # Remap snake_case CLI params → exact boto3 param names via service model
+    try:
+        op_name = "".join(w.capitalize() for w in action.split("_"))
+        members = client.meta.service_model.operation_model(op_name).input_shape.members
+        lower_map = {k.lower().replace("_", ""): k for k in members}
+        params = {lower_map.get(k.lower().replace("_", ""), k): v for k, v in params.items()}
+    except Exception:
+        pass  # fall through with raw params; boto3 will surface any name errors
+
     try:
         response = method(**params)
     except botocore.exceptions.NoCredentialsError:
@@ -949,8 +958,8 @@ def dispatch_exec_step(step: str, service: str = "") -> str:
         }
         # CLI flag names that differ from boto3 param names
         _REMAP = {"max_items": "limit"}
-        # boto3 params that require int (not str)
-        _INT_PARAMS = {"Limit", "MaxResults", "MaxItems", "Count", "DurationSeconds"}
+        # snake_case params that require int (not str)
+        _INT_PARAMS = {"limit", "max_results", "max_items", "count", "duration_seconds"}
         params: dict = {}
         i = 3
         while i < len(parts):
@@ -964,19 +973,18 @@ def dispatch_exec_step(step: str, service: str = "") -> str:
                 i += 2 if has_value else 1
                 continue
             snake = _REMAP.get(snake, snake)
-            pascal = "".join(w.capitalize() for w in snake.split("_"))
             if has_value:
                 raw_val = parts[i + 1]
-                if pascal in _INT_PARAMS:
+                if snake in _INT_PARAMS:
                     try:
-                        params[pascal] = int(raw_val)
+                        params[snake] = int(raw_val)
                     except ValueError:
-                        raise ValueError(f"Parameter {pascal} must be an integer, got {raw_val!r}")
+                        raise ValueError(f"Parameter {snake} must be an integer, got {raw_val!r}")
                 else:
-                    params[pascal] = raw_val
+                    params[snake] = raw_val
                 i += 2
             else:
-                params[pascal] = True
+                params[snake] = True
                 i += 1
         return exec_aws(aws_service, aws_action, params)
     elif cmd.startswith("http://") or cmd.startswith("https://"):
