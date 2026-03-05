@@ -726,23 +726,29 @@ def exec_aws(service: str, action: str, params: dict) -> str:
 
     Credential order:
     1. AWS_ROLE_ARN set → assume that role via STS (cross-account or least-privilege)
-    2. No role → use default boto3 chain (EC2 instance profile, env vars, ~/.aws/credentials)
+    2. No role → boto3 default chain: instance profile (EC2/ECS), IRSA (EKS),
+       AWS_ACCESS_KEY_ID env vars, or ~/.aws/credentials
     """
     _exec_enabled()
     if settings.pagemenot_exec_dry_run:
         return f"[DRY RUN] would call: aws {service} {action}({params})"
 
-    try:
-        import boto3
-    except ImportError:
-        raise RuntimeError("boto3 not installed — add to requirements.txt")
+    import boto3
+    import botocore.exceptions
+
+    if not settings.aws_region:
+        raise RuntimeError("AWS_REGION not configured — set PAGEMENOT_AWS_REGION in .env")
 
     if settings.aws_role_arn:
-        sts = boto3.client("sts", region_name=settings.aws_region)
-        creds = sts.assume_role(
-            RoleArn=settings.aws_role_arn,
-            RoleSessionName="pagemenot-exec",
-        )["Credentials"]
+        try:
+            sts = boto3.client("sts", region_name=settings.aws_region)
+            creds = sts.assume_role(
+                RoleArn=settings.aws_role_arn,
+                RoleSessionName="pagemenot-exec",
+            )["Credentials"]
+        except botocore.exceptions.ClientError as e:
+            code = e.response["Error"]["Code"]
+            raise RuntimeError(f"STS assume_role failed ({code}): {e.response['Error']['Message']}")
         client = boto3.client(
             service,
             region_name=settings.aws_region,
@@ -753,13 +759,23 @@ def exec_aws(service: str, action: str, params: dict) -> str:
     else:
         client = boto3.client(service, region_name=settings.aws_region)
 
+    method = getattr(client, action, None)
+    if method is None:
+        raise RuntimeError(f"Unknown AWS action '{action}' on service '{service}'")
+
     try:
-        response = getattr(client, action)(**params)
-    except boto3.exceptions.botocore.exceptions.NoCredentialsError:
+        response = method(**params)
+    except botocore.exceptions.NoCredentialsError:
         raise RuntimeError(
-            "No AWS credentials found. Set AWS_ROLE_ARN, attach an EC2/ECS instance profile, "
-            "or configure AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY."
+            "No AWS credentials found. Options: set AWS_ROLE_ARN, attach an instance profile "
+            "(EC2/ECS), use IRSA (EKS), or set AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY."
         )
+    except botocore.exceptions.ClientError as e:
+        code = e.response["Error"]["Code"]
+        msg = e.response["Error"]["Message"]
+        if code in ("AccessDenied", "AccessDeniedException", "UnauthorizedOperation"):
+            raise RuntimeError(f"AWS permission denied ({code}): {msg}")
+        raise RuntimeError(f"AWS error ({code}): {msg}")
     return str(response)[:300]
 
 
