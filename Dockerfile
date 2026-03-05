@@ -11,12 +11,17 @@ RUN python -m venv /venv
 ENV PATH="/venv/bin:$PATH"
 
 COPY pyproject.toml ./
-# Install dependencies only (cached); skip the local package itself
+# Install third-party dependencies only (cached); pyproject.toml parsed at build time
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --upgrade pip setuptools wheel && pip install --no-root .
+    pip install --upgrade pip setuptools wheel && \
+    python3 -c "
+import tomllib, subprocess, sys
+deps = tomllib.load(open('pyproject.toml', 'rb'))['project']['dependencies']
+subprocess.check_call([sys.executable, '-m', 'pip', 'install'] + deps)
+"
 
 COPY pagemenot/ pagemenot/
-# Install local package without wheel cache so source changes always apply
+# Install local package only — no cache, no deps; always reflects current source
 RUN pip install --no-cache-dir --no-deps .
 
 # ══════════════════════════════════════════════════════════════
