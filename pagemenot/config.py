@@ -136,6 +136,8 @@ class Settings(BaseSettings):
     pagemenot_slack_chunk_size: int = 2900  # chars per Slack message block
     pagemenot_slack_max_chunks: int = 3  # max blocks posted per triage result
     pagemenot_approval_ttl: int = 3600  # seconds before an approval entry expires
+    pagemenot_verify_timeout: int = 300  # seconds to poll CW alarm for recovery after runbook exec
+    pagemenot_verify_poll_interval: int = 15  # CW alarm polling cadence (seconds)
     pagemenot_rag_incidents_n_results: int = 5  # past incidents returned by RAG
     pagemenot_rag_runbooks_n_results: int = 1  # runbooks returned by RAG — best match only
     chroma_incidents_collection: str = "incidents"  # ChromaDB collection name for postmortems

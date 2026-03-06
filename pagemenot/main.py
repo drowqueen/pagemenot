@@ -77,6 +77,31 @@ async def lifespan(app: FastAPI):
     # Store for webhook handlers
     app.state.slack_app = slack_app
 
+    # Wire CW verification callback into slack_bot (avoids circular import)
+    import pagemenot.slack_bot as _sbot
+
+    def _schedule_verification(
+        alarm_name, region, channel, thread_ts, jira_url, pd_url, entry, approved_by
+    ):
+        from pagemenot.slack_bot import get_client as _gc
+        from pagemenot.triage import TriageResult as _TR
+
+        _r = _TR(
+            alert_title=entry.get("alert_title", ""),
+            service=entry.get("service", ""),
+            severity=entry.get("severity", "unknown"),
+            root_cause=entry.get("root_cause", ""),
+            alarm_name=alarm_name,
+            region=region,
+        )
+        asyncio.create_task(
+            _verify_cw_recovery(
+                alarm_name, region, channel, thread_ts, _gc(), _r, jira_url, pd_url, approved_by
+            )
+        )
+
+    _sbot._post_verification_task = _schedule_verification
+
     logger.info("═" * 50)
     logger.info("🦞 Pagemenot is online")
     logger.info(f"   LLM: {settings.llm_provider}/{settings.llm_model}")
@@ -693,6 +718,107 @@ async def _resolve_pagerduty_incident(pd_url: str, resolved_by: str = "") -> Non
 _alarm_incidents: dict[str, dict] = {}
 
 
+async def _verify_cw_recovery(
+    alarm_name: str,
+    region: str,
+    channel: str,
+    thread_ts: str,
+    client,
+    result,
+    jira_url: str = "",
+    pd_url: str = "",
+    approved_by: str = "",
+) -> None:
+    """Poll CW alarm until OK or timeout. Works for any AWS service type."""
+    import boto3
+
+    timeout = settings.pagemenot_verify_timeout
+    poll = settings.pagemenot_verify_poll_interval
+    elapsed = 0
+    cw_kwargs = {}
+    if region:
+        cw_kwargs["region_name"] = region
+    elif settings.aws_region:
+        cw_kwargs["region_name"] = settings.aws_region
+    cw = boto3.client("cloudwatch", **cw_kwargs)
+    loop = asyncio.get_running_loop()
+
+    while elapsed < timeout:
+        await asyncio.sleep(poll)
+        elapsed += poll
+        try:
+            resp = await loop.run_in_executor(
+                _executor, lambda: cw.describe_alarms(AlarmNames=[alarm_name])
+            )
+            alarms = resp.get("MetricAlarms", []) + resp.get("CompositeAlarms", [])
+            if alarms and alarms[0].get("StateValue") == "OK":
+                await client.chat_postMessage(
+                    channel=channel,
+                    thread_ts=thread_ts,
+                    text=f"✅ *Verified healthy* — `{alarm_name}` back to OK after {elapsed}s.",
+                )
+                resolved_by = f"human-approved by <@{approved_by}>" if approved_by else "runbook"
+                if jira_url:
+                    asyncio.create_task(
+                        _resolve_jira_ticket(
+                            jira_url, f"Auto-resolved — verified healthy ({resolved_by})"
+                        )
+                    )
+                if pd_url:
+                    asyncio.create_task(
+                        _resolve_pagerduty_incident(pd_url, resolved_by=approved_by or "pagemenot")
+                    )
+                if approved_by:
+                    await client.chat_postMessage(
+                        channel=channel,
+                        text=f"🟢 *Resolved:* {result.alert_title}\n_Approved by <@{approved_by}>, alarm verified OK._",
+                    )
+                from pagemenot.rag import write_and_index_postmortem as _wip
+
+                loop.run_in_executor(None, _wip, result, approved_by or "agent", jira_url)
+                logger.info("CW verified OK: %s after %ds", alarm_name, elapsed)
+                return
+        except Exception as e:
+            logger.warning("CW verify poll failed for %s: %s", alarm_name, e)
+
+    # Timeout — runbook did not resolve the incident
+    await client.chat_postMessage(
+        channel=channel,
+        thread_ts=thread_ts,
+        text=f"❌ *Recovery not confirmed:* `{alarm_name}` still in ALARM after {timeout}s. Escalating.",
+    )
+    logger.warning("CW verify timeout: %s after %ds", alarm_name, timeout)
+    _SEV = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+    sev_rank = _SEV.get(result.severity, 0)
+    if not jira_url:
+        jira_min = _SEV.get(settings.pagemenot_jira_min_severity, 0)
+        if sev_rank >= jira_min:
+            jira_url = await _open_jira_ticket(result) or ""
+            if jira_url:
+                await client.chat_postMessage(
+                    channel=channel, thread_ts=thread_ts, text=f"🎫 Jira: {jira_url}"
+                )
+    if not pd_url:
+        pd_min = _SEV.get(settings.pagemenot_pd_min_severity, 2)
+        if sev_rank >= pd_min:
+            pd_url = await _page_pagerduty(result) or ""
+            if pd_url:
+                await client.chat_postMessage(
+                    channel=channel, thread_ts=thread_ts, text=f"📟 PagerDuty: {pd_url}"
+                )
+    if settings.pagemenot_oncall_channel:
+        pd_min = _SEV.get(settings.pagemenot_pd_min_severity, 2)
+        if sev_rank >= pd_min:
+            sev = {"critical": "🔴", "high": "🟠", "medium": "🟡"}.get(result.severity, "⚪")
+            await client.chat_postMessage(
+                channel=settings.pagemenot_oncall_channel,
+                text=f"{sev} *ESCALATION:* {result.alert_title} ({result.service}) — runbook ran but `{alarm_name}` did not recover after {timeout}s.",
+            )
+    from pagemenot.rag import write_and_index_postmortem as _wip
+
+    asyncio.get_running_loop().run_in_executor(None, _wip, result, approved_by or "agent", jira_url)
+
+
 async def _auto_triage(source: str, payload: dict):
     """Run triage and route result based on severity and resolution status."""
     try:
@@ -714,14 +840,22 @@ async def _auto_triage(source: str, payload: dict):
         # Auto-resolved by runbook execution
         if result.resolved_automatically:
             dry = settings.pagemenot_exec_dry_run
-            icon = "🔵" if dry else "🟢"
-            label = "Dry-run resolved" if dry else "Auto-resolved"
+            verifying = not dry and bool(result.alarm_name)
             log_text = (
                 "\n\n".join(result.execution_log[:10])
                 if result.execution_log
                 else "No steps logged."
             )
-            await client.chat_postMessage(
+            icon = "🔵" if dry else "⏳" if verifying else "🟢"
+            label = (
+                "Dry-run resolved" if dry else "Runbook executed" if verifying else "Auto-resolved"
+            )
+            status_line = (
+                f"_Monitoring `{result.alarm_name}` — will confirm healthy when alarm returns to OK..._"
+                if verifying
+                else ("_Dry run — no real changes made._" if dry else "_Steps completed._")
+            )
+            resp = await client.chat_postMessage(
                 channel=channel,
                 text=f"{icon} *{label}:* {result.alert_title}",
                 blocks=[
@@ -740,12 +874,19 @@ async def _auto_triage(source: str, payload: dict):
                             "text": f"*Runbook execution:*\n\n{log_text[:2800]}",
                         },
                     },
+                    {"type": "section", "text": {"type": "mrkdwn", "text": status_line}},
                 ],
             )
-            # Always index, even in dry-run — crew analysis is useful for RAG
-            from pagemenot.rag import write_and_index_postmortem as _wip
+            if verifying:
+                asyncio.create_task(
+                    _verify_cw_recovery(
+                        result.alarm_name, result.region, channel, resp["ts"], client, result
+                    )
+                )
+            else:
+                from pagemenot.rag import write_and_index_postmortem as _wip
 
-            asyncio.get_running_loop().run_in_executor(None, _wip, result, "agent", "")
+                asyncio.get_running_loop().run_in_executor(None, _wip, result, "agent", "")
             return
 
         sev = {"critical": "🔴", "high": "🟠", "medium": "🟡"}.get(result.severity, "⚪")
@@ -869,6 +1010,8 @@ async def _auto_triage(source: str, payload: dict):
                     "jira_url": jira_url if isinstance(jira_url, str) else "",
                     "pd_url": pd_url if isinstance(pd_url, str) else "",
                     "similar_incidents": result.similar_incidents or [],
+                    "alarm_name": result.alarm_name,
+                    "region": result.region,
                 },
             )
             steps_text = "\n".join(f"• `{s[:100]}`" for s in result.pending_exec_steps[:5])
@@ -927,6 +1070,8 @@ async def _auto_triage(source: str, payload: dict):
                     "jira_url": jira_url if isinstance(jira_url, str) else "",
                     "pd_url": pd_url if isinstance(pd_url, str) else "",
                     "similar_incidents": result.similar_incidents or [],
+                    "alarm_name": result.alarm_name,
+                    "region": result.region,
                 },
             )
             manual_text = "\n".join(f"• {s[:120]}" for s in result.needs_approval[:5])

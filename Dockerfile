@@ -50,8 +50,8 @@ RUN ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') && \
     rm /tmp/kubectl.sha256 && \
     chmod +x /usr/local/bin/kubectl
 
-RUN groupadd --system appgroup && \
-    useradd --system --gid appgroup --no-create-home appuser && \
+RUN groupadd --system --gid 1000 appgroup && \
+    useradd --system --uid 1000 --gid appgroup --no-create-home appuser && \
     mkdir -p /app/data/chroma /app/.config/crewai && \
     echo '{"show_tracing_ui": false}' > /app/.config/crewai/settings.json && \
     chown -R appuser:appgroup /app /venv

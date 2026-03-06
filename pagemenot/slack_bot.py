@@ -18,6 +18,9 @@ from slack_sdk.web.async_client import AsyncWebClient
 from pagemenot.config import settings
 from pagemenot.triage import run_triage, _executor
 
+# Set by main.py at startup — triggers CW alarm polling after approval exec (avoids circular import)
+_post_verification_task = None
+
 logger = logging.getLogger("pagemenot.slack")
 
 _app: AsyncApp | None = None
@@ -256,51 +259,65 @@ def create_slack_app() -> AsyncApp:
         if success:
             alert_title = entry.get("alert_title", "Incident")
             exec_log = [f"Step {i}: `{s}`" for i, s in enumerate(steps, 1)]
+            alarm_name = entry.get("alarm_name", "")
+            region = entry.get("region", "")
+            jira_url = entry.get("jira_url", "")
+            pd_url = entry.get("pd_url", "")
+
             await client.chat_postMessage(
                 channel=channel,
                 thread_ts=thread,
                 text=f"✅ All {len(steps)} step(s) executed successfully.",
             )
-            # Channel-level resolved post
-            await client.chat_postMessage(
-                channel=channel,
-                text=f"🟢 *Resolved (human-approved):* {alert_title}",
-                blocks=[
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": f"🟢 *Resolved:* {alert_title}\n_Approved by <@{user_id}>, runbook executed successfully._",
-                        },
-                    }
-                ],
-            )
-            # Resolve Jira/PD — always fires first, before anything that could crash
-            from pagemenot.main import _resolve_jira_ticket, _resolve_pagerduty_incident
 
-            asyncio.create_task(_resolve_jira_ticket(entry.get("jira_url", "")))
-            asyncio.create_task(
-                _resolve_pagerduty_incident(entry.get("pd_url", ""), resolved_by=user_id)
-            )
-            # Write postmortem + re-index (best-effort, must not crash the handler)
-            try:
-                from pagemenot.rag import write_and_index_postmortem as _wip
-                from pagemenot.triage import TriageResult as _TR
-
-                _r = _TR(
-                    alert_title=alert_title,
-                    service=entry.get("service", ""),
-                    severity=entry.get("severity", "unknown"),
-                    root_cause=entry.get("root_cause", ""),
-                    execution_log=exec_log,
+            if alarm_name and not settings.pagemenot_exec_dry_run and _post_verification_task:
+                # Launch CW polling — "🟢 Resolved" posted when alarm goes OK (or timeout escalates)
+                await client.chat_postMessage(
+                    channel=channel,
+                    thread_ts=thread,
+                    text=f"_Monitoring `{alarm_name}` — will confirm healthy when alarm returns to OK..._",
                 )
-                asyncio.create_task(
-                    asyncio.get_running_loop().run_in_executor(
-                        None, _wip, _r, user_id, entry.get("jira_url", "")
+                _post_verification_task(
+                    alarm_name, region, channel, thread, jira_url, pd_url, entry, user_id
+                )
+            else:
+                # Non-CW source or dry run — mark resolved immediately
+                await client.chat_postMessage(
+                    channel=channel,
+                    text=f"🟢 *Resolved:* {alert_title}",
+                    blocks=[
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": f"🟢 *Resolved:* {alert_title}\n_Approved by <@{user_id}>, runbook executed successfully._",
+                            },
+                        }
+                    ],
+                )
+                from pagemenot.main import _resolve_jira_ticket, _resolve_pagerduty_incident
+
+                asyncio.create_task(_resolve_jira_ticket(jira_url))
+                asyncio.create_task(_resolve_pagerduty_incident(pd_url, resolved_by=user_id))
+                # Write postmortem (best-effort)
+                try:
+                    from pagemenot.rag import write_and_index_postmortem as _wip
+                    from pagemenot.triage import TriageResult as _TR
+
+                    _r = _TR(
+                        alert_title=alert_title,
+                        service=entry.get("service", ""),
+                        severity=entry.get("severity", "unknown"),
+                        root_cause=entry.get("root_cause", ""),
+                        execution_log=exec_log,
                     )
-                )
-            except Exception as _pm_err:
-                logger.warning("Postmortem task setup failed (non-fatal): %s", _pm_err)
+                    asyncio.create_task(
+                        asyncio.get_running_loop().run_in_executor(
+                            None, _wip, _r, user_id, jira_url
+                        )
+                    )
+                except Exception as _pm_err:
+                    logger.warning("Postmortem task setup failed (non-fatal): %s", _pm_err)
         else:
             if not settings.pagemenot_exec_dry_run:
                 await _escalate_unresolved(

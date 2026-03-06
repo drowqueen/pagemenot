@@ -108,6 +108,10 @@ class TriageResult:
     suppressed: bool = False  # True = dedup or severity gate, crew never ran
     resolved_automatically: bool = False  # True = runbook exec succeeded
     execution_log: list[str] = field(default_factory=list)
+    alarm_name: str = (
+        ""  # CW alarm name — set for SNS-sourced incidents, enables post-exec verification
+    )
+    region: str = ""  # AWS region for CW polling
 
 
 def _parse_alert(source: str, payload: dict) -> dict:
@@ -402,6 +406,9 @@ async def run_triage(source: str, payload: dict[str, Any]) -> TriageResult:
 
     # 7. Parse output
     result = _parse_crew_output(raw, parsed)
+
+    result.alarm_name = parsed.get("alarm_name", "")
+    result.region = parsed.get("region", "")
 
     # 8. Attempt runbook-driven resolution (only if exec is enabled)
     await _try_runbook_exec(result)
