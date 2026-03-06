@@ -25,6 +25,19 @@ Self-hosted. No new infrastructure. Connects to your existing monitoring stack.
 - **Webhook receiver** — Grafana, Alertmanager, Datadog, New Relic, PagerDuty, CloudWatch, Azure Monitor, generic
 - **No new infrastructure** — single Docker container; ChromaDB embedded by default
 
+## Platform support
+
+| Platform | Status |
+|----------|--------|
+| AWS (EC2, RDS, ECS, EKS, CloudWatch) | ✅ Production-ready |
+| On-premises / bare metal (Kubernetes, Prometheus, Alertmanager) | ✅ Production-ready |
+| GCP (GKE, GCE, Cloud Run, Cloud Monitoring) | 🔜 Coming soon |
+| Azure (AKS, VMs, App Service, Azure Monitor) | 🔜 Coming soon |
+
+AWS and on-prem have been rigorously tested end-to-end: CloudWatch alarm delivery, EC2 remediation with approval gates, autonomous RDS recovery, CW verify-and-close, and postmortem indexing.
+
+---
+
 ## Screenshots
 
 | Escalation — Jira + PagerDuty | Approval button | Triage thread — RCA + links | Approval detail |
@@ -215,7 +228,7 @@ kubectl is always included and auto-detects `amd64` / `arm64` at build time.
 |-------------|-------|
 | Running as a Kubernetes pod | Nothing — in-cluster ServiceAccount token auto-detected |
 | EC2 / ECS / GCP Compute / bare metal | Mount kubeconfig from secrets manager; set `KUBECONFIG_PATH=/app/kubeconfig` in `.env`; uncomment the kubeconfig volume in `docker-compose.yml` |
-| Local dev (minikube / kind) | Run `scripts/gen-kubeconfig.sh`, then set `KUBECONFIG_PATH=/app/kubeconfig` in `.env` and uncomment the kubeconfig volume in `docker-compose.yml` |
+| Local Kubernetes (minikube, kind, k3s) | Run `scripts/gen-kubeconfig.sh`, then set `KUBECONFIG_PATH=/app/kubeconfig` in `.env` and uncomment the kubeconfig volume in `docker-compose.yml` |
 
 `docker-compose.yml` ships with the kubeconfig volume commented out. Uncomment and set the host path for your environment:
 
