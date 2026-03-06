@@ -735,9 +735,13 @@ async def _verify_cw_recovery(
     timeout = settings.pagemenot_verify_timeout
     poll = settings.pagemenot_verify_poll_interval
     elapsed = 0
+    import re as _re
+
     cw_kwargs = {}
-    if region:
-        cw_kwargs["region_name"] = region
+    # SNS Region field is human-readable (e.g. "EU (Ireland)") — only use API-format codes
+    _api_region = region if region and _re.match(r"^[a-z]+-[a-z]+-\d$", region) else None
+    if _api_region:
+        cw_kwargs["region_name"] = _api_region
     elif settings.aws_region:
         cw_kwargs["region_name"] = settings.aws_region
     cw = boto3.client("cloudwatch", **cw_kwargs)
