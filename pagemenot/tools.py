@@ -804,11 +804,25 @@ def exec_aws(service: str, action: str, params: dict) -> str:
         raise RuntimeError(f"Unknown AWS action '{action}' on service '{service}'")
 
     # Remap snake_case CLI params → exact boto3 param names via service model
+    # Also coerce types: list-type params wrapped in list, integer/boolean params cast
     try:
         op_name = "".join(w.capitalize() for w in action.split("_"))
         members = client.meta.service_model.operation_model(op_name).input_shape.members
         lower_map = {k.lower().replace("_", ""): k for k in members}
         params = {lower_map.get(k.lower().replace("_", ""), k): v for k, v in params.items()}
+        for pname, pval in list(params.items()):
+            shape = members.get(pname)
+            if shape is None:
+                continue
+            if shape.type_name == "list" and isinstance(pval, str):
+                params[pname] = [pval]
+            elif shape.type_name == "integer" and isinstance(pval, str):
+                try:
+                    params[pname] = int(pval)
+                except ValueError:
+                    pass
+            elif shape.type_name == "boolean" and isinstance(pval, str):
+                params[pname] = pval.lower() not in ("false", "0", "")
     except Exception:
         pass  # fall through with raw params; boto3 will surface any name errors
 

@@ -387,9 +387,22 @@ def create_slack_app() -> AsyncApp:
                     "text": {
                         "type": "mrkdwn",
                         "text": f"🟢 *Resolved:* {entry.get('alert_title', 'incident')}\n"
-                        f"_Manually resolved by <@{user_id}>. No runbook matched — consider adding one._",
+                        f"_Manually resolved by <@{user_id}>. No runbook matched._",
                     },
-                }
+                },
+                {"type": "divider"},
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": (
+                            "📝 *Action required — two steps:*\n"
+                            "1. Add a runbook to `knowledge/runbooks/` so this incident auto-resolves next time\n"
+                            "2. Write a postmortem in `knowledge/postmortems/` — "
+                            "a draft has been auto-generated and indexed for future reference"
+                        ),
+                    },
+                },
             ],
         )
         from pagemenot.main import _resolve_jira_ticket, _resolve_pagerduty_incident
@@ -510,9 +523,45 @@ async def _escalate_unresolved(client, channel: str, entry: dict, reason: str):
     if settings.pagemenot_oncall_channel and sev_rank >= pd_min:
         sev_emoji = {"critical": "🔴", "high": "🟠", "medium": "🟡"}.get(result.severity, "⚪")
         pd_line = f"\n📟 PagerDuty: {pd_url}" if isinstance(pd_url, str) else ""
+        jira_line = f"\n🎫 Jira: {jira_url}" if isinstance(jira_url, str) else ""
+        similar_incidents = entry.get("similar_incidents", [])
+        similar_line = (
+            "\n\n💡 *Similar past incidents:*\n"
+            + "\n".join(f"• {s[:120]}" for s in similar_incidents[:3])
+            if similar_incidents
+            else ""
+        )
         await client.chat_postMessage(
             channel=settings.pagemenot_oncall_channel,
             text=f"{sev_emoji} *ESCALATION:* {result.alert_title} ({result.service})\n_{reason}_{pd_line}",
+            blocks=[
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": (
+                            f"{sev_emoji} *ESCALATION — human action required*\n"
+                            f"*Incident:* {result.alert_title}\n"
+                            f"*Service:* {result.service}\n"
+                            f"*Reason:* _{reason}_"
+                            f"{pd_line}{jira_line}{similar_line}"
+                        ),
+                    },
+                },
+                {"type": "divider"},
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": (
+                            "📝 *After resolving, write a postmortem:*\n"
+                            "• Document root cause and fix in `knowledge/postmortems/`\n"
+                            "• If no runbook exists, add one to `knowledge/runbooks/` — "
+                            "pagemenot will use it to auto-resolve next time"
+                        ),
+                    },
+                },
+            ],
         )
 
 

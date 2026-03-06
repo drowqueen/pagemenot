@@ -870,6 +870,7 @@ async def _auto_triage(source: str, payload: dict):
                     "root_cause": result.root_cause or "",
                     "jira_url": jira_url if isinstance(jira_url, str) else "",
                     "pd_url": pd_url if isinstance(pd_url, str) else "",
+                    "similar_incidents": result.similar_incidents or [],
                 },
             )
             steps_text = "\n".join(f"• `{s[:100]}`" for s in result.pending_exec_steps[:5])
@@ -927,6 +928,7 @@ async def _auto_triage(source: str, payload: dict):
                     "root_cause": result.root_cause or "",
                     "jira_url": jira_url if isinstance(jira_url, str) else "",
                     "pd_url": pd_url if isinstance(pd_url, str) else "",
+                    "similar_incidents": result.similar_incidents or [],
                 },
             )
             manual_text = "\n".join(f"• {s[:120]}" for s in result.needs_approval[:5])
