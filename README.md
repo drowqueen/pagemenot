@@ -228,7 +228,7 @@ kubectl is always included and auto-detects `amd64` / `arm64` at build time.
 |-------------|-------|
 | Running as a Kubernetes pod | Nothing — in-cluster ServiceAccount token auto-detected |
 | EC2 / ECS / GCP Compute / bare metal | Mount kubeconfig from secrets manager; set `KUBECONFIG_PATH=/app/kubeconfig` in `.env`; uncomment the kubeconfig volume in `docker-compose.yml` |
-| Local Kubernetes (minikube, kind, k3s) | Run `scripts/gen-kubeconfig.sh`, then set `KUBECONFIG_PATH=/app/kubeconfig` in `.env` and uncomment the kubeconfig volume in `docker-compose.yml` |
+| Local Kubernetes | Run `scripts/gen-kubeconfig.sh`, then set `KUBECONFIG_PATH=/app/kubeconfig` in `.env` and uncomment the kubeconfig volume in `docker-compose.yml` |
 
 `docker-compose.yml` ships with the kubeconfig volume commented out. Uncomment and set the host path for your environment:
 
