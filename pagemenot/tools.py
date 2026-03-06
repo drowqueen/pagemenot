@@ -957,6 +957,26 @@ def _resolve_lambda_version(service: str) -> str:
     return str(target)
 
 
+_SELF_INSTANCE_ID: "str | None" = None
+_SELF_INSTANCE_ID_FETCHED = False
+
+
+def _self_instance_id() -> "str | None":
+    """Return this host's EC2 instance ID from instance metadata, or None if not on EC2."""
+    global _SELF_INSTANCE_ID, _SELF_INSTANCE_ID_FETCHED
+    if _SELF_INSTANCE_ID_FETCHED:
+        return _SELF_INSTANCE_ID
+    _SELF_INSTANCE_ID_FETCHED = True
+    try:
+        import urllib.request as _ur
+
+        with _ur.urlopen("http://169.254.169.254/latest/meta-data/instance-id", timeout=1) as _r:
+            _SELF_INSTANCE_ID = _r.read().decode().strip()
+    except Exception:
+        pass
+    return _SELF_INSTANCE_ID
+
+
 def _parse_shorthand(s: str) -> "dict | None":
     """Parse AWS CLI shorthand 'Name=X,Value=Y' → {"Name": "X", "Value": "Y"} or None."""
     import re as _re
@@ -1001,6 +1021,14 @@ def dispatch_exec_step(step: str, service: str = "") -> str:
 
     # Substitute template variables — always sanitize service name to prevent injection
     safe_service = _safe_service_name(service) if service else ""
+
+    # Safety: never execute remediation against the instance pagemenot itself runs on
+    _host_id = _self_instance_id()
+    if _host_id and safe_service and safe_service == _host_id:
+        raise RuntimeError(
+            f"Execution blocked: target '{safe_service}' is the pagemenot host instance. "
+            "Deploy pagemenot on a separate host or behind a load balancer."
+        )
     ns_map = {
         k: v
         for pair in settings.pagemenot_service_namespaces.split(",")
