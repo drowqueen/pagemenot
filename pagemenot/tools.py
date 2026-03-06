@@ -957,6 +957,24 @@ def _resolve_lambda_version(service: str) -> str:
     return str(target)
 
 
+def _parse_shorthand(s: str) -> "dict | None":
+    """Parse AWS CLI shorthand 'Name=X,Value=Y' → {"Name": "X", "Value": "Y"} or None."""
+    import re as _re
+
+    if not _re.match(r"^\w+=", s):
+        return None
+    parts = _re.split(r",(?=\w+=)", s)
+    result = {}
+    for part in parts:
+        if "=" not in part:
+            return None
+        k, _, v = part.partition("=")
+        if not _re.fullmatch(r"[\w\-]+", k):
+            return None
+        result[k] = v
+    return result if result else None
+
+
 def _safe_service_name(service: str) -> str:
     """Validate service name used in template substitution — only safe chars allowed."""
     if not re.fullmatch(r"[a-zA-Z0-9_\-\.]+", service):
@@ -1112,7 +1130,9 @@ def dispatch_exec_step(step: str, service: str = "") -> str:
                     except ValueError:
                         raise ValueError(f"Parameter {snake} must be an integer, got {raw!r}")
                 else:
-                    params[snake] = raw
+                    # AWS CLI shorthand: Name=X,Value=Y → [{"Name": "X", "Value": "Y"}]
+                    shorthand = _parse_shorthand(raw)
+                    params[snake] = [shorthand] if shorthand is not None else raw
             else:
                 # Multi-value list (Fix 1): e.g. --log-stream-names s1 s2 s3
                 result_list: list = []
@@ -1123,7 +1143,8 @@ def dispatch_exec_step(step: str, service: str = "") -> str:
                             continue
                         except _json.JSONDecodeError:
                             pass
-                    result_list.append(v)
+                    shorthand = _parse_shorthand(v)
+                    result_list.append(shorthand if shorthand is not None else v)
                 params[snake] = result_list
             i = j
         return exec_aws(aws_service, aws_action, params)
