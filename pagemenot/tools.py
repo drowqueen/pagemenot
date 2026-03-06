@@ -824,19 +824,25 @@ def exec_aws(service: str, action: str, params: dict) -> str:
         msg = e.response["Error"]["Message"]
         if code in ("AccessDenied", "AccessDeniedException", "UnauthorizedOperation"):
             raise RuntimeError(f"AWS permission denied ({code}): {msg}")
-        # Lambda update_alias: alias doesn't exist yet → create it
-        if code == "ResourceNotFoundException" and action == "update_alias":
+        # Lambda update_alias: alias doesn't exist yet → create it.
+        # Only fall back when the alias itself is not found (not the function or version).
+        if (
+            code == "ResourceNotFoundException"
+            and action == "update_alias"
+            and ":alias/" in msg
+            or "Alias not found" in msg
+        ):
             create_method = getattr(client, "create_alias", None)
             if create_method:
                 try:
                     response = create_method(**params)
-                    return str(response)[:300]
+                    return str(response)[:2000]
                 except botocore.exceptions.ClientError as ce:
                     raise RuntimeError(
                         f"AWS error ({ce.response['Error']['Code']}): {ce.response['Error']['Message']}"
                     )
         raise RuntimeError(f"AWS error ({code}): {msg}")
-    return str(response)[:300]
+    return str(response)[:2000]
 
 
 def exec_shell(command: str) -> str:
