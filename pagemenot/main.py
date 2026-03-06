@@ -330,7 +330,7 @@ async def sns_webhook(
         # Extract severity from alarm description (e.g. "severity: critical")
         import re as _re
 
-        alarm_desc = message.get("AlarmDescription", "")
+        alarm_desc = message.get("AlarmDescription") or ""
         _sev_match = _re.search(r"\bseverity\s*:\s*(\w+)", alarm_desc, _re.IGNORECASE)
         alarm_severity = _sev_match.group(1).lower() if _sev_match else "high"
 
