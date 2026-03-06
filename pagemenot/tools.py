@@ -824,6 +824,17 @@ def exec_aws(service: str, action: str, params: dict) -> str:
         msg = e.response["Error"]["Message"]
         if code in ("AccessDenied", "AccessDeniedException", "UnauthorizedOperation"):
             raise RuntimeError(f"AWS permission denied ({code}): {msg}")
+        # Lambda update_alias: alias doesn't exist yet → create it
+        if code == "ResourceNotFoundException" and action == "update_alias":
+            create_method = getattr(client, "create_alias", None)
+            if create_method:
+                try:
+                    response = create_method(**params)
+                    return str(response)[:300]
+                except botocore.exceptions.ClientError as ce:
+                    raise RuntimeError(
+                        f"AWS error ({ce.response['Error']['Code']}): {ce.response['Error']['Message']}"
+                    )
         raise RuntimeError(f"AWS error ({code}): {msg}")
     return str(response)[:300]
 
@@ -883,17 +894,36 @@ def exec_http(method: str, url: str, headers: dict | None = None, body: dict | N
 
 
 def _resolve_lambda_version(service: str) -> str:
-    """Fetch the highest published numeric version for a Lambda function."""
+    """Resolve rollback version for a Lambda function.
+
+    Priority:
+    1. Current target of the 'stable' alias (confirms/resets alias to known-good state)
+    2. Highest published numeric version minus 1 (previous version before latest deployment)
+    3. Highest published numeric version if only one exists
+    """
     import boto3
 
     if not settings.aws_region:
         raise RuntimeError("AWS_REGION not configured — set AWS_REGION in .env")
     client = boto3.client("lambda", region_name=settings.aws_region)
+
+    # Prefer stable alias target — it was set to a known-good version
+    try:
+        alias = client.get_alias(FunctionName=service, Name="stable")
+        return alias["FunctionVersion"]
+    except client.exceptions.ResourceNotFoundException:
+        pass
+
+    # No stable alias — fall back to highest-1 (previous version before latest deployment)
     response = client.list_versions_by_function(FunctionName=service)
-    versions = [v["Version"] for v in response.get("Versions", []) if v["Version"] != "$LATEST"]
+    versions = sorted(
+        [int(v["Version"]) for v in response.get("Versions", []) if v["Version"] != "$LATEST"]
+    )
     if not versions:
         raise RuntimeError(f"No published numeric versions found for Lambda {service!r}")
-    return str(max(int(v) for v in versions))
+    # Roll back to previous version; if only one version, use it
+    target = versions[-2] if len(versions) >= 2 else versions[-1]
+    return str(target)
 
 
 def _safe_service_name(service: str) -> str:
