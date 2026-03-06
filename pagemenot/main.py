@@ -746,6 +746,7 @@ async def _verify_cw_recovery(
         cw_kwargs["region_name"] = settings.aws_region
     cw = boto3.client("cloudwatch", **cw_kwargs)
     loop = asyncio.get_running_loop()
+    logger.info("CW verify started: %s (timeout=%ds, poll=%ds)", alarm_name, timeout, poll)
 
     while elapsed < timeout:
         await asyncio.sleep(poll)
@@ -755,6 +756,8 @@ async def _verify_cw_recovery(
                 _executor, lambda: cw.describe_alarms(AlarmNames=[alarm_name])
             )
             alarms = resp.get("MetricAlarms", []) + resp.get("CompositeAlarms", [])
+            state = alarms[0].get("StateValue") if alarms else "NO_ALARM"
+            logger.info("CW verify poll [%ds]: %s → %s", elapsed, alarm_name, state)
             if alarms and alarms[0].get("StateValue") == "OK":
                 await client.chat_postMessage(
                     channel=channel,
