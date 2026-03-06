@@ -10,15 +10,16 @@ They see:
 import asyncio
 import json
 import logging
-import re
 import uuid
 
 from slack_bolt.async_app import AsyncApp
-from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 from slack_sdk.web.async_client import AsyncWebClient
 
 from pagemenot.config import settings
 from pagemenot.triage import run_triage, _executor
+
+# Set by main.py at startup — triggers CW alarm polling after approval exec (avoids circular import)
+_post_verification_task = None
 
 logger = logging.getLogger("pagemenot.slack")
 
@@ -28,21 +29,51 @@ _client: AsyncWebClient | None = None
 # Auto-approve timer tasks: task_id → asyncio.Task
 _pending_autoapprove: dict[str, asyncio.Task] = {}
 
+# Channel ID → name cache for message event routing (IDs like C1234567 never match names)
+_channel_name_cache: dict[str, str] = {}
+
 
 class _ApprovalStore:
-    """Pending approval store — Redis if REDIS_URL is set, in-memory fallback."""
+    """Pending approval store — Redis → JSON file → in-memory (in priority order)."""
 
-    def __init__(self):
+    _FILE = "/app/data/approvals.json"
+
+    def __init__(self, file: str | None = None):
+        if file:
+            self._FILE = file
         self._mem: dict[str, dict] = {}
         self._redis = None
+        self._load_file()
+
+    def _load_file(self):
+        try:
+            import os
+
+            if os.path.exists(self._FILE):
+                with open(self._FILE) as f:
+                    self._mem = json.load(f)
+                logger.info("Loaded %d pending approvals from %s", len(self._mem), self._FILE)
+        except Exception as e:
+            logger.warning("Could not load approvals file: %s", e)
+
+    def _save_file(self):
+        try:
+            import os
+
+            os.makedirs(os.path.dirname(self._FILE), exist_ok=True)
+            with open(self._FILE, "w") as f:
+                json.dump(self._mem, f)
+        except Exception as e:
+            logger.warning("Could not save approvals file: %s", e)
 
     async def _client(self):
         if self._redis is None and settings.redis_url:
             try:
                 import redis.asyncio as aioredis
+
                 self._redis = aioredis.from_url(settings.redis_url, decode_responses=True)
             except ImportError:
-                logger.warning("redis package not installed — falling back to in-memory approval store")
+                logger.warning("redis package not installed — falling back to file approval store")
         return self._redis
 
     async def set(self, key: str, value: dict, ttl: int = settings.pagemenot_approval_ttl) -> None:
@@ -51,6 +82,7 @@ class _ApprovalStore:
             await r.setex(key, ttl, json.dumps(value))
         else:
             self._mem[key] = value
+            self._save_file()
 
     async def pop(self, key: str) -> dict | None:
         r = await self._client()
@@ -60,10 +92,18 @@ class _ApprovalStore:
                 pipe.delete(key)
                 result, _ = await pipe.execute()
             return json.loads(result) if result else None
-        return self._mem.pop(key, None)
+        value = self._mem.pop(key, None)
+        if value is not None:
+            self._save_file()
+        return value
+
+    async def get_all(self) -> dict[str, dict]:
+        """Return snapshot of all entries for startup resume (file-backed, not removed)."""
+        return dict(self._mem)
 
 
 _approval_store = _ApprovalStore()
+_verif_store = _ApprovalStore(file="/app/data/verifications.json")
 
 
 def create_slack_app() -> AsyncApp:
@@ -79,7 +119,9 @@ def create_slack_app() -> AsyncApp:
     async def handle_command(ack, command, say):
         await ack()
         if not settings.pagemenot_enable_slash_command:
-            await say("Slash command is disabled. Set PAGEMENOT_ENABLE_SLASH_COMMAND=true to enable.")
+            await say(
+                "Slash command is disabled. Set PAGEMENOT_ENABLE_SLASH_COMMAND=true to enable."
+            )
             return
 
         text = command.get("text", "").strip()
@@ -99,11 +141,20 @@ def create_slack_app() -> AsyncApp:
         elif sub == "status":
             await _show_status(say)
 
+        elif sub == "reload":
+            await say("🔄 Re-indexing knowledge base…")
+            from pagemenot.rag import ingest_all as _ingest
+
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _ingest)
+            await say("✅ Knowledge base re-indexed — new postmortems and runbooks are now active.")
+
         else:
             await say(
                 "*Pagemenot — AI On-Call Copilot*\n\n"
                 "• `/pagemenot triage <description>` — Triage an incident\n"
                 "• `/pagemenot status` — Show connected integrations\n"
+                "• `/pagemenot reload` — Re-index runbooks and postmortems\n"
                 "• Mention `@Pagemenot` to triage from any channel\n"
                 "• Post alerts in watched channels for auto-triage"
             )
@@ -118,7 +169,9 @@ def create_slack_app() -> AsyncApp:
 
         if not event.get("thread_ts"):
             # Fire-and-forget — triage can take minutes; don't block the event handler
-            asyncio.create_task(_do_triage(say, source="manual", payload={"text": text}, thread_ts=thread))
+            asyncio.create_task(
+                _do_triage(say, source="manual", payload={"text": text}, thread_ts=thread)
+            )
         else:
             await say(
                 "Let me look into that... (follow-up context coming in v0.2)",
@@ -132,19 +185,38 @@ def create_slack_app() -> AsyncApp:
         from pagemenot.tools import dispatch_exec_step
         from pagemenot.triage import _redact_sensitive
 
-        approval_id = body["actions"][0]["value"]
+        raw_value = body["actions"][0]["value"]
+        # Value format: "approval_id:msg_ts" (msg_ts embedded to always target the right message)
+        if ":" in raw_value:
+            approval_id, embedded_ts = raw_value.split(":", 1)
+        else:
+            approval_id, embedded_ts = raw_value, None
         user_id = body["user"]["id"]
         user = body["user"]["name"]
         channel = body["container"].get("channel_id") or body.get("channel", {}).get("id")
         thread = body["container"].get("thread_ts") or body["container"].get("message_ts")
-        msg_ts = body["message"]["ts"]
+        msg_ts = embedded_ts or body["message"]["ts"]
 
         entry = await _approval_store.pop(approval_id)
         if not entry:
-            await client.chat_postMessage(
-                channel=channel, thread_ts=thread,
-                text="⚠️ This approval has already been handled or expired.",
-            )
+            # Silently remove the stale buttons — no noisy message
+            try:
+                await client.chat_update(
+                    channel=channel,
+                    ts=msg_ts,
+                    text="(Approval already handled)",
+                    blocks=[
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": "_(Approval already handled or expired)_",
+                            },
+                        }
+                    ],
+                )
+            except Exception:
+                pass
             return
 
         steps = entry["steps"]
@@ -152,16 +224,25 @@ def create_slack_app() -> AsyncApp:
 
         # Remove buttons immediately — prevents double-click
         await client.chat_update(
-            channel=channel, ts=msg_ts,
+            channel=channel,
+            ts=msg_ts,
             text=f"✅ Approved by @{user}",
-            blocks=[{"type": "section", "text": {"type": "mrkdwn",
-                "text": f"✅ *Approved by <@{user_id}>* — executing {len(steps)} step(s)..."}}],
+            blocks=[
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"✅ *Approved by <@{user_id}>* — executing {len(steps)} step(s)...",
+                    },
+                }
+            ],
         )
 
         success = True
         for i, step in enumerate(steps, 1):
             await client.chat_postMessage(
-                channel=channel, thread_ts=thread,
+                channel=channel,
+                thread_ts=thread,
                 text=f"⚙️ Step {i}/{len(steps)}: `{step[:120]}`",
             )
             try:
@@ -169,12 +250,14 @@ def create_slack_app() -> AsyncApp:
                     _executor, dispatch_exec_step, step, service
                 )
                 await client.chat_postMessage(
-                    channel=channel, thread_ts=thread,
+                    channel=channel,
+                    thread_ts=thread,
                     text=f"✅ Step {i}/{len(steps)} done:\n```{_redact_sensitive(output)[:500]}```",
                 )
             except Exception as e:
                 await client.chat_postMessage(
-                    channel=channel, thread_ts=thread,
+                    channel=channel,
+                    thread_ts=thread,
                     text=f"❌ Step {i}/{len(steps)} failed: `{e}`\nRemaining steps skipped.",
                 )
                 success = False
@@ -182,56 +265,193 @@ def create_slack_app() -> AsyncApp:
 
         if success:
             alert_title = entry.get("alert_title", "Incident")
-            exec_log = [
-                f"Step {i}: `{s}`"
-                for i, s in enumerate(steps, 1)
-            ]
-            await client.chat_postMessage(
-                channel=channel, thread_ts=thread,
-                text=f"✅ All {len(steps)} step(s) executed successfully.",
-            )
-            # Channel-level resolved post
+            exec_log = [f"Step {i}: `{s}`" for i, s in enumerate(steps, 1)]
+            alarm_name = entry.get("alarm_name", "")
+            region = entry.get("region", "")
+            jira_url = entry.get("jira_url", "")
+            pd_url = entry.get("pd_url", "")
+
             await client.chat_postMessage(
                 channel=channel,
-                text=f"🟢 *Resolved (human-approved):* {alert_title}",
-                blocks=[{"type": "section", "text": {"type": "mrkdwn",
-                    "text": f"🟢 *Resolved:* {alert_title}\n_Approved by <@{user_id}>, runbook executed successfully._"}}],
+                thread_ts=thread,
+                text=f"✅ All {len(steps)} step(s) executed successfully.",
             )
-            # Write postmortem + re-index for future RAG retrieval
-            from pagemenot.rag import write_and_index_postmortem as _wip
-            from pagemenot.triage import TriageResult as _TR
-            _r = _TR(alert_title=alert_title, service=entry.get("service", ""),
-                     root_cause=entry.get("root_cause", ""), execution_log=exec_log)
-            asyncio.create_task(asyncio.get_running_loop().run_in_executor(
-                None, _wip, _r, user_id, entry.get("jira_url", "")))
-            # Resolve Jira/PD tickets (stubs until real creds wired on AWS/GCP)
-            from pagemenot.main import _resolve_jira_ticket, _resolve_pagerduty_incident
-            asyncio.create_task(_resolve_jira_ticket(entry.get("jira_url", ""), resolved_by=user_id))
-            asyncio.create_task(_resolve_pagerduty_incident(entry.get("pd_url", ""), resolved_by=user_id))
+
+            if alarm_name and not settings.pagemenot_exec_dry_run and _post_verification_task:
+                # Launch CW polling — "🟢 Resolved" posted when alarm goes OK (or timeout escalates)
+                await client.chat_postMessage(
+                    channel=channel,
+                    thread_ts=thread,
+                    text=f"_Monitoring `{alarm_name}` — will confirm healthy when alarm returns to OK..._",
+                )
+                _post_verification_task(
+                    alarm_name, region, channel, thread, jira_url, pd_url, entry, user_id
+                )
+            else:
+                # Non-CW source or dry run — mark resolved immediately
+                await client.chat_postMessage(
+                    channel=channel,
+                    text=f"🟢 *Resolved:* {alert_title}",
+                    blocks=[
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": f"🟢 *Resolved:* {alert_title}\n_Approved by <@{user_id}>, runbook executed successfully._",
+                            },
+                        }
+                    ],
+                )
+                from pagemenot.main import _resolve_jira_ticket, _resolve_pagerduty_incident
+
+                asyncio.create_task(_resolve_jira_ticket(jira_url))
+                asyncio.create_task(_resolve_pagerduty_incident(pd_url, resolved_by=user_id))
+                # Write postmortem (best-effort)
+                try:
+                    from pagemenot.rag import write_and_index_postmortem as _wip
+                    from pagemenot.triage import TriageResult as _TR
+
+                    _r = _TR(
+                        alert_title=alert_title,
+                        service=entry.get("service", ""),
+                        severity=entry.get("severity", "unknown"),
+                        root_cause=entry.get("root_cause", ""),
+                        execution_log=exec_log,
+                    )
+                    asyncio.create_task(
+                        asyncio.get_running_loop().run_in_executor(
+                            None, _wip, _r, user_id, jira_url
+                        )
+                    )
+                except Exception as _pm_err:
+                    logger.warning("Postmortem task setup failed (non-fatal): %s", _pm_err)
         else:
             if not settings.pagemenot_exec_dry_run:
-                await _escalate_unresolved(client, channel, entry, reason=f"Runbook execution failed after approval by <@{user_id}>")
+                await _escalate_unresolved(
+                    client,
+                    channel,
+                    entry,
+                    reason=f"Runbook execution failed after approval by <@{user_id}>",
+                )
 
     @app.action("reject_action")
     async def handle_reject(ack, body, client):
         await ack()
-        approval_id = body["actions"][0]["value"]
+        raw_value = body["actions"][0]["value"]
+        if ":" in raw_value:
+            approval_id, embedded_ts = raw_value.split(":", 1)
+        else:
+            approval_id, embedded_ts = raw_value, None
         user_id = body["user"]["id"]
         user = body["user"]["name"]
         channel = body["container"].get("channel_id") or body.get("channel", {}).get("id")
-        msg_ts = body["message"]["ts"]
+        msg_ts = embedded_ts or body["message"]["ts"]
 
         entry = await _approval_store.pop(approval_id)
 
         await client.chat_update(
-            channel=channel, ts=msg_ts,
+            channel=channel,
+            ts=msg_ts,
             text=f"❌ Rejected by @{user}",
-            blocks=[{"type": "section", "text": {"type": "mrkdwn",
-                "text": f"❌ *Rejected by <@{user_id}>* — steps will not execute."}}],
+            blocks=[
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"❌ *Rejected by <@{user_id}>* — steps will not execute.",
+                    },
+                }
+            ],
         )
 
         if entry and not settings.pagemenot_exec_dry_run:
-            await _escalate_unresolved(client, channel, entry, reason=f"Runbook rejected by <@{user_id}>")
+            await _escalate_unresolved(
+                client, channel, entry, reason=f"Runbook rejected by <@{user_id}>"
+            )
+
+    @app.action("acknowledge_action")
+    async def handle_acknowledge(ack, body, client):
+        """Manual resolve — no runbook matched; user confirms they fixed it manually."""
+        await ack()
+        raw_value = body["actions"][0]["value"]
+        approval_id, embedded_ts = (
+            raw_value.split(":", 1) if ":" in raw_value else (raw_value, None)
+        )
+        user_id = body["user"]["id"]
+        channel = body["container"].get("channel_id") or body.get("channel", {}).get("id")
+        msg_ts = embedded_ts or body["message"]["ts"]
+
+        entry = await _approval_store.pop(approval_id)
+        if not entry:
+            await client.chat_postEphemeral(
+                channel=channel, user=user_id, text="Already acknowledged or expired."
+            )
+            return
+
+        await client.chat_update(
+            channel=channel,
+            ts=msg_ts,
+            text=f"✅ Acknowledged by <@{user_id}>",
+            blocks=[
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"✅ *Manually resolved by <@{user_id}>* — no runbook matched; steps executed manually.",
+                    },
+                }
+            ],
+        )
+        await client.chat_postMessage(
+            channel=channel,
+            text=f"🟢 *Resolved (manual):* {entry.get('alert_title', 'incident')}",
+            blocks=[
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"🟢 *Resolved:* {entry.get('alert_title', 'incident')}\n"
+                        f"_Manually resolved by <@{user_id}>. No runbook matched._",
+                    },
+                },
+                {"type": "divider"},
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": (
+                            "📝 *Action required — two steps:*\n"
+                            "1. Add a runbook to `knowledge/runbooks/` so this incident auto-resolves next time\n"
+                            "2. Write a postmortem in `knowledge/postmortems/` — "
+                            "a draft has been auto-generated and indexed for future reference"
+                        ),
+                    },
+                },
+            ],
+        )
+        from pagemenot.main import _resolve_jira_ticket, _resolve_pagerduty_incident
+
+        asyncio.create_task(_resolve_jira_ticket(entry.get("jira_url", "")))
+        asyncio.create_task(
+            _resolve_pagerduty_incident(entry.get("pd_url", ""), resolved_by=user_id)
+        )
+        try:
+            from pagemenot.rag import write_and_index_postmortem as _wip
+            from pagemenot.triage import TriageResult as _TR
+
+            _r = _TR(
+                alert_title=entry.get("alert_title", ""),
+                service=entry.get("service", ""),
+                severity=entry.get("severity", "unknown"),
+                root_cause=entry.get("root_cause", ""),
+            )
+            asyncio.create_task(
+                asyncio.get_running_loop().run_in_executor(
+                    None, _wip, _r, user_id, entry.get("jira_url", "")
+                )
+            )
+        except Exception as _e:
+            logger.warning("Postmortem task setup failed (non-fatal): %s", _e)
 
     @app.action("feedback_positive")
     async def handle_thumbs_up(ack, body):
@@ -255,25 +475,43 @@ def create_slack_app() -> AsyncApp:
             await say(f"❌ Auto-execution cancelled by @{user}.", thread_ts=thread)
 
     @app.event("message")
-    async def handle_message(event, say):
+    async def handle_message(event, client, say):
         if not settings.pagemenot_enable_channel_monitor:
             return
         if event.get("bot_id") or event.get("subtype"):
             return
 
-        channel = event.get("channel", "")
-        channel_name = event.get("channel_name", "")
-        watched = [c.strip() for c in settings.pagemenot_alert_channels.split(",")]
-        if channel not in watched and channel_name not in watched:
+        channel_id = event.get("channel", "")
+        if not channel_id:
             return
+
+        # watched may contain names OR IDs — resolve channel ID to name for name matching
+        watched = {c.strip() for c in settings.pagemenot_alert_channels.split(",")}
+        if channel_id not in watched:
+            if channel_id not in _channel_name_cache:
+                try:
+                    info = await client.conversations_info(channel=channel_id)
+                    _channel_name_cache[channel_id] = info["channel"]["name"]
+                except Exception:
+                    _channel_name_cache[channel_id] = channel_id
+            if _channel_name_cache[channel_id] not in watched:
+                return
 
         text = event.get("text", "")
         if not text or len(text) < 20:
             return
 
         if _looks_like_alert(text):
-            # Fire-and-forget — triage blocks; Slack retries if handler takes >3s
-            asyncio.create_task(_do_triage(say, source="slack-channel", payload={"text": text}))
+            # Post triage result to pagemenot_channel, not back to the alert source channel
+            dest = settings.pagemenot_channel
+
+            async def _say_to_dest(*args, **kwargs):
+                kwargs.setdefault("channel", dest)
+                return await client.chat_postMessage(*args, **kwargs)
+
+            asyncio.create_task(
+                _do_triage(_say_to_dest, source="slack-channel", payload={"text": text})
+            )
 
     return app
 
@@ -303,16 +541,52 @@ async def _escalate_unresolved(client, channel: str, entry: dict, reason: str):
     if isinstance(jira_url, str):
         await client.chat_postMessage(channel=channel, text=f"🎫 Jira ticket opened: {jira_url}")
     if isinstance(pd_url, str):
-        await client.chat_postMessage(channel=channel, text=f"📟 On-call paged via PagerDuty: {pd_url}")
+        await client.chat_postMessage(
+            channel=channel, text=f"📟 On-call paged via PagerDuty: {pd_url}"
+        )
     if settings.pagemenot_oncall_channel and sev_rank >= pd_min:
         sev_emoji = {"critical": "🔴", "high": "🟠", "medium": "🟡"}.get(result.severity, "⚪")
         pd_line = f"\n📟 PagerDuty: {pd_url}" if isinstance(pd_url, str) else ""
+        jira_line = f"\n🎫 Jira: {jira_url}" if isinstance(jira_url, str) else ""
+        similar_incidents = entry.get("similar_incidents", [])
+        similar_line = (
+            "\n\n💡 *Similar past incidents:*\n"
+            + "\n".join(f"• {s[:120]}" for s in similar_incidents[:3])
+            if similar_incidents
+            else ""
+        )
         await client.chat_postMessage(
             channel=settings.pagemenot_oncall_channel,
             text=f"{sev_emoji} *ESCALATION:* {result.alert_title} ({result.service})\n_{reason}_{pd_line}",
+            blocks=[
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": (
+                            f"{sev_emoji} *ESCALATION — human action required*\n"
+                            f"*Incident:* {result.alert_title}\n"
+                            f"*Service:* {result.service}\n"
+                            f"*Reason:* _{reason}_"
+                            f"{pd_line}{jira_line}{similar_line}"
+                        ),
+                    },
+                },
+                {"type": "divider"},
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": (
+                            "📝 *After resolving, write a postmortem:*\n"
+                            "• Document root cause and fix in `knowledge/postmortems/`\n"
+                            "• If no runbook exists, add one to `knowledge/runbooks/` — "
+                            "pagemenot will use it to auto-resolve next time"
+                        ),
+                    },
+                },
+            ],
         )
-
-
 
 
 async def _do_triage(say, source: str, payload: dict, thread_ts: str | None = None):
@@ -327,7 +601,9 @@ async def _do_triage(say, source: str, payload: dict, thread_ts: str | None = No
     try:
         result = await run_triage(source=source, payload=payload)
 
-        sev = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🔵"}.get(result.severity, "⚪")
+        sev = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🔵"}.get(
+            result.severity, "⚪"
+        )
         conf = {"high": "🟢", "medium": "🟡", "low": "🔴"}.get(result.confidence, "⚪")
 
         # Suppressed (duplicate or low-severity)
@@ -341,8 +617,17 @@ async def _do_triage(say, source: str, payload: dict, thread_ts: str | None = No
             dry = settings.pagemenot_exec_dry_run
             label = "Would auto-resolve" if dry else "Auto-resolved"
             # Analysis
-            clean_output = result.raw_output.replace("```sh\n", "").replace("```bash\n", "").replace("```\n", "").replace("```", "")
-            for i, chunk in enumerate(_chunk_text(clean_output, settings.pagemenot_slack_chunk_size)[:settings.pagemenot_slack_max_chunks]):
+            clean_output = (
+                result.raw_output.replace("```sh\n", "")
+                .replace("```bash\n", "")
+                .replace("```\n", "")
+                .replace("```", "")
+            )
+            for i, chunk in enumerate(
+                _chunk_text(clean_output, settings.pagemenot_slack_chunk_size)[
+                    : settings.pagemenot_slack_max_chunks
+                ]
+            ):
                 await say(
                     text=f"Analysis (part {i + 1})",
                     blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": chunk}}],
@@ -353,21 +638,42 @@ async def _do_triage(say, source: str, payload: dict, thread_ts: str | None = No
                 exec_text = "\n\n".join(result.execution_log[:10])
                 await say(
                     text="Runbook execution",
-                    blocks=[{"type": "section", "text": {"type": "mrkdwn",
-                        "text": f"*Runbook execution:*\n\n{exec_text[:2800]}"}}],
+                    blocks=[
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": f"*Runbook execution:*\n\n{exec_text[:2800]}",
+                            },
+                        }
+                    ],
                     thread_ts=thread,
                 )
             icon = "🟢" if not dry else "🔵"
             resolve_label = "Resolved" if not dry else "Dry-run resolved"
-            resolve_detail = ("Runbook executed successfully" if not dry else "Dry-run complete — no real commands were run")
+            resolve_detail = (
+                "Runbook executed successfully"
+                if not dry
+                else "Dry-run complete — no real commands were run"
+            )
             # Thread resolved message
             await say(
                 text=f"{icon} {resolve_label}: {result.alert_title}",
                 blocks=[
-                    {"type": "header", "text": {"type": "plain_text",
-                        "text": f"{icon} {resolve_label}: {result.alert_title[:80]}"}},
-                    {"type": "section", "text": {"type": "mrkdwn",
-                        "text": f"{resolve_detail}. Triage took {result.duration_seconds:.0f}s."}},
+                    {
+                        "type": "header",
+                        "text": {
+                            "type": "plain_text",
+                            "text": f"{icon} {resolve_label}: {result.alert_title[:80]}",
+                        },
+                    },
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"{resolve_detail}. Triage took {result.duration_seconds:.0f}s.",
+                        },
+                    },
                 ],
                 thread_ts=thread,
             )
@@ -377,9 +683,14 @@ async def _do_triage(say, source: str, payload: dict, thread_ts: str | None = No
                 channel=channel,
                 text=f"{icon} *{resolve_label}:* {result.alert_title}",
                 blocks=[
-                    {"type": "section", "text": {"type": "mrkdwn",
-                        "text": f"{icon} *{resolve_label}:* {result.alert_title}\n"
-                                f"_{resolve_detail} in {result.duration_seconds:.0f}s_"}},
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"{icon} *{resolve_label}:* {result.alert_title}\n"
+                            f"_{resolve_detail} in {result.duration_seconds:.0f}s_",
+                        },
+                    },
                 ],
             )
             return
@@ -403,8 +714,17 @@ async def _do_triage(say, source: str, payload: dict, thread_ts: str | None = No
         await say(text=f"{sev} {result.alert_title}", blocks=blocks, thread_ts=thread)
 
         # Strip markdown code fences from LLM output — Slack renders mrkdwn directly
-        clean_output = result.raw_output.replace("```sh\n", "").replace("```bash\n", "").replace("```\n", "").replace("```", "")
-        for i, chunk in enumerate(_chunk_text(clean_output, settings.pagemenot_slack_chunk_size)[:settings.pagemenot_slack_max_chunks]):
+        clean_output = (
+            result.raw_output.replace("```sh\n", "")
+            .replace("```bash\n", "")
+            .replace("```\n", "")
+            .replace("```", "")
+        )
+        for i, chunk in enumerate(
+            _chunk_text(clean_output, settings.pagemenot_slack_chunk_size)[
+                : settings.pagemenot_slack_max_chunks
+            ]
+        ):
             await say(
                 text=f"Detailed analysis (part {i + 1})",
                 blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": chunk}}],
@@ -416,8 +736,15 @@ async def _do_triage(say, source: str, payload: dict, thread_ts: str | None = No
             exec_text = "\n\n".join(result.execution_log[:10])
             await say(
                 text="Runbook execution",
-                blocks=[{"type": "section", "text": {"type": "mrkdwn",
-                    "text": f"*Runbook execution:*\n\n{exec_text[:2800]}"}}],
+                blocks=[
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"*Runbook execution:*\n\n{exec_text[:2800]}",
+                        },
+                    }
+                ],
                 thread_ts=thread,
             )
 
@@ -445,32 +772,39 @@ async def _do_triage(say, source: str, payload: dict, thread_ts: str | None = No
                         },
                         {
                             "type": "actions",
-                            "elements": [{
-                                "type": "button",
-                                "text": {"type": "plain_text", "text": "❌ Cancel"},
-                                "action_id": "cancel_autoapprove",
-                                "value": task_id,
-                                "style": "danger",
-                            }],
+                            "elements": [
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": "❌ Cancel"},
+                                    "action_id": "cancel_autoapprove",
+                                    "value": task_id,
+                                    "style": "danger",
+                                }
+                            ],
                         },
                     ],
                     thread_ts=thread,
                 )
                 task = asyncio.create_task(
-                    _autoapprove_timer(channel, thread, result.pending_exec_steps, result.service, task_id)
+                    _autoapprove_timer(
+                        channel, thread, result.pending_exec_steps, result.service, task_id
+                    )
                 )
                 _pending_autoapprove[task_id] = task
             else:
                 approval_id = str(uuid.uuid4())[:8]
-                await _approval_store.set(approval_id, {
-                    "steps": result.pending_exec_steps,
-                    "service": result.service or "",
-                    "alert_title": result.alert_title or "",
-                    "severity": result.severity or "high",
-                    "root_cause": result.root_cause or "",
-                    "jira_url": "",
-                    "pd_url": "",
-                })
+                await _approval_store.set(
+                    approval_id,
+                    {
+                        "steps": result.pending_exec_steps,
+                        "service": result.service or "",
+                        "alert_title": result.alert_title or "",
+                        "severity": result.severity or "high",
+                        "root_cause": result.root_cause or "",
+                        "jira_url": "",
+                        "pd_url": "",
+                    },
+                )
                 steps_text = "\n".join(f"• `{s[:100]}`" for s in result.pending_exec_steps[:5])
                 await _client.chat_postMessage(
                     channel=channel,
@@ -478,8 +812,10 @@ async def _do_triage(say, source: str, payload: dict, thread_ts: str | None = No
                     blocks=[
                         {
                             "type": "section",
-                            "text": {"type": "mrkdwn",
-                                "text": f"*⚠️ Approval required:* {result.alert_title}\n{steps_text}"},
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": f"*⚠️ Approval required:* {result.alert_title}\n{steps_text}",
+                            },
                         },
                         {
                             "type": "actions",
@@ -595,7 +931,9 @@ async def _show_status(say):
     if not settings.kubeconfig_path:
         not_connected.append("Kubernetes (KUBECONFIG_PATH)")
 
-    not_connected_str = "\n".join(f"  💡 {n}" for n in not_connected) if not_connected else "  (all connected!)"
+    not_connected_str = (
+        "\n".join(f"  💡 {n}" for n in not_connected) if not_connected else "  (all connected!)"
+    )
 
     await say(
         f"*🦞 Pagemenot Status*\n\n"
@@ -625,11 +963,38 @@ def _looks_like_alert(text: str) -> bool:
     """Heuristic: does this Slack message look like an alert that needs triage?"""
     lower = text.lower()
     alert_keywords = [
-        "alert", "alerting", "firing", "triggered", "pagerduty", "opsgenie",
-        "incident", "outage", "degraded", "down", "error rate", "p99",
-        "latency", "oomkill", "crashloop", "5xx", "500", "timeout",
-        "cpu", "memory", "disk full", "high", "critical", "warning",
-        "sev1", "sev2", "p1", "p2", "🔴", "🟠", "⚠️", "🚨",
+        "alert",
+        "alerting",
+        "firing",
+        "triggered",
+        "pagerduty",
+        "opsgenie",
+        "incident",
+        "outage",
+        "degraded",
+        "down",
+        "error rate",
+        "p99",
+        "latency",
+        "oomkill",
+        "crashloop",
+        "5xx",
+        "500",
+        "timeout",
+        "cpu",
+        "memory",
+        "disk full",
+        "high",
+        "critical",
+        "warning",
+        "sev1",
+        "sev2",
+        "p1",
+        "p2",
+        "🔴",
+        "🟠",
+        "⚠️",
+        "🚨",
     ]
     return any(kw in lower for kw in alert_keywords)
 

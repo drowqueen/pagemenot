@@ -23,7 +23,7 @@ from pagemenot.config import settings
 
 logger = logging.getLogger("pagemenot.tools")
 
-_SAFE_NAME_RE = re.compile(r'^[a-zA-Z0-9_.\-]+$')
+_SAFE_NAME_RE = re.compile(r"^[a-zA-Z0-9_.\-]+$")
 
 
 def _safe_name(name: str) -> str:
@@ -37,6 +37,7 @@ def _safe_name(name: str) -> str:
 # ══════════════════════════════════════════════════════════════
 # TOOL REGISTRY — auto-populates based on .env
 # ══════════════════════════════════════════════════════════════
+
 
 def get_available_tools() -> dict[str, list]:
     """Discover and return tools grouped by agent role.
@@ -92,18 +93,26 @@ def get_available_tools() -> dict[str, list]:
     remediator_tools.append(request_human_approval)
 
     import os as _os
+
     _in_cluster = bool(_os.environ.get("KUBERNETES_SERVICE_HOST"))
     _kubeconfig_ok = settings.kubeconfig_path and _os.path.isfile(settings.kubeconfig_path)
     if _in_cluster or _kubeconfig_ok:
         remediator_tools.append(kubectl_rollback)
-        _k8s_mode = "in-cluster service account" if _in_cluster else f"kubeconfig={settings.kubeconfig_path}"
+        _k8s_mode = (
+            "in-cluster service account"
+            if _in_cluster
+            else f"kubeconfig={settings.kubeconfig_path}"
+        )
         logger.info(f"✅ Kubernetes connected ({_k8s_mode})")
     elif settings.kubeconfig_path:
-        logger.warning(f"KUBECONFIG_PATH={settings.kubeconfig_path!r} is not a valid file — kubectl disabled. "
-                       "Set KUBECONFIG_PATH to a kubeconfig file, or run pagemenot as a pod with a ServiceAccount.")
+        logger.warning(
+            f"KUBECONFIG_PATH={settings.kubeconfig_path!r} is not a valid file — kubectl disabled. "
+            "Set KUBECONFIG_PATH to a kubeconfig file, or run pagemenot as a pod with a ServiceAccount."
+        )
 
     unconfigured = [
-        v for v, s in [
+        v
+        for v, s in [
             ("PROMETHEUS_URL", settings.prometheus_url),
             ("DATADOG_API_KEY", settings.datadog_api_key),
             ("NEWRELIC_API_KEY", settings.newrelic_api_key),
@@ -112,7 +121,8 @@ def get_available_tools() -> dict[str, list]:
             ("PAGERDUTY_API_KEY", settings.pagerduty_api_key),
             ("OPSGENIE_API_KEY", settings.opsgenie_api_key),
             ("GITHUB_TOKEN", settings.github_token),
-        ] if not s
+        ]
+        if not s
     ]
     if unconfigured:
         logger.info(f"💡 Not configured (all optional): {', '.join(unconfigured)}")
@@ -127,6 +137,7 @@ def get_available_tools() -> dict[str, list]:
 # ══════════════════════════════════════════════════════════════
 # MONITOR TOOLS
 # ══════════════════════════════════════════════════════════════
+
 
 @tool("Query Prometheus Metrics")
 def query_prometheus(service_name: str) -> str:
@@ -148,7 +159,7 @@ def query_prometheus(service_name: str) -> str:
             ),
             "request_rate": f'sum(rate(http_requests_total{{service="{service_name}"}}[5m]))',
             "latency_p99": (
-                f'histogram_quantile(0.99, '
+                f"histogram_quantile(0.99, "
                 f'sum(rate(http_request_duration_seconds_bucket{{service="{service_name}"}}[5m])) by (le))'
             ),
             "cpu_percent": f'avg(rate(container_cpu_usage_seconds_total{{pod=~"{service_name}.*"}}[5m])) * 100',
@@ -231,7 +242,7 @@ def search_logs_loki(query: str) -> str:
         except ValueError as e:
             return f"Invalid service name: {e}"
         # keywords: strip quotes to prevent LogQL injection
-        keywords = keywords.replace('"', '').replace("'", '')[:100]
+        keywords = keywords.replace('"', "").replace("'", "")[:100]
         logql = f'{{app="{service}"}} |= "{keywords}"'
 
         end = datetime.now(timezone.utc)
@@ -259,7 +270,9 @@ def search_logs_loki(query: str) -> str:
         if not streams:
             return f"No log entries found for query: {logql}"
 
-        _warn_err = re.compile(r'\b(warn|warning|error|err|fatal|critical|exception|traceback|panic)\b', re.IGNORECASE)
+        _warn_err = re.compile(
+            r"\b(warn|warning|error|err|fatal|critical|exception|traceback|panic)\b", re.IGNORECASE
+        )
         lines = []
         for stream in streams[:5]:
             for ts, line in stream.get("values", [])[:50]:
@@ -351,7 +364,12 @@ def get_opsgenie_alert(alert_id_or_service: str) -> str:
             resp = client.get(
                 "https://api.opsgenie.com/v2/alerts",
                 headers={"Authorization": f"GenieKey {settings.opsgenie_api_key}"},
-                params={"query": alert_id_or_service, "limit": 5, "sort": "createdAt", "order": "desc"},
+                params={
+                    "query": alert_id_or_service,
+                    "limit": 5,
+                    "sort": "createdAt",
+                    "order": "desc",
+                },
             )
             alerts = resp.json().get("data", [])
             if not alerts:
@@ -359,7 +377,9 @@ def get_opsgenie_alert(alert_id_or_service: str) -> str:
 
             lines = []
             for a in alerts:
-                lines.append(f"  [{a['id'][:8]}] {a.get('message', '?')} — {a.get('status', '?')} ({a.get('priority', '?')})")
+                lines.append(
+                    f"  [{a['id'][:8]}] {a.get('message', '?')} — {a.get('status', '?')} ({a.get('priority', '?')})"
+                )
             return "Recent OpsGenie alerts:\n" + "\n".join(lines)
 
     except Exception as e:
@@ -381,10 +401,14 @@ def query_datadog_metrics(service_name: str) -> str:
         }
 
         # Filter None values — httpx would send "None" as a string otherwise
-        headers = {k: v for k, v in {
-            "DD-API-KEY": settings.datadog_api_key,
-            "DD-APPLICATION-KEY": settings.datadog_app_key,
-        }.items() if v is not None}
+        headers = {
+            k: v
+            for k, v in {
+                "DD-API-KEY": settings.datadog_api_key,
+                "DD-APPLICATION-KEY": settings.datadog_app_key,
+            }.items()
+            if v is not None
+        }
         base = f"https://api.{settings.datadog_site}"
 
         results = []
@@ -467,7 +491,7 @@ def query_newrelic_metrics(service_name: str) -> str:
                 return f"No New Relic data for '{service_name}'."
 
             r = results[0]
-            avg = r.get('avg_duration')
+            avg = r.get("avg_duration")
             avg_str = f"{avg:.3f}s" if isinstance(avg, (int, float)) else "N/A"
             return (
                 f"New Relic metrics for '{service_name}' (last 30min):\n"
@@ -483,6 +507,7 @@ def query_newrelic_metrics(service_name: str) -> str:
 # ══════════════════════════════════════════════════════════════
 # DIAGNOSER TOOLS
 # ══════════════════════════════════════════════════════════════
+
 
 @tool("Get Recent Deploys from GitHub")
 def get_recent_deploys(repo_or_service: str) -> str:
@@ -558,8 +583,7 @@ def get_pr_diff(repo_and_pr_number: str) -> str:
             for f in files[:10]:
                 patch_preview = (f.get("patch", "")[:300] + "...") if f.get("patch") else "binary"
                 lines.append(
-                    f"  {f['filename']} (+{f['additions']} -{f['deletions']})\n"
-                    f"    {patch_preview}"
+                    f"  {f['filename']} (+{f['additions']} -{f['deletions']})\n    {patch_preview}"
                 )
             return f"PR #{pr_num} changes:\n" + "\n".join(lines)
 
@@ -570,6 +594,7 @@ def get_pr_diff(repo_and_pr_number: str) -> str:
 def _chroma_client():
     import chromadb
     import os
+
     os.makedirs(settings.chroma_path, exist_ok=True)
     return chromadb.PersistentClient(path=settings.chroma_path)
 
@@ -582,11 +607,15 @@ def search_past_incidents(query: str) -> str:
         client = _chroma_client()
 
         try:
-            collection = client.get_or_create_collection(settings.chroma_incidents_collection, metadata={"hnsw:space": "cosine"})
+            collection = client.get_or_create_collection(
+                settings.chroma_incidents_collection, metadata={"hnsw:space": "cosine"}
+            )
         except Exception:
             return "No past incidents in knowledge base yet. Pagemenot will learn as you use it."
 
-        results = collection.query(query_texts=[query], n_results=settings.pagemenot_rag_incidents_n_results)
+        results = collection.query(
+            query_texts=[query], n_results=settings.pagemenot_rag_incidents_n_results
+        )
 
         if not results["documents"] or not results["documents"][0]:
             return "No similar past incidents found."
@@ -599,7 +628,7 @@ def search_past_incidents(query: str) -> str:
                 f"    Resolution: {meta.get('resolution', 'Unknown')}\n"
                 f"    Excerpt: {doc[:150]}..."
             )
-        return f"Similar past incidents:\n" + "\n".join(lines)
+        return "Similar past incidents:\n" + "\n".join(lines)
 
     except Exception as e:
         return f"Incident search failed: {e}"
@@ -609,6 +638,7 @@ def search_past_incidents(query: str) -> str:
 # REMEDIATOR TOOLS
 # ══════════════════════════════════════════════════════════════
 
+
 @tool("Search Runbooks")
 def search_runbooks(query: str) -> str:
     """Search operational runbooks for fix procedures.
@@ -616,14 +646,18 @@ def search_runbooks(query: str) -> str:
     try:
         client = _chroma_client()
         try:
-            collection = client.get_or_create_collection(settings.chroma_runbooks_collection, metadata={"hnsw:space": "cosine"})
+            collection = client.get_or_create_collection(
+                settings.chroma_runbooks_collection, metadata={"hnsw:space": "cosine"}
+            )
         except Exception:
             return (
                 "No runbooks in knowledge base yet. "
                 "Add markdown files to ./knowledge/runbooks/ and restart."
             )
 
-        results = collection.query(query_texts=[query], n_results=settings.pagemenot_rag_runbooks_n_results)
+        results = collection.query(
+            query_texts=[query], n_results=settings.pagemenot_rag_runbooks_n_results
+        )
 
         if not results["documents"] or not results["documents"][0]:
             return "No matching runbooks found."
@@ -635,7 +669,7 @@ def search_runbooks(query: str) -> str:
                 f"    Service: {meta.get('service', 'General')}\n"
                 f"    Steps:\n    {doc[:300]}..."
             )
-        return f"Matching runbooks:\n" + "\n".join(lines)
+        return "Matching runbooks:\n" + "\n".join(lines)
 
     except Exception as e:
         return f"Runbook search failed: {e}"
@@ -682,6 +716,7 @@ def kubectl_rollback(deployment_name: str) -> str:
 # No destructive operations — only safe/reversible actions
 # ══════════════════════════════════════════════════════════════
 
+
 def _exec_enabled():
     if not settings.pagemenot_exec_enabled and not settings.pagemenot_exec_dry_run:
         raise RuntimeError("PAGEMENOT_EXEC_ENABLED is false — autonomous execution is disabled")
@@ -705,8 +740,11 @@ def exec_kubectl(command: str) -> str:
     # Validate kubeconfig path is a file, not a directory (Docker creates dirs for missing mounts)
     if kubeconfig:
         import os as _os
+
         if not _os.path.isfile(kubeconfig):
-            logger.warning(f"KUBECONFIG_PATH={kubeconfig!r} is not a file — falling back to default config discovery")
+            logger.warning(
+                f"KUBECONFIG_PATH={kubeconfig!r} is not a file — falling back to default config discovery"
+            )
             kubeconfig = None
 
     if kubeconfig:
@@ -715,51 +753,144 @@ def exec_kubectl(command: str) -> str:
         # In-cluster (KUBERNETES_SERVICE_HOST set) or ~/.kube/config — kubectl handles it
         cmd = ["kubectl"] + parts
 
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=settings.pagemenot_subprocess_timeout)
+    result = subprocess.run(
+        cmd, capture_output=True, text=True, timeout=settings.pagemenot_subprocess_timeout
+    )
     if result.returncode != 0:
         raise RuntimeError(f"kubectl failed: {result.stderr[:300]}")
     return result.stdout.strip()[:500]
 
 
 def exec_aws(service: str, action: str, params: dict) -> str:
-    """Execute an AWS operation via assumed IAM role."""
+    """Execute an AWS operation.
+
+    Credential order:
+    1. AWS_ROLE_ARN set → assume that role via STS (cross-account or least-privilege)
+    2. No role → boto3 default chain: instance profile (EC2/ECS), IRSA (EKS),
+       AWS_ACCESS_KEY_ID env vars, or ~/.aws/credentials
+    """
     _exec_enabled()
     if settings.pagemenot_exec_dry_run:
         return f"[DRY RUN] would call: aws {service} {action}({params})"
-    if not settings.aws_role_arn:
-        raise RuntimeError("AWS_ROLE_ARN not configured")
+
+    import boto3
+    import botocore.exceptions
+
+    if not settings.aws_region:
+        raise RuntimeError("AWS_REGION not configured — set AWS_REGION in .env")
+
+    if settings.aws_role_arn:
+        try:
+            sts = boto3.client("sts", region_name=settings.aws_region)
+            creds = sts.assume_role(
+                RoleArn=settings.aws_role_arn,
+                RoleSessionName="pagemenot-exec",
+            )["Credentials"]
+        except botocore.exceptions.ClientError as e:
+            code = e.response["Error"]["Code"]
+            raise RuntimeError(f"STS assume_role failed ({code}): {e.response['Error']['Message']}")
+        client = boto3.client(
+            service,
+            region_name=settings.aws_region,
+            aws_access_key_id=creds["AccessKeyId"],
+            aws_secret_access_key=creds["SecretAccessKey"],
+            aws_session_token=creds["SessionToken"],
+        )
+    else:
+        client = boto3.client(service, region_name=settings.aws_region)
+
+    method = getattr(client, action, None)
+    if method is None:
+        raise RuntimeError(f"Unknown AWS action '{action}' on service '{service}'")
+
+    # Remap snake_case CLI params → exact boto3 param names via service model
+    # Also coerce types: list-type params wrapped in list, integer/boolean params cast
+    try:
+        op_name = "".join(w.capitalize() for w in action.split("_"))
+        # Case-insensitive lookup handles abbreviations like DB→Db, LB→Lb, etc.
+        _all_ops = {k.lower(): k for k in client.meta.service_model.operation_names}
+        op_name = _all_ops.get(op_name.lower(), op_name)
+        members = client.meta.service_model.operation_model(op_name).input_shape.members
+        lower_map = {k.lower().replace("_", ""): k for k in members}
+        params = {lower_map.get(k.lower().replace("_", ""), k): v for k, v in params.items()}
+        for pname, pval in list(params.items()):
+            shape = members.get(pname)
+            if shape is None:
+                continue
+            if shape.type_name == "list" and isinstance(pval, str):
+                params[pname] = [pval]
+            elif shape.type_name == "integer" and isinstance(pval, str):
+                try:
+                    params[pname] = int(pval)
+                except ValueError:
+                    pass
+            elif shape.type_name == "boolean" and isinstance(pval, str):
+                params[pname] = pval.lower() not in ("false", "0", "")
+    except Exception:
+        pass  # fall through with raw params; boto3 will surface any name errors
+
+    # Pagination (Fix 3): use boto3 paginator when available; cap at 500 items
+    try:
+        paginator = client.get_paginator(action)
+        full = paginator.paginate(**params, PaginationConfig={"MaxItems": 500}).build_full_result()
+        return str(full)[:2000]
+    except botocore.exceptions.OperationNotPageableError:
+        pass  # not pageable — fall through to single call
 
     try:
-        import boto3
-    except ImportError:
-        raise RuntimeError("boto3 not installed — add to requirements.txt")
-
-    sts = boto3.client("sts", region_name=settings.aws_region)
-    creds = sts.assume_role(
-        RoleArn=settings.aws_role_arn,
-        RoleSessionName="pagemenot-exec",
-    )["Credentials"]
-
-    client = boto3.client(
-        service,
-        region_name=settings.aws_region,
-        aws_access_key_id=creds["AccessKeyId"],
-        aws_secret_access_key=creds["SecretAccessKey"],
-        aws_session_token=creds["SessionToken"],
-    )
-    response = getattr(client, action)(**params)
-    return str(response)[:300]
+        response = method(**params)
+    except botocore.exceptions.NoCredentialsError:
+        raise RuntimeError(
+            "No AWS credentials found. Options: set AWS_ROLE_ARN, attach an instance profile "
+            "(EC2/ECS), use IRSA (EKS), or set AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY."
+        )
+    except botocore.exceptions.ClientError as e:
+        code = e.response["Error"]["Code"]
+        msg = e.response["Error"]["Message"]
+        if code in ("AccessDenied", "AccessDeniedException", "UnauthorizedOperation"):
+            raise RuntimeError(f"AWS permission denied ({code}): {msg}")
+        # Lambda update_alias: alias doesn't exist yet → create it.
+        # Only fall back when the alias itself is not found (not the function or version).
+        if (
+            code == "ResourceNotFoundException"
+            and action == "update_alias"
+            and ":alias/" in msg
+            or "Alias not found" in msg
+        ):
+            create_method = getattr(client, "create_alias", None)
+            if create_method:
+                try:
+                    response = create_method(**params)
+                    return str(response)[:2000]
+                except botocore.exceptions.ClientError as ce:
+                    raise RuntimeError(
+                        f"AWS error ({ce.response['Error']['Code']}): {ce.response['Error']['Message']}"
+                    )
+        raise RuntimeError(f"AWS error ({code}): {msg}")
+    return str(response)[:2000]
 
 
 def exec_shell(command: str) -> str:
-    """Execute a shell command from a runbook exec tag."""
+    """Execute a shell command from a runbook exec tag.
+
+    Uses shell=True so runbook steps can use &&, ||, pipes, etc.
+    Safe: commands come exclusively from operator-owned runbook files (never LLM output),
+    and template variables are validated by _safe_service_name() before substitution.
+    """
     _exec_enabled()
     if settings.pagemenot_exec_dry_run:
         return f"[DRY RUN] would execute: {command}"
-    result = subprocess.run(shlex.split(command), capture_output=True, text=True, timeout=settings.pagemenot_subprocess_timeout)
+    result = subprocess.run(
+        command,
+        shell=True,
+        capture_output=True,
+        text=True,
+        timeout=settings.pagemenot_subprocess_timeout,
+    )
     if result.returncode != 0:
-        raise RuntimeError(f"Command failed: {result.stderr[:300]}")
-    return result.stdout.strip()[:500]
+        detail = (result.stderr or result.stdout or "no output").strip()
+        raise RuntimeError(f"Command failed: {detail[:300]}")
+    return (result.stdout or result.stderr).strip()[:500]
 
 
 def exec_http(method: str, url: str, headers: dict | None = None, body: dict | None = None) -> str:
@@ -771,10 +902,13 @@ def exec_http(method: str, url: str, headers: dict | None = None, body: dict | N
 
     # SSRF guard — only allow calls to configured integration domains
     from urllib.parse import urlparse
+
     allowed_hosts = {
         urlparse(u).hostname
         for u in [
-            settings.prometheus_url, settings.grafana_url, settings.loki_url,
+            settings.prometheus_url,
+            settings.grafana_url,
+            settings.loki_url,
         ]
         if u
     }
@@ -790,9 +924,80 @@ def exec_http(method: str, url: str, headers: dict | None = None, body: dict | N
         return f"{resp.status_code}: {resp.text[:200]}"
 
 
+def _resolve_lambda_version(service: str) -> str:
+    """Resolve rollback version for a Lambda function.
+
+    Priority:
+    1. Current target of the 'stable' alias (confirms/resets alias to known-good state)
+    2. Highest published numeric version minus 1 (previous version before latest deployment)
+    3. Highest published numeric version if only one exists
+    """
+    import boto3
+
+    if not settings.aws_region:
+        raise RuntimeError("AWS_REGION not configured — set AWS_REGION in .env")
+    client = boto3.client("lambda", region_name=settings.aws_region)
+
+    # Prefer stable alias target — it was set to a known-good version
+    try:
+        alias = client.get_alias(FunctionName=service, Name="stable")
+        return alias["FunctionVersion"]
+    except client.exceptions.ResourceNotFoundException:
+        pass
+
+    # No stable alias — fall back to highest-1 (previous version before latest deployment)
+    response = client.list_versions_by_function(FunctionName=service)
+    versions = sorted(
+        [int(v["Version"]) for v in response.get("Versions", []) if v["Version"] != "$LATEST"]
+    )
+    if not versions:
+        raise RuntimeError(f"No published numeric versions found for Lambda {service!r}")
+    # Roll back to previous version; if only one version, use it
+    target = versions[-2] if len(versions) >= 2 else versions[-1]
+    return str(target)
+
+
+_SELF_INSTANCE_ID: "str | None" = None
+_SELF_INSTANCE_ID_FETCHED = False
+
+
+def _self_instance_id() -> "str | None":
+    """Return this host's EC2 instance ID from instance metadata, or None if not on EC2."""
+    global _SELF_INSTANCE_ID, _SELF_INSTANCE_ID_FETCHED
+    if _SELF_INSTANCE_ID_FETCHED:
+        return _SELF_INSTANCE_ID
+    _SELF_INSTANCE_ID_FETCHED = True
+    try:
+        import urllib.request as _ur
+
+        with _ur.urlopen("http://169.254.169.254/latest/meta-data/instance-id", timeout=1) as _r:
+            _SELF_INSTANCE_ID = _r.read().decode().strip()
+    except Exception:
+        pass
+    return _SELF_INSTANCE_ID
+
+
+def _parse_shorthand(s: str) -> "dict | None":
+    """Parse AWS CLI shorthand 'Name=X,Value=Y' → {"Name": "X", "Value": "Y"} or None."""
+    import re as _re
+
+    if not _re.match(r"^\w+=", s):
+        return None
+    parts = _re.split(r",(?=\w+=)", s)
+    result = {}
+    for part in parts:
+        if "=" not in part:
+            return None
+        k, _, v = part.partition("=")
+        if not _re.fullmatch(r"[\w\-]+", k):
+            return None
+        result[k] = v
+    return result if result else None
+
+
 def _safe_service_name(service: str) -> str:
     """Validate service name used in template substitution — only safe chars allowed."""
-    if not re.fullmatch(r'[a-zA-Z0-9_\-]+', service):
+    if not re.fullmatch(r"[a-zA-Z0-9_\-\.]+", service):
         raise ValueError(f"Unsafe service name for template substitution: {service!r}")
     return service
 
@@ -804,42 +1009,172 @@ def dispatch_exec_step(step: str, service: str = "") -> str:
     Template substitution ({{ service }}) happens after routing and validation.
     """
     # Match both <!-- exec: --> and <!-- exec:approve: --> — raw LLM text rejected
-    match = re.match(r'<!--\s*exec(?::approve)?:\s*(.+?)\s*-->', step)
+    match = re.match(r"<!--\s*exec(?::approve)?:\s*(.+?)\s*-->", step)
     if not match:
-        raise ValueError("Only <!-- exec: --> tagged steps from runbooks are allowed for autonomous execution")
+        raise ValueError(
+            "Only <!-- exec: --> tagged steps from runbooks are allowed for autonomous execution"
+        )
     cmd = match.group(1).strip()
 
     if not cmd:
         raise ValueError("Empty exec step")
 
-    # Substitute template variables
-    from pagemenot.config import settings as _s
-    ns_map = {k: v for pair in _s.pagemenot_service_namespaces.split(",")
-              if "=" in pair for k, v in [pair.strip().split("=", 1)]}
-    namespace = ns_map.get(service, _s.pagemenot_exec_namespace) if service else _s.pagemenot_exec_namespace
-    for _raw, _sub in [("{{ service }}", _safe_service_name(service) if service else ""),
-                       ("{{service}}", service),
-                       ("{{ namespace }}", namespace),
-                       ("{{namespace}}", namespace)]:
+    # Substitute template variables — always sanitize service name to prevent injection
+    safe_service = _safe_service_name(service) if service else ""
+
+    # Safety: never execute remediation against the instance pagemenot itself runs on
+    _host_id = _self_instance_id()
+    if _host_id and safe_service and safe_service == _host_id:
+        raise RuntimeError(
+            f"Execution blocked: target '{safe_service}' is the pagemenot host instance. "
+            "Deploy pagemenot on a separate host or behind a load balancer."
+        )
+    ns_map = {
+        k: v
+        for pair in settings.pagemenot_service_namespaces.split(",")
+        if "=" in pair
+        for k, v in [pair.strip().split("=", 1)]
+    }
+    namespace = (
+        ns_map.get(service, settings.pagemenot_exec_namespace)
+        if service
+        else settings.pagemenot_exec_namespace
+    )
+    # Resolve {{ lambda_version }} lazily — only if needed to avoid extra API calls
+    _lambda_version: str | None = None
+
+    def _get_lambda_version() -> str:
+        nonlocal _lambda_version
+        if _lambda_version is None:
+            _lambda_version = _resolve_lambda_version(safe_service)
+        return _lambda_version
+
+    for _raw, _sub in [
+        ("{{ service }}", safe_service),
+        ("{{service}}", safe_service),
+        ("{{ namespace }}", namespace),
+        ("{{namespace}}", namespace),
+    ]:
         cmd = cmd.replace(_raw, _sub)
+
+    # Dynamic template vars resolved on demand
+    if "{{ lambda_version }}" in cmd or "{{lambda_version}}" in cmd:
+        lv = _get_lambda_version()
+        cmd = cmd.replace("{{ lambda_version }}", lv).replace("{{lambda_version}}", lv)
 
     # Route to correct executor
     if cmd.startswith("kubectl "):
-        kubectl_cmd = cmd[len("kubectl "):]
-        return exec_kubectl(kubectl_cmd)
+        return exec_kubectl(cmd[len("kubectl ") :])
     elif cmd.startswith("aws "):
-        parts = shlex.split(cmd)
+        import json as _json
+        import botocore.session as _bcs
+
+        # Strip pipes — boto3 handles response natively
+        pipe_idx = cmd.find(" | ")
+        cmd_clean = cmd[:pipe_idx].strip() if pipe_idx != -1 else cmd
+        parts = shlex.split(cmd_clean)
         if len(parts) < 3:
             raise ValueError(f"Invalid AWS command: {cmd!r}")
         aws_service, aws_action = parts[1], parts[2].replace("-", "_")
+
+        # CLI-only flags — no boto3 equivalent
+        _CLI_ONLY = {
+            "region",
+            "output",
+            "query",
+            "profile",
+            "no_sign_request",
+            "endpoint_url",
+            "color",
+            "no_paginate",
+            "debug",
+            "cli_connect_timeout",
+            "cli_read_timeout",
+            "cli_binary_format",
+            "ca_bundle",
+            "no_verify_ssl",
+            "no_cli_pager",
+        }
+        _REMAP = {"max_items": "limit"}
+        _INT_PARAMS = {"limit", "max_results", "max_items", "count", "duration_seconds"}
+
+        # Load valid flag names (no-creds botocore session) to distinguish flags from
+        # values that happen to start with "--" (Fix 2)
+        _valid_flags: frozenset[str] = frozenset()
+        try:
+            _op_name = "".join(w.capitalize() for w in aws_action.split("_"))
+            _members = (
+                _bcs.Session()
+                .get_service_model(aws_service)
+                .operation_model(_op_name)
+                .input_shape.members
+            )
+            _valid_flags = frozenset(k.lower().replace("_", "") for k in _members)
+        except Exception:
+            pass  # fall back: all "--" tokens treated as flags
+
         params: dict = {}
         i = 3
-        while i + 1 < len(parts):
-            if parts[i].startswith("--"):
-                params[parts[i].lstrip("-").replace("-", "_")] = parts[i + 1]
-                i += 2
-            else:
+        while i < len(parts):
+            token = parts[i]
+            if not token.startswith("--"):
                 i += 1
+                continue
+            snake = token.lstrip("-").replace("-", "_")
+
+            # Collect values: advance j while next token is not a recognised flag (Fix 1 + 2)
+            values: list[str] = []
+            j = i + 1
+            while j < len(parts):
+                nxt = parts[j]
+                if nxt.startswith("--"):
+                    nxt_norm = nxt.lstrip("-").replace("-", "_").replace("_", "")
+                    nxt_snake = nxt.lstrip("-").replace("-", "_")
+                    # Stop if it's a recognised API flag or a CLI-only flag
+                    if nxt_norm in _valid_flags or nxt_snake in _CLI_ONLY:
+                        break
+                    # Unknown "--xxx" → treat as value (Fix 2)
+                values.append(nxt)
+                j += 1
+
+            if snake in _CLI_ONLY:
+                i = j
+                continue
+            snake = _REMAP.get(snake, snake)
+
+            if not values:
+                params[snake] = True  # boolean switch
+            elif len(values) == 1:
+                raw = values[0]
+                # JSON/complex params: try to parse "[…]" or "{…}" (Fix 4)
+                if raw[:1] in ("[", "{"):
+                    try:
+                        params[snake] = _json.loads(raw)
+                    except _json.JSONDecodeError:
+                        params[snake] = raw
+                elif snake in _INT_PARAMS:
+                    try:
+                        params[snake] = int(raw)
+                    except ValueError:
+                        raise ValueError(f"Parameter {snake} must be an integer, got {raw!r}")
+                else:
+                    # AWS CLI shorthand: Name=X,Value=Y → [{"Name": "X", "Value": "Y"}]
+                    shorthand = _parse_shorthand(raw)
+                    params[snake] = [shorthand] if shorthand is not None else raw
+            else:
+                # Multi-value list (Fix 1): e.g. --log-stream-names s1 s2 s3
+                result_list: list = []
+                for v in values:
+                    if v[:1] in ("[", "{"):
+                        try:
+                            result_list.append(_json.loads(v))
+                            continue
+                        except _json.JSONDecodeError:
+                            pass
+                    shorthand = _parse_shorthand(v)
+                    result_list.append(shorthand if shorthand is not None else v)
+                params[snake] = result_list
+            i = j
         return exec_aws(aws_service, aws_action, params)
     elif cmd.startswith("http://") or cmd.startswith("https://"):
         return exec_http("GET", cmd)
@@ -860,7 +1195,9 @@ def get_runbook_exec_steps(query: str, service: str = "") -> dict[str, list[tupl
             settings.chroma_runbooks_collection, metadata={"hnsw:space": "cosine"}
         )
 
-        results = collection.query(query_texts=[query], n_results=settings.pagemenot_rag_runbooks_n_results)
+        results = collection.query(
+            query_texts=[query], n_results=settings.pagemenot_rag_runbooks_n_results
+        )
         if not results["documents"] or not results["documents"][0]:
             return {"auto": [], "approve": []}
 
@@ -877,9 +1214,9 @@ def get_runbook_exec_steps(query: str, service: str = "") -> dict[str, list[tupl
             runbook_path = RUNBOOKS_DIR / filename
             if runbook_path.exists():
                 content = runbook_path.read_text(encoding="utf-8")
-                for match in re.finditer(r'<!--\s*exec(?::approve)?:\s*.+?\s*-->', content):
+                for match in re.finditer(r"<!--\s*exec(?::approve)?:\s*.+?\s*-->", content):
                     tag = match.group(0)
-                    if re.match(r'<!--\s*exec:approve:', tag):
+                    if re.match(r"<!--\s*exec:approve:", tag):
                         approve_steps.append((tag, filename))
                     else:
                         auto_steps.append((tag, filename))

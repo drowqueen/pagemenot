@@ -13,8 +13,14 @@ State which rules apply BEFORE any task. If violated: STOP, fix, add validation.
 | Long jobs | #7, #0.95 |
 | Agents | #25 |
 
-### #0.95: NO SLEEP LOOPS
-FORBIDDEN: `sleep N && tail`, polling loops. Launch in detached screen, report name + log path, move on.
+### #0.95: NEVER BLOCK THE TERMINAL — ZERO EXCEPTIONS
+FORBIDDEN in any shape or form:
+- `sleep N`, polling loops, `tail -f`, `watch`, waiting for output
+- Blocking Bash calls for anything that takes more than 2 seconds
+
+REQUIRED: Every long-running command (builds, deploys, docker compose, ssh remote commands, test runs) MUST run in a detached screen session:
+`screen -dmS <name> bash -c "<command> > /tmp/<name>.log 2>&1"`
+Report the screen name + log path, move on immediately. Never use `run_in_background` for long jobs — screen survives terminal crashes.
 
 ### #5: CREDENTIALS
 `.env` only. Never in code. Never hardcode API keys, tokens, or secrets.

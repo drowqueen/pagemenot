@@ -16,24 +16,32 @@ class Settings(BaseSettings):
     anthropic_api_key: Optional[str] = None
     gemini_api_key: Optional[str] = None
     ollama_url: Optional[str] = None
-    ollama_embedding_model: Optional[str] = None  # e.g. nomic-embed-text — enables cross-incident memory with Ollama
+    ollama_embedding_model: Optional[str] = (
+        None  # e.g. nomic-embed-text — enables cross-incident memory with Ollama
+    )
 
     # ── Postmortem LLM (optional — falls back to llm_provider/llm_model) ──
-    postmortem_llm_provider: Optional[str] = None  # e.g. anthropic — used only for postmortem drafting
-    postmortem_llm_model: Optional[str] = None      # e.g. claude-opus-4-6
+    postmortem_llm_provider: Optional[str] = (
+        None  # e.g. anthropic — used only for postmortem drafting
+    )
+    postmortem_llm_model: Optional[str] = None  # e.g. claude-opus-4-6
 
     # ── Vector store ──────────────────────────────────────
-    chroma_path: str = "/app/data/chroma"   # used only when CHROMA_HOST is not set (embedded mode)
-    chroma_host: Optional[str] = None       # remote ChromaDB server host (required for multi-replica)
-    chroma_port: int = 8000                 # remote ChromaDB server port
+    chroma_path: str = "/app/data/chroma"  # used only when CHROMA_HOST is not set (embedded mode)
+    chroma_host: Optional[str] = None  # remote ChromaDB server host (required for multi-replica)
+    chroma_port: int = 8000  # remote ChromaDB server port
 
     # ── Slack ─────────────────────────────────────────────
-    pagemenot_channel: str = "incidents"           # channel where results are posted
-    pagemenot_alert_channels: str = "alerts,incidents"  # channels to passively monitor (comma-separated)
-    pagemenot_enable_channel_monitor: bool = True  # auto-triage alert-looking messages in watched channels
-    pagemenot_enable_mentions: bool = True         # respond to @Pagemenot mentions
-    pagemenot_enable_slash_command: bool = True    # respond to /pagemenot triage
-    pagemenot_enable_webhooks: bool = True         # receive webhook POSTs from external tools
+    pagemenot_channel: str = "incidents"  # channel where results are posted
+    pagemenot_alert_channels: str = (
+        "alerts,incidents"  # channels to passively monitor (comma-separated)
+    )
+    pagemenot_enable_channel_monitor: bool = (
+        True  # auto-triage alert-looking messages in watched channels
+    )
+    pagemenot_enable_mentions: bool = True  # respond to @Pagemenot mentions
+    pagemenot_enable_slash_command: bool = True  # respond to /pagemenot triage
+    pagemenot_enable_webhooks: bool = True  # receive webhook POSTs from external tools
 
     # ── Optional integrations ─────────────────────────────
     # Metrics / dashboards
@@ -41,10 +49,10 @@ class Settings(BaseSettings):
     prometheus_auth_token: Optional[str] = None
     grafana_url: Optional[str] = None
     grafana_api_key: Optional[str] = None
-    grafana_org_id: Optional[str] = None   # required for Grafana Cloud
+    grafana_org_id: Optional[str] = None  # required for Grafana Cloud
     loki_url: Optional[str] = None
     loki_auth_token: Optional[str] = None
-    loki_org_id: Optional[str] = None      # required for Grafana Cloud / multi-tenant Loki
+    loki_org_id: Optional[str] = None  # required for Grafana Cloud / multi-tenant Loki
     datadog_api_key: Optional[str] = None
     datadog_app_key: Optional[str] = None
     datadog_site: str = "datadoghq.com"
@@ -52,36 +60,52 @@ class Settings(BaseSettings):
     newrelic_account_id: Optional[str] = None
     # Alerting / on-call
     pagerduty_api_key: Optional[str] = None
-    pagerduty_from_email: Optional[str] = None  # requester email for PD API; auto-discovered if unset
+    pagerduty_from_email: Optional[str] = (
+        None  # requester email for PD API; auto-discovered if unset
+    )
     opsgenie_api_key: Optional[str] = None
     # Jira Service Management
     jira_sm_url: Optional[str] = None
     jira_sm_email: Optional[str] = None
     jira_sm_api_token: Optional[str] = None
     jira_sm_project_key: Optional[str] = None
-    jira_sm_issue_type: str = "Service Request"  # fallback, not used when service desk API is available
-    jira_sm_service_desk_id: Optional[str] = None   # auto-discovered if not set
-    jira_sm_request_type_id: Optional[str] = None   # auto-discovered if not set
+    jira_sm_issue_type: str = (
+        "Service Request"  # fallback, not used when service desk API is available
+    )
+    jira_sm_service_desk_id: Optional[str] = None  # auto-discovered if not set
+    jira_sm_request_type_id: Optional[str] = None  # auto-discovered if not set
+    jira_done_statuses: str = (
+        "done,resolved,closed,complete,fixed"  # comma-separated, case-insensitive
+    )
     # Source control / deploys
     github_token: Optional[str] = None
     github_org: Optional[str] = None
     # Execution
     kubeconfig_path: Optional[str] = None
     pagemenot_exec_namespace: str = "default"  # fallback k8s namespace for runbook {{ namespace }}
-    pagemenot_service_namespaces: str = ""      # per-service overrides: "payment-service=payments,checkout-service=checkout"
-    pagemenot_webhook_rate_limit: str = "60/minute"  # slowapi rate limit string for all webhook endpoints
-    pagemenot_exec_enabled: bool = True         # master switch for autonomous execution
-    pagemenot_exec_dry_run: bool = True         # true = simulate; false = real execution
-    pagemenot_approval_gate: bool = True        # require human approval for [NEEDS APPROVAL] steps
+    pagemenot_service_namespaces: str = (
+        ""  # per-service overrides: "payment-service=payments,checkout-service=checkout"
+    )
+    pagemenot_webhook_rate_limit: str = (
+        "60/minute"  # slowapi rate limit string for all webhook endpoints
+    )
+    pagemenot_exec_enabled: bool = True  # master switch for autonomous execution
+    pagemenot_exec_dry_run: bool = True  # true = simulate; false = real execution
+    pagemenot_approval_gate: bool = True  # require human approval for [NEEDS APPROVAL] steps
     pagemenot_oncall_channel: Optional[str] = None  # channel to ping on critical escalations
-    pagemenot_autoapprove_delay: int = 900      # seconds before auto-executing [AUTO-SAFE] steps
-    pagemenot_dedup_ttl_short: int = 600        # dedup window for critical/high (seconds)
-    pagemenot_dedup_ttl_long: int = 1800        # dedup window for medium/low (seconds)
-    # Escalation severity thresholds — controls when Jira/PD are triggered
-    pagemenot_jira_min_severity: str = "high"      # open Jira when agent cannot resolve: high/critical only
-    pagemenot_pd_min_severity: str = "high"        # page PD for: high and critical (P1/P2); not medium/low
+    pagemenot_autoapprove_delay: int = 900  # seconds before auto-executing [AUTO-SAFE] steps
+    pagemenot_dedup_ttl_short: int = 600  # dedup window for critical/high (seconds)
+    pagemenot_dedup_ttl_long: int = 1800  # dedup window for medium/low (seconds)
+    # Severity thresholds — controls when each action triggers
+    pagemenot_jira_min_severity: str = "low"  # open Jira ticket: low/medium/high/critical
+    pagemenot_pd_min_severity: str = "high"  # page PD/escalate: low/medium/high/critical
+    pagemenot_approval_min_severity: str = (
+        "high"  # require human approval for risky commands: low/medium/high/critical
+    )
     # Approval state store
-    redis_url: Optional[str] = None  # e.g. redis://localhost:6379/0 — for approval state persistence across restarts
+    redis_url: Optional[str] = (
+        None  # e.g. redis://localhost:6379/0 — for approval state persistence across restarts
+    )
 
     # Webhook HMAC secrets (optional — skip verification if not set, warn at startup)
     webhook_secret_pagerduty: Optional[str] = None
@@ -96,24 +120,28 @@ class Settings(BaseSettings):
     # External LLM compliance gate
     llm_external_enterprise_confirmed: bool = False  # must be true to use non-Ollama LLMs
     # Cloud execution credentials
-    aws_role_arn: Optional[str] = None                    # IAM role pagemenot assumes for AWS ops
-    aws_region: str = "us-east-1"
+    aws_role_arn: Optional[str] = None  # IAM role pagemenot assumes for AWS ops
+    aws_region: Optional[str] = None  # required if using AWS runbook steps
     google_application_credentials: Optional[str] = None  # path to GCP service account JSON
     azure_tenant_id: Optional[str] = None
     azure_client_id: Optional[str] = None
     azure_client_secret: Optional[str] = None
     azure_subscription_id: Optional[str] = None
 
-    pagemenot_dedup_short_ttl_severities: str = "critical,high"  # severities that use dedup_ttl_short
-    pagemenot_http_timeout: int = 10            # seconds for all httpx calls
-    pagemenot_subprocess_timeout: int = 30      # seconds for kubectl/aws/shell exec
-    pagemenot_slack_chunk_size: int = 2900      # chars per Slack message block
-    pagemenot_slack_max_chunks: int = 3         # max blocks posted per triage result
-    pagemenot_approval_ttl: int = 3600          # seconds before an approval entry expires
+    pagemenot_dedup_short_ttl_severities: str = (
+        "critical,high"  # severities that use dedup_ttl_short
+    )
+    pagemenot_http_timeout: int = 10  # seconds for all httpx calls
+    pagemenot_subprocess_timeout: int = 30  # seconds for kubectl/aws/shell exec
+    pagemenot_slack_chunk_size: int = 2900  # chars per Slack message block
+    pagemenot_slack_max_chunks: int = 3  # max blocks posted per triage result
+    pagemenot_approval_ttl: int = 3600  # seconds before an approval entry expires
+    pagemenot_verify_timeout: int = 300  # seconds to poll CW alarm for recovery after runbook exec
+    pagemenot_verify_poll_interval: int = 15  # CW alarm polling cadence (seconds)
     pagemenot_rag_incidents_n_results: int = 5  # past incidents returned by RAG
-    pagemenot_rag_runbooks_n_results: int = 1   # runbooks returned by RAG — best match only
+    pagemenot_rag_runbooks_n_results: int = 1  # runbooks returned by RAG — best match only
     chroma_incidents_collection: str = "incidents"  # ChromaDB collection name for postmortems
-    chroma_runbooks_collection: str = "runbooks"    # ChromaDB collection name for runbooks
+    chroma_runbooks_collection: str = "runbooks"  # ChromaDB collection name for runbooks
 
     log_level: str = "INFO"
 

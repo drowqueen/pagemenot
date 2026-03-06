@@ -11,9 +11,14 @@ RUN python -m venv /venv
 ENV PATH="/venv/bin:$PATH"
 
 COPY pyproject.toml ./
-COPY pagemenot/ pagemenot/
+# Install third-party dependencies only (cached); pyproject.toml parsed at build time
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --upgrade pip setuptools wheel && pip install .
+    pip install --upgrade pip setuptools wheel && \
+    python3 -c "import tomllib,subprocess,sys; deps=tomllib.load(open('pyproject.toml','rb'))['project']['dependencies']; subprocess.check_call([sys.executable,'-m','pip','install']+deps)"
+
+COPY pagemenot/ pagemenot/
+# Install local package only — no cache, no deps; always reflects current source
+RUN pip install --no-cache-dir --no-deps .
 
 # ══════════════════════════════════════════════════════════════
 # base — clean runtime image: venv + app code + kubectl
@@ -45,8 +50,8 @@ RUN ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') && \
     rm /tmp/kubectl.sha256 && \
     chmod +x /usr/local/bin/kubectl
 
-RUN groupadd --system appgroup && \
-    useradd --system --gid appgroup --no-create-home appuser && \
+RUN groupadd --system --gid 1000 appgroup && \
+    useradd --system --uid 1000 --gid appgroup --no-create-home appuser && \
     mkdir -p /app/data/chroma /app/.config/crewai && \
     echo '{"show_tracing_ui": false}' > /app/.config/crewai/settings.json && \
     chown -R appuser:appgroup /app /venv

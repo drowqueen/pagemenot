@@ -25,11 +25,28 @@ Self-hosted. No new infrastructure. Connects to your existing monitoring stack.
 - **Webhook receiver** — Grafana, Alertmanager, Datadog, New Relic, PagerDuty, CloudWatch, Azure Monitor, generic
 - **No new infrastructure** — single Docker container; ChromaDB embedded by default
 
+## Platform support
+
+| Platform | Status |
+|----------|--------|
+| AWS (EC2, RDS, ECS, EKS, CloudWatch) | ✅ Production-ready |
+| On-premises / bare metal (Kubernetes, Prometheus, Alertmanager) | ✅ Production-ready |
+| GCP (GKE, GCE, Cloud Run, Cloud Monitoring) | 🔜 Coming soon |
+| Azure (AKS, VMs, App Service, Azure Monitor) | 🔜 Coming soon |
+
+AWS and on-prem have been rigorously tested end-to-end: CloudWatch alarm delivery, EC2 remediation with approval gates, autonomous RDS recovery, CW verify-and-close, and postmortem indexing.
+
+---
+
 ## Screenshots
 
 | Escalation — Jira + PagerDuty | Approval button | Triage thread — RCA + links | Approval detail |
 |---|---|---|---|
 | [![escalation](screenshots/escalation-jira-pd.png)](screenshots/escalation-jira-pd.png) | [![approval](screenshots/approval-button.png)](screenshots/approval-button.png) | [![triage](screenshots/triage-thread-rca.png)](screenshots/triage-thread-rca.png) | [![approval-detail](screenshots/approval-required-detail.png)](screenshots/approval-required-detail.png) |
+
+| EC2 approval + exec | EC2 verified healthy | RDS stopped — action required |
+|---|---|---|
+| [![ec2-approval](screenshots/ec2-approval-exec.png)](screenshots/ec2-approval-exec.png) | [![ec2-verified](screenshots/ec2-verified-healthy.png)](screenshots/ec2-verified-healthy.png) | [![rds-stopped](screenshots/rds-stopped-action-required.png)](screenshots/rds-stopped-action-required.png) |
 
 ---
 
@@ -211,7 +228,7 @@ kubectl is always included and auto-detects `amd64` / `arm64` at build time.
 |-------------|-------|
 | Running as a Kubernetes pod | Nothing — in-cluster ServiceAccount token auto-detected |
 | EC2 / ECS / GCP Compute / bare metal | Mount kubeconfig from secrets manager; set `KUBECONFIG_PATH=/app/kubeconfig` in `.env`; uncomment the kubeconfig volume in `docker-compose.yml` |
-| Local dev (minikube / kind) | Run `scripts/gen-kubeconfig.sh`, then set `KUBECONFIG_PATH=/app/kubeconfig` in `.env` and uncomment the kubeconfig volume in `docker-compose.yml` |
+| Local Kubernetes | Run `scripts/gen-kubeconfig.sh`, then set `KUBECONFIG_PATH=/app/kubeconfig` in `.env` and uncomment the kubeconfig volume in `docker-compose.yml` |
 
 `docker-compose.yml` ships with the kubeconfig volume commented out. Uncomment and set the host path for your environment:
 
@@ -413,19 +430,96 @@ Maps service names to GitHub repos for deploy correlation. Safe to commit — no
 
 ## Webhook sources
 
-| Source | Endpoint |
-|--------|----------|
-| Grafana | `POST /webhooks/grafana` |
-| Alertmanager | `POST /webhooks/alertmanager` |
-| Datadog | `POST /webhooks/datadog` |
-| New Relic | `POST /webhooks/newrelic` |
-| PagerDuty | `POST /webhooks/pagerduty` |
-| AWS CloudWatch | SNS → `POST /webhooks/generic` (via Lambda or SNS HTTP subscription) |
-| GCP Alerting | Alerting policy → Webhook notification channel → `POST /webhooks/generic` |
-| Azure Monitor | Action Group → Webhook → `POST /webhooks/generic` |
-| OpsGenie / anything else | `POST /webhooks/generic` |
+| Source | Endpoint | Recovery (auto-close Jira / resolve PD) |
+|--------|----------|------------------------------------------|
+| Grafana | `POST /webhooks/grafana` | ✓ |
+| Alertmanager | `POST /webhooks/alertmanager` | ✓ |
+| Datadog | `POST /webhooks/datadog` | ✓ |
+| New Relic | `POST /webhooks/newrelic` | ✓ |
+| PagerDuty | `POST /webhooks/pagerduty` | ✓ |
+| AWS CloudWatch | `POST /webhooks/sns` | ✓ (SNS `OK` state) |
+| GCP Cloud Monitoring | `POST /webhooks/generic` | — |
+| Azure Monitor | `POST /webhooks/generic` | — |
+| OpsGenie | `POST /webhooks/opsgenie` | ✓ |
+| Anything else | `POST /webhooks/generic` | — |
 
 Set `WEBHOOK_SECRET_<SOURCE>` to enable HMAC verification per source. Unset = warn and accept.
+
+### AWS CloudWatch
+
+Pagemenot receives alarms via SNS. The endpoint requires HTTPS — use API Gateway, an ALB, or nginx+TLS as a terminator in front of the HTTP port.
+
+```
+CloudWatch Alarm → SNS Topic → HTTPS subscription → POST /webhooks/sns
+```
+
+**Required:**
+1. SNS topic in the same region as your alarms
+2. HTTPS endpoint reachable from SNS (API Gateway HTTP API recommended — free tier covers typical alert volume)
+3. Subscribe the endpoint to the topic — pagemenot auto-confirms the `SubscriptionConfirmation` POST
+
+**Severity** — embed in `AlarmDescription`:
+```
+severity: critical — CPU above 95% for 5 minutes
+```
+Values: `critical`, `high` (default if omitted), `medium`, `low`
+
+**Recovery** — add the same SNS topic to `--ok-actions` on your alarm. When CloudWatch returns to `OK`, pagemenot closes the Jira ticket and resolves the PD incident.
+
+**Wire any existing alarm to pagemenot** — add the SNS topic as an action without touching the alarm's metric or threshold:
+```bash
+aws cloudwatch put-metric-alarm \
+  --alarm-name "my-service-cpu-high" \
+  --alarm-description "severity: high — CPU above 90%" \
+  --alarm-actions  arn:aws:sns:REGION:ACCOUNT:pagemenot-alerts \
+  --ok-actions     arn:aws:sns:REGION:ACCOUNT:pagemenot-alerts \
+  ... # all other existing alarm params unchanged
+```
+
+Or update an existing alarm in-place (add the action without recreating):
+```bash
+# Get existing alarm config
+aws cloudwatch describe-alarms --alarm-names "my-service-cpu-high" > /tmp/alarm.json
+# Edit /tmp/alarm.json to add the SNS ARN to AlarmActions and OKActions, then re-apply:
+aws cloudwatch put-metric-alarm --cli-input-json file:///tmp/alarm.json
+```
+
+**Multiple alarms, one topic** — any number of alarms can send to the same SNS topic. Pagemenot handles all of them.
+
+**Multiple regions** — SNS topics are regional. Create one topic per region and subscribe each to the same `/webhooks/sns` endpoint:
+```bash
+# eu-west-1
+aws sns create-topic --name pagemenot-alerts --region eu-west-1
+aws sns subscribe --topic-arn arn:aws:sns:eu-west-1:ACCOUNT:pagemenot-alerts \
+  --protocol https --notification-endpoint https://YOUR_HOST/webhooks/sns --region eu-west-1
+
+# us-east-1
+aws sns create-topic --name pagemenot-alerts --region us-east-1
+aws sns subscribe --topic-arn arn:aws:sns:us-east-1:ACCOUNT:pagemenot-alerts \
+  --protocol https --notification-endpoint https://YOUR_HOST/webhooks/sns --region us-east-1
+```
+
+### GCP Cloud Monitoring
+
+1. **Monitoring → Alerting → Notification Channels** → Add channel → **Webhook**
+2. URL: `https://your-pagemenot-url/webhooks/generic`
+3. (Optional) append `?token=YOUR_SECRET` and set `WEBHOOK_SECRET_GENERIC=YOUR_SECRET` in `.env`
+4. Add the channel to any existing alerting policy under **Notifications**
+
+GCP sends a JSON payload. Pagemenot extracts `incident.condition_name` as the alert title and `incident.resource.labels` for the service name.
+
+Recovery events (`incident.state = "closed"`) are received but do not yet auto-close Jira/PD — the agent posts the recovery message to Slack only.
+
+### Azure Monitor
+
+1. **Monitor → Alerts → Action Groups** → create or edit a group
+2. Add action: **Webhook**
+3. URL: `https://your-pagemenot-url/webhooks/generic`
+4. Enable **common alert schema**
+
+Azure Monitor does not natively sign webhook payloads. Leave `WEBHOOK_SECRET_GENERIC` unset, or add an API Management / Logic App proxy that adds an HMAC header.
+
+Recovery alerts (`data.status = "Resolved"`) are received but do not yet auto-close Jira/PD — recovery message posted to Slack only.
 
 ---
 
@@ -512,6 +606,35 @@ This is RAG (retrieval-augmented generation), not model fine-tuning. The LLM wei
 
 **Postmortem quality matters.** The `service`, `root_cause`, and `resolution` fields drive RAG retrieval accuracy. Drop structured postmortems into `knowledge/postmortems/` to pre-seed the knowledge base before your first incident.
 
+**All postmortems live in `knowledge/postmortems/`** — agent-written and human-written alike.
+
+| Source | Written when | Indexed when |
+|--------|-------------|--------------|
+| Agent auto-resolved | Runbook exec succeeds | Immediately |
+| Human approved runbook | Approve button clicked | Immediately |
+| Human wrote manually | You create the file | On next `/pagemenot reload` or hourly auto-reindex |
+
+Human-written postmortems (for incidents where no runbook matched, or where the team fixed things outside pagemenot) should be dropped into `knowledge/postmortems/` as Markdown files. Format:
+
+```markdown
+# <incident title>
+
+service: <service-name>
+date: YYYY-MM-DD
+severity: high
+
+## Root cause
+<what caused it>
+
+## Resolution
+<what fixed it, step by step>
+
+## Follow-up
+<runbook created, alert tuned, etc.>
+```
+
+Run `/pagemenot reload` in Slack after adding files to pick them up immediately without restart.
+
 **Approval state persistence:**
 
 Pagemenot uses a three-tier store for pending approvals — no approval is lost on container restart:
@@ -543,12 +666,21 @@ Jira tickets open only when the crew cannot resolve the incident (escalation gat
 | Unresolved — low/medium | ✗ |
 | Unresolved — high/critical | ✓ open once |
 
-When the monitoring system sends `status=resolved` (alertmanager) or `incident.resolved` (PagerDuty), pagemenot:
+Tickets are closed (transitioned to Done/Resolved/Closed) in two ways:
 
-1. Closes the open Jira ticket (transitions to Done/Resolved/Closed, adds resolution comment)
-2. Clears the dedup registry (future occurrences trigger fresh triage)
-3. Clears PD tracking
-4. Posts outcome to Slack
+| Trigger | Jira closed | PagerDuty resolved |
+|---------|-------------|-------------------|
+| Human clicks **Approve** in Slack + runbook executes successfully | ✅ | ✅ |
+| Monitoring system sends `status=resolved` / `incident.resolved` | ✅ | ✅ |
+
+On close, pagemenot:
+
+1. Looks up the Jira issue key from the stored ticket URL
+2. Fetches available transitions and selects the first matching Done/Resolved/Closed transition
+3. Adds a resolution comment (approver's Slack user ID or "auto-resolved")
+4. Resolves the PagerDuty incident (`PUT /incidents/{id}` with `status=resolved`)
+5. Clears the dedup registry
+6. Posts outcome to Slack
 
 ---
 
@@ -727,11 +859,81 @@ For Kubernetes, add ChromaDB as a StatefulSet with a `ReadWriteOnce` PVC. For EC
 
 Configure at your firewall, security group, or load balancer — not in pagemenot itself.
 
+**Secret storage** — never use `.env` in production. Use a secrets manager:
+
+| Platform | Service | How |
+|----------|---------|-----|
+| AWS | Secrets Manager | Attach an IAM role to the EC2 instance or ECS task. Fetch secrets at startup via `boto3.client('secretsmanager').get_secret_value(...)`. No static credentials anywhere. |
+| GCP | Secret Manager | Attach a service account to the VM/GKE pod. Fetch via `google-cloud-secret-manager` SDK. |
+| HashiCorp Vault | Any | Use the Vault Agent sidecar or `VAULT_ADDR` + `VAULT_TOKEN` (short-lived, auto-renewed). |
+| Self-hosted | Any | At minimum, mount secrets as read-only files (`docker secret` or k8s `Secret` volume) rather than environment variables. |
+
+IAM role on the instance grants access to secrets — no API keys, tokens, or `.env` files stored on disk.
+
+**Jira authentication** — pagemenot uses `Authorization: Basic base64(email:token)` by default (Jira API token). For production:
+- Use OAuth 2.0 (3-legged) via a Jira Connect or Forge app — tokens are short-lived, scoped to specific projects, and no user email is exposed in API calls.
+- The Jira API token tied to a personal account inherits that account's full permissions and is long-lived. A Forge app OAuth token is scoped at install time to exactly what the app declares.
+
+**Least-privilege credentials** — create a dedicated service account for pagemenot:
+- **Jira**: service account with only `TRANSITION_ISSUES` + `ADD_COMMENTS` on the incident project. Not a developer account.
+- **PagerDuty**: scoped REST API key with `incidents:write` only. Not a full user API key.
+- **Slack**: bot token with only the scopes pagemenot requests. Review in your Slack app settings.
+
 ---
 
 ## Cloud IAM
 
-Only needed if you set `AWS_ROLE_ARN` or `GOOGLE_APPLICATION_CREDENTIALS` to let pagemenot call cloud APIs for diagnosis and execution. Skip if not using cloud execution.
+Required for `aws ...` runbook exec steps. No credentials needed if you don't use AWS runbooks.
+
+### AWS
+
+Create the IAM role pagemenot will use for CloudWatch, Logs, and ECS access:
+
+```bash
+aws iam create-role --role-name pagemenot-exec \
+  --assume-role-policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Principal": { "AWS": "arn:aws:iam::YOUR_ACCOUNT_ID:root" },
+      "Action": "sts:AssumeRole"
+    }]
+  }'
+
+aws iam put-role-policy --role-name pagemenot-exec \
+  --policy-name pagemenot-policy \
+  --policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Action": [
+        "ecs:DescribeServices", "ecs:DescribeTasks",
+        "ecs:DescribeTaskDefinition", "ecs:ListTasks", "ecs:ListServices",
+        "cloudwatch:GetMetricStatistics", "cloudwatch:GetMetricData",
+        "cloudwatch:ListMetrics", "cloudwatch:DescribeAlarms",
+        "logs:GetLogEvents", "logs:FilterLogEvents",
+        "logs:DescribeLogGroups", "logs:DescribeLogStreams",
+        "lambda:GetFunction", "lambda:ListFunctions",
+        "ssm:SendCommand", "ssm:GetCommandInvocation",
+        "ssm:DescribeInstanceInformation",
+        "ec2:DescribeInstances", "ec2:DescribeInstanceStatus"
+      ],
+      "Resource": "*"
+    }]
+  }'
+```
+
+**Wiring the role depends on where pagemenot runs:**
+
+| Deployment | How to grant access | `.env` |
+|------------|--------------------|----|
+| EC2 | Create instance profile with this role, attach to instance | `AWS_ROLE_ARN` optional — boto3 uses instance metadata automatically |
+| ECS | Set role as ECS task role | `AWS_ROLE_ARN` optional — ECS injects credentials |
+| Kubernetes | IRSA (EKS) or Kiam/Karpenter annotation — bind role to service account | `AWS_ROLE_ARN` optional |
+| Docker / bare metal (no cloud identity) | Set `AWS_ROLE_ARN=arn:aws:iam::ACCOUNT:role/pagemenot-exec` + provide base credentials via `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` for a principal that can assume the role | Required |
+| Local dev | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` or `~/.aws/credentials` | `AWS_ROLE_ARN` optional |
+
+The instance profile / task role / IRSA approach is preferred — no static credentials stored anywhere.
 
 ### Azure Monitor alerts
 
@@ -743,47 +945,6 @@ No `.env` vars required. In the Azure portal:
 4. Enable **common alert schema**
 
 Optionally set `WEBHOOK_SECRET_GENERIC` in `.env` — pagemenot will verify the `X-Pagemenot-Signature` header. Azure doesn't natively sign webhook payloads, so leave unset unless you add your own signing proxy.
-
-### AWS
-
-Pagemenot assumes an IAM role to read ECS and CloudWatch. Create the role:
-
-```bash
-aws iam create-role --role-name pagemenot-exec \
-  --assume-role-policy-document '{
-    "Version": "2012-10-17",
-    "Statement": [{
-      "Effect": "Allow",
-      "Principal": { "AWS": "arn:aws:iam::YOUR_ACCOUNT_ID:root" },
-      "Action": "sts:AssumeRole",
-      "Condition": { "StringEquals": { "sts:ExternalId": "pagemenot" } }
-    }]
-  }'
-
-aws iam put-role-policy --role-name pagemenot-exec \
-  --policy-name pagemenot-policy \
-  --policy-document '{
-    "Version": "2012-10-17",
-    "Statement": [
-      {
-        "Effect": "Allow",
-        "Action": [
-          "ecs:DescribeServices", "ecs:DescribeTasks",
-          "ecs:DescribeTaskDefinition", "ecs:ListTasks", "ecs:ListServices",
-          "cloudwatch:GetMetricStatistics", "cloudwatch:GetMetricData",
-          "cloudwatch:ListMetrics", "cloudwatch:DescribeAlarms",
-          "logs:GetLogEvents", "logs:FilterLogEvents",
-          "logs:DescribeLogGroups", "logs:DescribeLogStreams",
-          "ssm:SendCommand", "ssm:GetCommandInvocation",
-          "ssm:DescribeInstanceInformation"
-        ],
-        "Resource": "*"
-      }
-    ]
-  }'
-```
-
-Set `AWS_ROLE_ARN=arn:aws:iam::YOUR_ACCOUNT_ID:role/pagemenot-exec` in `.env`.
 
 ### GCP
 

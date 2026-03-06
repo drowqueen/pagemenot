@@ -121,18 +121,22 @@ def build_triage_crew(alert_summary: str) -> Crew:
     diagnose_task = Task(
         description=(
             "Using monitoring data, identify root cause:\n"
+            "- Search past incidents FIRST — if a matching postmortem exists, cite it and set confidence: high\n"
             "- Check recent deploys and code changes for correlation\n"
-            "- Search past incidents for similar patterns\n"
-            "- Be SPECIFIC: name the deploy, PR, config change, or code path\n\n"
+            "- Be SPECIFIC: name the deploy, PR, config change, or code path\n"
+            "- Confidence rules: high = past incident match OR clear single cause; "
+            "medium = probable cause with some ambiguity; low = multiple possible causes\n"
+            "- Output confidence as exactly one word on its own line: 'Confidence: high' OR "
+            "'Confidence: medium' OR 'Confidence: low'\n\n"
             f"{FORMAT_RULES}"
         ),
         expected_output=(
             "Root cause: [one specific sentence — name the deploy/change/code path]\n"
-            "Confidence: high | medium | low\n"
+            "Confidence: high\n"
             "Evidence:\n"
             "- [data point 1]\n"
             "- [data point 2]\n"
-            "Similar incidents: [ref or 'none found']\n"
+            "Similar incidents: [postmortem filename or 'none found']\n"
             "What changed: [deploy/config/traffic spike, with timestamp]"
         ),
         agent=diagnoser,
