@@ -39,7 +39,11 @@ def _dedup_key(service: str, title: str) -> tuple[str, str]:
 def _check_and_register(service: str, title: str, severity: str) -> bool:
     """Return True if this is a duplicate (within TTL). Register if not."""
     _short_sevs = {s.strip() for s in settings.pagemenot_dedup_short_ttl_severities.split(",")}
-    ttl = settings.pagemenot_dedup_ttl_short if severity in _short_sevs else settings.pagemenot_dedup_ttl_long
+    ttl = (
+        settings.pagemenot_dedup_ttl_short
+        if severity in _short_sevs
+        else settings.pagemenot_dedup_ttl_long
+    )
     key = _dedup_key(service, title)
     now = time.monotonic()
     with _dedup_lock:
@@ -51,6 +55,7 @@ def _check_and_register(service: str, title: str, severity: str) -> bool:
             return True
         _active_incidents[key] = now + ttl
         return False
+
 
 # Import scenarios for mock seeding
 SCENARIOS = None
@@ -94,11 +99,13 @@ class TriageResult:
     similar_incidents: list[str] = field(default_factory=list)
     remediation_steps: list[str] = field(default_factory=list)
     needs_approval: list[str] = field(default_factory=list)
-    pending_exec_steps: list[str] = field(default_factory=list)  # runbook <!-- exec: --> steps awaiting approval
+    pending_exec_steps: list[str] = field(
+        default_factory=list
+    )  # runbook <!-- exec: --> steps awaiting approval
     postmortem_draft: str = ""
     raw_output: str = ""
     duration_seconds: float = 0.0
-    suppressed: bool = False              # True = dedup or severity gate, crew never ran
+    suppressed: bool = False  # True = dedup or severity gate, crew never ran
     resolved_automatically: bool = False  # True = runbook exec succeeded
     execution_log: list[str] = field(default_factory=list)
 
@@ -139,8 +146,12 @@ def _parse_alert(source: str, payload: dict) -> dict:
     elif source == "newrelic":
         return {
             "title": payload.get("name", payload.get("condition_name", "Unknown")),
-            "service": payload.get("targets", [{}])[0].get("name", "unknown") if payload.get("targets") else "unknown",
-            "severity": "critical" if payload.get("severity", "").upper() == "CRITICAL" else "medium",
+            "service": payload.get("targets", [{}])[0].get("name", "unknown")
+            if payload.get("targets")
+            else "unknown",
+            "severity": "critical"
+            if payload.get("severity", "").upper() == "CRITICAL"
+            else "medium",
             "description": payload.get("details", ""),
             "external_id": str(payload.get("incident_id", "")),
         }
@@ -165,8 +176,8 @@ def _parse_alert(source: str, payload: dict) -> dict:
         }
     elif source == "sns":
         return {
-            "title": payload.get("title", payload.get("alarm_name", "CloudWatch Alarm")),
-            "service": payload.get("service", "aws"),
+            "title": payload.get("title", payload.get("alarm_name", "")),
+            "service": payload.get("service", "unknown"),
             "severity": payload.get("severity", "high"),
             "description": payload.get("message", ""),
             "external_id": payload.get("alarm_name", ""),
@@ -182,8 +193,8 @@ def _parse_alert(source: str, payload: dict) -> dict:
 
 
 _REDACT_CREDENTIAL_RE = re.compile(
-    r'((?:password|passwd|secret|token|api.?key|authorization|bearer|aws.?secret'
-    r'|private.?key|username|user|login|db.?user|database.?user)'
+    r"((?:password|passwd|secret|token|api.?key|authorization|bearer|aws.?secret"
+    r"|private.?key|username|user|login|db.?user|database.?user)"
     r'\s*[:=]\s*)[^\s,\'";&\n]{2,}',
     re.IGNORECASE,
 )
@@ -191,16 +202,14 @@ _REDACT_DSN_RE = re.compile(
     r'(?:postgresql|postgres|mysql|mongodb|redis|amqp|amqps|jdbc:\w+)://[^\s\'"<>\n]+',
     re.IGNORECASE,
 )
-_REDACT_IPV4_RE = re.compile(
-    r'\b(?:\d{1,3}\.){3}\d{1,3}\b'
-)
+_REDACT_IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 
 
 def _redact_sensitive(text: str) -> str:
     """Redact credentials, DSNs, and IP addresses before sending context to an LLM."""
-    text = _REDACT_CREDENTIAL_RE.sub(r'\1[REDACTED]', text)
-    text = _REDACT_DSN_RE.sub('[DSN_REDACTED]', text)
-    text = _REDACT_IPV4_RE.sub('[IP_REDACTED]', text)
+    text = _REDACT_CREDENTIAL_RE.sub(r"\1[REDACTED]", text)
+    text = _REDACT_DSN_RE.sub("[DSN_REDACTED]", text)
+    text = _REDACT_IPV4_RE.sub("[IP_REDACTED]", text)
     return text
 
 
@@ -223,14 +232,16 @@ def _seed_mock_if_needed(parsed_alert: dict):
     for scenario_name, scenario in (SCENARIOS or {}).items():
         pd = scenario.get("pagerduty", {})
         if pd.get("service", {}).get("name") == service:
-            seed_mock_context({
-                "service": service,
-                "pagerduty": pd,
-                "mock_metrics": scenario.get("mock_metrics", {}),
-                "mock_logs": scenario.get("mock_logs", []),
-                "mock_deploys": scenario.get("mock_deploys", []),
-                "mock_k8s": scenario.get("mock_k8s", {}),
-            })
+            seed_mock_context(
+                {
+                    "service": service,
+                    "pagerduty": pd,
+                    "mock_metrics": scenario.get("mock_metrics", {}),
+                    "mock_logs": scenario.get("mock_logs", []),
+                    "mock_deploys": scenario.get("mock_deploys", []),
+                    "mock_k8s": scenario.get("mock_k8s", {}),
+                }
+            )
             logger.info(f"Mock context seeded: {scenario_name}")
             return
 
@@ -261,17 +272,22 @@ def _parse_crew_output(raw: str, parsed_alert: dict) -> TriageResult:
     for marker in ["root cause:", "root cause analysis:", "**root cause"]:
         if marker in lower:
             idx = lower.index(marker)
-            chunk = raw[idx:idx + 500]
+            chunk = raw[idx : idx + 500]
             lines = chunk.split("\n")
-            result.root_cause = (lines[1].strip(" -•*") if len(lines) > 1
-                                 else lines[0].split(":", 1)[-1].strip())[:300]
+            result.root_cause = (
+                lines[1].strip(" -•*") if len(lines) > 1 else lines[0].split(":", 1)[-1].strip()
+            )[:300]
             break
 
     # Confidence — match any "confidence" label adjacent to high/medium/low
     for level in ["high", "medium", "low"]:
-        if (f"confidence: {level}" in lower or f"confidence level: {level}" in lower
-                or f"confidence*: {level}" in lower or f"| {level}" in lower
-                or re.search(rf'\bconfidence\b[^:\n]{{0,10}}:?\s*\*?{level}\b', lower)):
+        if (
+            f"confidence: {level}" in lower
+            or f"confidence level: {level}" in lower
+            or f"confidence*: {level}" in lower
+            or f"| {level}" in lower
+            or re.search(rf"\bconfidence\b[^:\n]{{0,10}}:?\s*\*?{level}\b", lower)
+        ):
             result.confidence = level
             break
 
@@ -318,7 +334,9 @@ async def _try_runbook_exec(result: TriageResult):
     if settings.pagemenot_approval_gate and approve_steps:
         result.pending_exec_steps = [tag for tag, _ in approve_steps]
         approve_runbooks = sorted({fn for _, fn in approve_steps})
-        logger.info(f"[APPROVAL GATE] {len(approve_steps)} step(s) queued for approval from: {approve_runbooks}")
+        logger.info(
+            f"[APPROVAL GATE] {len(approve_steps)} step(s) queued for approval from: {approve_runbooks}"
+        )
 
     # Run auto steps + (approve steps when gate is off)
     pairs_to_run = auto_steps + ([] if settings.pagemenot_approval_gate else approve_steps)
@@ -369,7 +387,7 @@ async def run_triage(source: str, payload: dict[str, Any]) -> TriageResult:
     _seed_mock_if_needed(parsed)
 
     # 5. Build summary for the crew — redact credentials before sending to LLM
-    raw_description = parsed.get('description', 'N/A')
+    raw_description = parsed.get("description", "N/A")
     summary = _redact_sensitive(
         f"**Alert:** {parsed['title']}\n"
         f"**Service:** {parsed['service']}\n"
@@ -390,7 +408,6 @@ async def run_triage(source: str, payload: dict[str, Any]) -> TriageResult:
 
     result.duration_seconds = (datetime.now(timezone.utc) - start).total_seconds()
     logger.info(
-        f"Triage done in {result.duration_seconds:.1f}s "
-        f"(resolved={result.resolved_automatically})"
+        f"Triage done in {result.duration_seconds:.1f}s (resolved={result.resolved_automatically})"
     )
     return result

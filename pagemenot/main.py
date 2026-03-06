@@ -245,20 +245,12 @@ async def sns_webhook(
         region = message.get("Region", "")
         trigger = message.get("Trigger", {})
         metric = trigger.get("MetricName", "")
-        dims = {d["name"]: d["value"] for d in trigger.get("Dimensions", [])}
-        instance_id = dims.get("InstanceId", "")
-        service = (
-            dims.get("FunctionName")
-            or dims.get("DBInstanceIdentifier")
-            or dims.get("DBClusterIdentifier")
-            or dims.get("ServiceName")
-            or dims.get("ClusterName")
-            or dims.get("AutoScalingGroupName")
-            or dims.get("LoadBalancer")
-            or dims.get("ServiceEndpoint")
-            or instance_id
-            or alarm_name
-        )
+        dim_list = trigger.get("Dimensions", [])
+        dims = {d["name"]: d["value"] for d in dim_list}
+        # Use the last (most specific) dimension value; fall back to alarm name.
+        # Avoids hardcoding AWS dimension names — works for any service/namespace.
+        dim_values = [d["value"] for d in dim_list]
+        service = dim_values[-1] if dim_values else alarm_name
 
         # Extract severity from alarm description (e.g. "severity: critical")
         import re as _re
@@ -304,7 +296,7 @@ async def sns_webhook(
             "severity": alarm_severity,
             "region": region,
             "metric": metric,
-            "instance_id": instance_id,
+            "dimensions": dims,
             "source": "cloudwatch",
         }
         asyncio.create_task(_auto_triage("sns", triage_payload))
@@ -418,7 +410,8 @@ async def jira_webhook(
     payload = await request.json()
     issue = payload.get("issue", {})
     status = issue.get("fields", {}).get("status", {}).get("name", "")
-    if status.lower() in ("done", "resolved", "closed"):
+    _done = {s.strip().lower() for s in settings.jira_done_statuses.split(",")}
+    if status.lower() in _done:
         title = issue.get("fields", {}).get("summary", issue.get("key", "Unknown issue"))
         resolved_by = payload.get("user", {}).get("displayName", "")
         asyncio.create_task(_post_resolved_to_slack(title, "Jira", resolved_by))
@@ -621,7 +614,7 @@ async def _resolve_jira_ticket(jira_url: str, resolution_note: str = "") -> None
         async with httpx.AsyncClient(timeout=settings.pagemenot_http_timeout) as client:
             r = await client.get(f"{base}/rest/api/2/issue/{key}/transitions", headers=headers)
             transitions = r.json().get("transitions", [])
-            _done_keywords = ("done", "resolved", "closed", "complete", "fixed")
+            _done_keywords = {s.strip().lower() for s in settings.jira_done_statuses.split(",")}
             done_id = next(
                 (
                     t["id"]
