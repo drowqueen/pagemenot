@@ -31,6 +31,10 @@ Self-hosted. No new infrastructure. Connects to your existing monitoring stack.
 |---|---|---|---|
 | [![escalation](screenshots/escalation-jira-pd.png)](screenshots/escalation-jira-pd.png) | [![approval](screenshots/approval-button.png)](screenshots/approval-button.png) | [![triage](screenshots/triage-thread-rca.png)](screenshots/triage-thread-rca.png) | [![approval-detail](screenshots/approval-required-detail.png)](screenshots/approval-required-detail.png) |
 
+| EC2 approval + exec | EC2 verified healthy | RDS stopped — action required |
+|---|---|---|
+| [![ec2-approval](screenshots/ec2-approval-exec.png)](screenshots/ec2-approval-exec.png) | [![ec2-verified](screenshots/ec2-verified-healthy.png)](screenshots/ec2-verified-healthy.png) | [![rds-stopped](screenshots/rds-stopped-action-required.png)](screenshots/rds-stopped-action-required.png) |
+
 ---
 
 ## Contents
