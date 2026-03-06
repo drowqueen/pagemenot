@@ -213,16 +213,17 @@ if ask_yes "AWS (SSM / ECS execution)"; then
     prompt "AWS region" "eu-west-1"; AWS_REGION="$_REPLY"
 fi
 
-if ask_yes "GCP (Cloud Logging / Monitoring)"; then
-    prompt "Service account JSON path" "/path/to/pagemenot-sa.json"; GOOGLE_APPLICATION_CREDENTIALS="$_REPLY"
-fi
-
-if ask_yes "Azure"; then
-    prompt "Tenant ID" ""; AZURE_TENANT_ID="$_REPLY"
-    prompt "Client ID" ""; AZURE_CLIENT_ID="$_REPLY"
-    prompt_secret "Client secret"; AZURE_CLIENT_SECRET="$_REPLY"
-    prompt "Subscription ID" ""; AZURE_SUBSCRIPTION_ID="$_REPLY"
-fi
+# GCP and Azure support coming soon
+# if ask_yes "GCP (Cloud Logging / Monitoring)"; then
+#     prompt "Service account JSON path" "/path/to/pagemenot-sa.json"; GOOGLE_APPLICATION_CREDENTIALS="$_REPLY"
+# fi
+#
+# if ask_yes "Azure"; then
+#     prompt "Tenant ID" ""; AZURE_TENANT_ID="$_REPLY"
+#     prompt "Client ID" ""; AZURE_CLIENT_ID="$_REPLY"
+#     prompt_secret "Client secret"; AZURE_CLIENT_SECRET="$_REPLY"
+#     prompt "Subscription ID" ""; AZURE_SUBSCRIPTION_ID="$_REPLY"
+# fi
 
 if ask_yes "Redis (approval state persistence across restarts / multi-replica dedup)"; then
     prompt "Redis URL" "redis://localhost:6379/0"; REDIS_URL="$_REPLY"
@@ -288,19 +289,20 @@ header "Container image variant"
 say "  kubectl is always included. Select additional cloud CLIs to bake in."
 say "  1) Kubernetes only  — kubectl                         (~1 GB)"
 say "  2) AWS              — kubectl + AWS CLI v2            (+500 MB)"
-say "  3) GCP              — kubectl + gcloud                (+400 MB)"
-say "  4) Azure            — kubectl + Azure CLI             (+300 MB)"
-say "  5) Multi-cloud      — kubectl + AWS CLI + gcloud + Azure CLI  (+1.2 GB)"
+# GCP and Azure variants coming soon:
+# say "  3) GCP              — kubectl + gcloud                (+400 MB)"
+# say "  4) Azure            — kubectl + Azure CLI             (+300 MB)"
+# say "  5) Multi-cloud      — kubectl + AWS CLI + gcloud + Azure CLI  (+1.2 GB)"
 
 while true; do
     prompt "Choice" "1"; VARIANT_CHOICE="$_REPLY"
     case "$VARIANT_CHOICE" in
     1) PAGEMENOT_BUILD_TARGET="base";  ok "base  — kubectl only";              break ;;
     2) PAGEMENOT_BUILD_TARGET="aws";   ok "aws   — kubectl + AWS CLI v2";      break ;;
-    3) PAGEMENOT_BUILD_TARGET="gcp";   ok "gcp   — kubectl + gcloud";          break ;;
-    4) PAGEMENOT_BUILD_TARGET="azure"; ok "azure — kubectl + Azure CLI";        break ;;
-    5) PAGEMENOT_BUILD_TARGET="cloud"; ok "cloud — kubectl + all three CLIs";  break ;;
-    *) err "Enter 1–5" ;;
+    # 3) PAGEMENOT_BUILD_TARGET="gcp";   ok "gcp   — kubectl + gcloud";          break ;;  # coming soon
+    # 4) PAGEMENOT_BUILD_TARGET="azure"; ok "azure — kubectl + Azure CLI";        break ;;  # coming soon
+    # 5) PAGEMENOT_BUILD_TARGET="cloud"; ok "cloud — kubectl + all three CLIs";  break ;;  # coming soon
+    *) err "Enter 1 or 2" ;;
     esac
 done
 
