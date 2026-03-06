@@ -22,7 +22,7 @@ from typing import Optional
 
 from pagemenot.config import settings
 from pagemenot.rag import ingest_all
-from pagemenot.slack_bot import create_slack_app, _chunk_text
+from pagemenot.slack_bot import create_slack_app, _chunk_text, _verif_store
 from pagemenot.triage import run_triage, _executor
 
 logging.basicConfig(
@@ -94,6 +94,26 @@ async def lifespan(app: FastAPI):
             alarm_name=alarm_name,
             region=region,
         )
+        # Persist before launching — survives container restart
+        asyncio.create_task(
+            _verif_store.set(
+                alarm_name,
+                {
+                    "alarm_name": alarm_name,
+                    "region": region,
+                    "channel": channel,
+                    "thread_ts": thread_ts,
+                    "jira_url": jira_url,
+                    "pd_url": pd_url,
+                    "approved_by": approved_by,
+                    "alert_title": entry.get("alert_title", ""),
+                    "service": entry.get("service", ""),
+                    "severity": entry.get("severity", "unknown"),
+                    "root_cause": entry.get("root_cause", ""),
+                },
+                ttl=settings.pagemenot_verify_timeout + 300,
+            )
+        )
         asyncio.create_task(
             _verify_cw_recovery(
                 alarm_name, region, channel, thread_ts, _gc(), _r, jira_url, pd_url, approved_by
@@ -101,6 +121,36 @@ async def lifespan(app: FastAPI):
         )
 
     _sbot._post_verification_task = _schedule_verification
+
+    # Resume any CW verifications that were in-flight when the container last stopped
+    _pending = await _verif_store.get_all()
+    if _pending:
+        logger.info("Resuming %d pending CW verification(s) from last run", len(_pending))
+        from pagemenot.slack_bot import get_client as _gc2
+        from pagemenot.triage import TriageResult as _TR2
+
+        for _pv in _pending.values():
+            _pr = _TR2(
+                alert_title=_pv.get("alert_title", ""),
+                service=_pv.get("service", ""),
+                severity=_pv.get("severity", "unknown"),
+                root_cause=_pv.get("root_cause", ""),
+                alarm_name=_pv.get("alarm_name", ""),
+                region=_pv.get("region", ""),
+            )
+            asyncio.create_task(
+                _verify_cw_recovery(
+                    _pv["alarm_name"],
+                    _pv.get("region", ""),
+                    _pv["channel"],
+                    _pv["thread_ts"],
+                    _gc2(),
+                    _pr,
+                    _pv.get("jira_url", ""),
+                    _pv.get("pd_url", ""),
+                    _pv.get("approved_by", ""),
+                )
+            )
 
     logger.info("═" * 50)
     logger.info("🦞 Pagemenot is online")
@@ -285,6 +335,23 @@ async def sns_webhook(
         alarm_severity = _sev_match.group(1).lower() if _sev_match else "high"
 
         if new_state == "OK":
+            from pagemenot.slack_bot import get_client as _gc
+
+            _client = _gc()
+
+            # If a pending CW verification exists (approval path), claim it atomically
+            pv = await _verif_store.pop(alarm_name)
+            if pv:
+                try:
+                    await _client.chat_postMessage(
+                        channel=pv["channel"],
+                        thread_ts=pv["thread_ts"],
+                        text=f"✅ *Verified healthy* — `{alarm_name}` back to OK.",
+                    )
+                except Exception as e:
+                    logger.warning("SNS OK: approval thread notify failed: %s", e)
+                # Jira/PD resolved below via _alarm_incidents (if tracked)
+
             entry = _alarm_incidents.pop(alarm_name, None)
             if entry:
                 asyncio.create_task(
@@ -296,9 +363,6 @@ async def sns_webhook(
                     _resolve_pagerduty_incident(entry["pd_url"], resolved_by="cloudwatch")
                 )
                 try:
-                    from pagemenot.slack_bot import get_client as _gc
-
-                    _client = _gc()
                     await _client.chat_postMessage(
                         channel=entry["channel"],
                         thread_ts=entry["thread_ts"],
@@ -759,6 +823,8 @@ async def _verify_cw_recovery(
             state = alarms[0].get("StateValue") if alarms else "NO_ALARM"
             logger.info("CW verify poll [%ds]: %s → %s", elapsed, alarm_name, state)
             if alarms and alarms[0].get("StateValue") == "OK":
+                # Claim the pending verification — prevents SNS OK handler from double-posting
+                await _verif_store.pop(alarm_name)
                 await client.chat_postMessage(
                     channel=channel,
                     thread_ts=thread_ts,
@@ -775,11 +841,6 @@ async def _verify_cw_recovery(
                     asyncio.create_task(
                         _resolve_pagerduty_incident(pd_url, resolved_by=approved_by or "pagemenot")
                     )
-                if approved_by:
-                    await client.chat_postMessage(
-                        channel=channel,
-                        text=f"🟢 *Resolved:* {result.alert_title}\n_Approved by <@{approved_by}>, alarm verified OK._",
-                    )
                 from pagemenot.rag import write_and_index_postmortem as _wip
 
                 loop.run_in_executor(None, _wip, result, approved_by or "agent", jira_url)
@@ -789,6 +850,7 @@ async def _verify_cw_recovery(
             logger.warning("CW verify poll failed for %s: %s", alarm_name, e)
 
     # Timeout — runbook did not resolve the incident
+    await _verif_store.pop(alarm_name)
     await client.chat_postMessage(
         channel=channel,
         thread_ts=thread_ts,

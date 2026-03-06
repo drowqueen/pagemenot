@@ -38,7 +38,9 @@ class _ApprovalStore:
 
     _FILE = "/app/data/approvals.json"
 
-    def __init__(self):
+    def __init__(self, file: str | None = None):
+        if file:
+            self._FILE = file
         self._mem: dict[str, dict] = {}
         self._redis = None
         self._load_file()
@@ -95,8 +97,13 @@ class _ApprovalStore:
             self._save_file()
         return value
 
+    async def get_all(self) -> dict[str, dict]:
+        """Return snapshot of all entries for startup resume (file-backed, not removed)."""
+        return dict(self._mem)
+
 
 _approval_store = _ApprovalStore()
+_verif_store = _ApprovalStore(file="/app/data/verifications.json")
 
 
 def create_slack_app() -> AsyncApp:
