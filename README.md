@@ -182,9 +182,9 @@ Pagemenot requires a **persistent process** (Slack Socket Mode needs a long-live
 |----------|--------------|-------|
 | AWS ECS (Fargate) | 0.25 vCPU / 512 MB | pagemenot only; Ollama on separate EC2 GPU instance |
 | AWS EC2 | t3.small+ | collocate pagemenot + Ollama on GPU instance |
-| GCP Cloud Run | `--min-instances 1`, 512 MB | persistent; Ollama on separate GCE GPU VM |
-| GCP GKE | 1 replica, 256m CPU / 512 MB | GPU node pool for Ollama |
-| Azure Container Apps | 0.25 vCPU / 0.5 GB, min=1 | persistent; Ollama on separate ACI GPU |
+| GCP Cloud Run | `--min-instances 1`, 512 MB | 🔜 coming soon |
+| GCP GKE | 1 replica, 256m CPU / 512 MB | 🔜 coming soon |
+| Azure Container Apps | 0.25 vCPU / 0.5 GB, min=1 | 🔜 coming soon |
 | Kubernetes (any) | 1 replica; GPU node pool for Ollama | tolerations for GPU node required |
 | Hetzner CX22 + GX2-15 | €4 + €35/mo | cheapest GPU-enabled setup |
 | DigitalOcean Basic + GPU Droplet | $6 + $0.80/hr | GPU Droplet on-demand when needed |
@@ -216,9 +216,9 @@ This is the first decision. Pagemenot builds a Docker image with the CLI tools y
 |-----------------|--------------------------|-----------------|----------------|
 | Kubernetes only | `base` _(default)_ | kubectl (amd64 + arm64) | — |
 | AWS — EKS / ECS / EC2 | `aws` | kubectl + AWS CLI v2 | +~500 MB |
-| GCP — GKE / GCE | `gcp` | kubectl + gcloud | +~400 MB |
-| Azure — AKS | `azure` | kubectl + Azure CLI | +~300 MB |
-| Multi-cloud | `cloud` | kubectl + AWS CLI + gcloud + Azure CLI | +~1.2 GB |
+| GCP — GKE / GCE | `gcp` | kubectl + gcloud | +~400 MB — 🔜 coming soon |
+| Azure — AKS | `azure` | kubectl + Azure CLI | +~300 MB — 🔜 coming soon |
+| Multi-cloud | `cloud` | kubectl + AWS CLI + gcloud + Azure CLI | +~1.2 GB — 🔜 coming soon |
 
 kubectl is always included and auto-detects `amd64` / `arm64` at build time.
 
@@ -418,9 +418,9 @@ Set vars in `.env` → integration activates. Unset → mock fallback.
 | Deploys | GitHub | `GITHUB_TOKEN` + `GITHUB_ORG` |
 | Deploy mapping | Monorepo / name mismatch | `config/services.yaml` |
 | Execution | Kubernetes (pod) | No config — in-cluster ServiceAccount auto-detected |
-| Execution | Kubernetes (EC2/ECS/GCP/bare metal) | `KUBECONFIG_PATH` — path to a kubeconfig file |
+| Execution | Kubernetes (EC2/ECS/bare metal) | `KUBECONFIG_PATH` — path to a kubeconfig file |
 | Ticketing | Jira Service Management | `JIRA_SM_URL` + `JIRA_SM_EMAIL` + `JIRA_SM_API_TOKEN` |
-| Alerts | Azure Monitor | Action Group → Webhook → `/webhooks/generic` |
+| Alerts | Azure Monitor | Action Group → Webhook → `/webhooks/generic` — 🔜 coming soon |
 
 ### `config/services.yaml`
 
@@ -438,8 +438,8 @@ Maps service names to GitHub repos for deploy correlation. Safe to commit — no
 | New Relic | `POST /webhooks/newrelic` | ✓ |
 | PagerDuty | `POST /webhooks/pagerduty` | ✓ |
 | AWS CloudWatch | `POST /webhooks/sns` | ✓ (SNS `OK` state) |
-| GCP Cloud Monitoring | `POST /webhooks/generic` | — |
-| Azure Monitor | `POST /webhooks/generic` | — |
+| GCP Cloud Monitoring | `POST /webhooks/generic` | — (🔜 coming soon) |
+| Azure Monitor | `POST /webhooks/generic` | — (🔜 coming soon) |
 | OpsGenie | `POST /webhooks/opsgenie` | ✓ |
 | Anything else | `POST /webhooks/generic` | — |
 
@@ -501,25 +501,11 @@ aws sns subscribe --topic-arn arn:aws:sns:us-east-1:ACCOUNT:pagemenot-alerts \
 
 ### GCP Cloud Monitoring
 
-1. **Monitoring → Alerting → Notification Channels** → Add channel → **Webhook**
-2. URL: `https://your-pagemenot-url/webhooks/generic`
-3. (Optional) append `?token=YOUR_SECRET` and set `WEBHOOK_SECRET_GENERIC=YOUR_SECRET` in `.env`
-4. Add the channel to any existing alerting policy under **Notifications**
-
-GCP sends a JSON payload. Pagemenot extracts `incident.condition_name` as the alert title and `incident.resource.labels` for the service name.
-
-Recovery events (`incident.state = "closed"`) are received but do not yet auto-close Jira/PD — the agent posts the recovery message to Slack only.
+> 🔜 **Coming soon** — full GCP support (exec, runbooks, auto-close) is planned. Basic alert ingestion via `/webhooks/generic` works today but autonomous remediation is not yet supported.
 
 ### Azure Monitor
 
-1. **Monitor → Alerts → Action Groups** → create or edit a group
-2. Add action: **Webhook**
-3. URL: `https://your-pagemenot-url/webhooks/generic`
-4. Enable **common alert schema**
-
-Azure Monitor does not natively sign webhook payloads. Leave `WEBHOOK_SECRET_GENERIC` unset, or add an API Management / Logic App proxy that adds an HMAC header.
-
-Recovery alerts (`data.status = "Resolved"`) are received but do not yet auto-close Jira/PD — recovery message posted to Slack only.
+> 🔜 **Coming soon** — full Azure support (exec, runbooks, auto-close) is planned. Basic alert ingestion via `/webhooks/generic` works today but autonomous remediation is not yet supported.
 
 ---
 
@@ -794,7 +780,7 @@ make install   # pull image, start
 | Any Linux server | `docker compose up -d` |
 | Kubernetes | 1-replica Deployment, env from Secret |
 | AWS ECS / Fargate | Push to ECR, min 0.5 vCPU / 512MB |
-| GCP Cloud Run | `--min-instances 1` required (Socket Mode needs persistent connection) |
+| GCP Cloud Run | `--min-instances 1` required (Socket Mode needs persistent connection) — 🔜 coming soon |
 
 Not suitable for FaaS (Lambda, Cloud Functions) — Slack Socket Mode requires a persistent connection.
 
@@ -843,7 +829,7 @@ For Kubernetes, add ChromaDB as a StatefulSet with a `ReadWriteOnce` PVC. For EC
 
 ## Security
 
-**TLS** — run pagemenot behind a reverse proxy (nginx, Caddy, ALB, GCP Load Balancer) that terminates TLS. Never expose port 8080 directly.
+**TLS** — run pagemenot behind a reverse proxy (nginx, Caddy, ALB) that terminates TLS. Never expose port 8080 directly.
 
 **HMAC signature verification** — set `WEBHOOK_SECRET_<SOURCE>` for each alerting tool. Pagemenot rejects requests with invalid signatures. Unset = warn and accept (dev only).
 
@@ -937,36 +923,11 @@ The instance profile / task role / IRSA approach is preferred — no static cred
 
 ### Azure Monitor alerts
 
-No `.env` vars required. In the Azure portal:
-
-1. **Monitor → Alerts → Action Groups** → create or edit a group
-2. Add action: **Webhook**
-3. URL: `https://your-pagemenot-url/webhooks/generic`
-4. Enable **common alert schema**
-
-Optionally set `WEBHOOK_SECRET_GENERIC` in `.env` — pagemenot will verify the `X-Pagemenot-Signature` header. Azure doesn't natively sign webhook payloads, so leave unset unless you add your own signing proxy.
+> 🔜 **Coming soon.**
 
 ### GCP
 
-Create a Service Account with read-only access to Monitoring and Logging:
-
-```bash
-gcloud iam service-accounts create pagemenot \
-  --display-name "Pagemenot SRE"
-
-gcloud projects add-iam-policy-binding YOUR_PROJECT \
-  --member "serviceAccount:pagemenot@YOUR_PROJECT.iam.gserviceaccount.com" \
-  --role "roles/monitoring.viewer"
-
-gcloud projects add-iam-policy-binding YOUR_PROJECT \
-  --member "serviceAccount:pagemenot@YOUR_PROJECT.iam.gserviceaccount.com" \
-  --role "roles/logging.viewer"
-
-gcloud iam service-accounts keys create pagemenot-sa.json \
-  --iam-account pagemenot@YOUR_PROJECT.iam.gserviceaccount.com
-```
-
-Set `GOOGLE_APPLICATION_CREDENTIALS=/path/to/pagemenot-sa.json` in `.env`.
+> 🔜 **Coming soon.**
 
 ---
 
