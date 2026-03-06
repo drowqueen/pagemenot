@@ -812,6 +812,14 @@ def exec_aws(service: str, action: str, params: dict) -> str:
     except Exception:
         pass  # fall through with raw params; boto3 will surface any name errors
 
+    # Pagination (Fix 3): use boto3 paginator when available; cap at 500 items
+    try:
+        paginator = client.get_paginator(action)
+        full = paginator.paginate(**params, PaginationConfig={"MaxItems": 500}).build_full_result()
+        return str(full)[:2000]
+    except botocore.exceptions.OperationNotPageableError:
+        pass  # not pageable — fall through to single call
+
     try:
         response = method(**params)
     except botocore.exceptions.NoCredentialsError:
@@ -995,14 +1003,18 @@ def dispatch_exec_step(step: str, service: str = "") -> str:
     if cmd.startswith("kubectl "):
         return exec_kubectl(cmd[len("kubectl ") :])
     elif cmd.startswith("aws "):
-        # Strip pipes — boto3 handles response natively; strip on space-pipe boundary
+        import json as _json
+        import botocore.session as _bcs
+
+        # Strip pipes — boto3 handles response natively
         pipe_idx = cmd.find(" | ")
         cmd_clean = cmd[:pipe_idx].strip() if pipe_idx != -1 else cmd
         parts = shlex.split(cmd_clean)
         if len(parts) < 3:
             raise ValueError(f"Invalid AWS command: {cmd!r}")
         aws_service, aws_action = parts[1], parts[2].replace("-", "_")
-        # CLI-only flags — no boto3 equivalent; includes rarely-used ones
+
+        # CLI-only flags — no boto3 equivalent
         _CLI_ONLY = {
             "region",
             "output",
@@ -1020,10 +1032,24 @@ def dispatch_exec_step(step: str, service: str = "") -> str:
             "no_verify_ssl",
             "no_cli_pager",
         }
-        # CLI flag names that differ from boto3 param names
         _REMAP = {"max_items": "limit"}
-        # snake_case params that require int (not str)
         _INT_PARAMS = {"limit", "max_results", "max_items", "count", "duration_seconds"}
+
+        # Load valid flag names (no-creds botocore session) to distinguish flags from
+        # values that happen to start with "--" (Fix 2)
+        _valid_flags: frozenset[str] = frozenset()
+        try:
+            _op_name = "".join(w.capitalize() for w in aws_action.split("_"))
+            _members = (
+                _bcs.Session()
+                .get_service_model(aws_service)
+                .operation_model(_op_name)
+                .input_shape.members
+            )
+            _valid_flags = frozenset(k.lower().replace("_", "") for k in _members)
+        except Exception:
+            pass  # fall back: all "--" tokens treated as flags
+
         params: dict = {}
         i = 3
         while i < len(parts):
@@ -1032,24 +1058,57 @@ def dispatch_exec_step(step: str, service: str = "") -> str:
                 i += 1
                 continue
             snake = token.lstrip("-").replace("-", "_")
-            has_value = i + 1 < len(parts) and not parts[i + 1].startswith("--")
+
+            # Collect values: advance j while next token is not a recognised flag (Fix 1 + 2)
+            values: list[str] = []
+            j = i + 1
+            while j < len(parts):
+                nxt = parts[j]
+                if nxt.startswith("--"):
+                    nxt_norm = nxt.lstrip("-").replace("-", "_").replace("_", "")
+                    nxt_snake = nxt.lstrip("-").replace("-", "_")
+                    # Stop if it's a recognised API flag or a CLI-only flag
+                    if nxt_norm in _valid_flags or nxt_snake in _CLI_ONLY:
+                        break
+                    # Unknown "--xxx" → treat as value (Fix 2)
+                values.append(nxt)
+                j += 1
+
             if snake in _CLI_ONLY:
-                i += 2 if has_value else 1
+                i = j
                 continue
             snake = _REMAP.get(snake, snake)
-            if has_value:
-                raw_val = parts[i + 1]
-                if snake in _INT_PARAMS:
+
+            if not values:
+                params[snake] = True  # boolean switch
+            elif len(values) == 1:
+                raw = values[0]
+                # JSON/complex params: try to parse "[…]" or "{…}" (Fix 4)
+                if raw[:1] in ("[", "{"):
                     try:
-                        params[snake] = int(raw_val)
+                        params[snake] = _json.loads(raw)
+                    except _json.JSONDecodeError:
+                        params[snake] = raw
+                elif snake in _INT_PARAMS:
+                    try:
+                        params[snake] = int(raw)
                     except ValueError:
-                        raise ValueError(f"Parameter {snake} must be an integer, got {raw_val!r}")
+                        raise ValueError(f"Parameter {snake} must be an integer, got {raw!r}")
                 else:
-                    params[snake] = raw_val
-                i += 2
+                    params[snake] = raw
             else:
-                params[snake] = True
-                i += 1
+                # Multi-value list (Fix 1): e.g. --log-stream-names s1 s2 s3
+                result_list: list = []
+                for v in values:
+                    if v[:1] in ("[", "{"):
+                        try:
+                            result_list.append(_json.loads(v))
+                            continue
+                        except _json.JSONDecodeError:
+                            pass
+                    result_list.append(v)
+                params[snake] = result_list
+            i = j
         return exec_aws(aws_service, aws_action, params)
     elif cmd.startswith("http://") or cmd.startswith("https://"):
         return exec_http("GET", cmd)
