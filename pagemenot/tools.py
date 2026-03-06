@@ -882,6 +882,20 @@ def exec_http(method: str, url: str, headers: dict | None = None, body: dict | N
         return f"{resp.status_code}: {resp.text[:200]}"
 
 
+def _resolve_lambda_version(service: str) -> str:
+    """Fetch the highest published numeric version for a Lambda function."""
+    import boto3
+
+    if not settings.aws_region:
+        raise RuntimeError("AWS_REGION not configured — set AWS_REGION in .env")
+    client = boto3.client("lambda", region_name=settings.aws_region)
+    response = client.list_versions_by_function(FunctionName=service)
+    versions = [v["Version"] for v in response.get("Versions", []) if v["Version"] != "$LATEST"]
+    if not versions:
+        raise RuntimeError(f"No published numeric versions found for Lambda {service!r}")
+    return str(max(int(v) for v in versions))
+
+
 def _safe_service_name(service: str) -> str:
     """Validate service name used in template substitution — only safe chars allowed."""
     if not re.fullmatch(r"[a-zA-Z0-9_\-\.]+", service):
@@ -919,6 +933,15 @@ def dispatch_exec_step(step: str, service: str = "") -> str:
         if service
         else settings.pagemenot_exec_namespace
     )
+    # Resolve {{ lambda_version }} lazily — only if needed to avoid extra API calls
+    _lambda_version: str | None = None
+
+    def _get_lambda_version() -> str:
+        nonlocal _lambda_version
+        if _lambda_version is None:
+            _lambda_version = _resolve_lambda_version(safe_service)
+        return _lambda_version
+
     for _raw, _sub in [
         ("{{ service }}", safe_service),
         ("{{service}}", safe_service),
@@ -926,6 +949,11 @@ def dispatch_exec_step(step: str, service: str = "") -> str:
         ("{{namespace}}", namespace),
     ]:
         cmd = cmd.replace(_raw, _sub)
+
+    # Dynamic template vars resolved on demand
+    if "{{ lambda_version }}" in cmd or "{{lambda_version}}" in cmd:
+        lv = _get_lambda_version()
+        cmd = cmd.replace("{{ lambda_version }}", lv).replace("{{lambda_version}}", lv)
 
     # Route to correct executor
     if cmd.startswith("kubectl "):

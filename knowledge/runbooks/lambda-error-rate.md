@@ -23,9 +23,9 @@ List recent versions to identify rollback candidate:
 
 <!-- exec: aws lambda list-versions-by-function --function-name {{ service }} -->
 
-Roll back to previous version (requires approval — replace VERSION with output above):
+Roll back to latest published version (requires approval):
 
-<!-- exec:approve: aws lambda update-alias --function-name {{ service }} --name stable --function-version VERSION -->
+<!-- exec:approve: aws lambda update-alias --function-name {{ service }} --name stable --function-version {{ lambda_version }} -->
 
 ## Escalation
 If errors persist after 2 consecutive alarm periods:
