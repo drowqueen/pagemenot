@@ -11,7 +11,7 @@ date: 2026-01-01
 ## Diagnosis
 <!-- exec: aws ec2 describe-instances --instance-ids {{ service }} -->
 <!-- exec: aws cloudwatch describe-alarms-for-metric --namespace AWS/EC2 --metric-name CPUUtilization --dimensions Name=InstanceId,Value={{ service }} -->
-<!-- exec: aws cloudwatch describe-instance-status --instance-ids {{ service }} -->
+<!-- exec: aws ec2 describe-instance-status --instance-ids {{ service }} -->
 
 ## Process-level diagnostics
 Requires SSM — see TODO: SSM exec support.
