@@ -825,22 +825,26 @@ async def _verify_cw_recovery(
             if alarms and alarms[0].get("StateValue") == "OK":
                 # Claim the pending verification — prevents SNS OK handler from double-posting
                 await _verif_store.pop(alarm_name)
-                await client.chat_postMessage(
-                    channel=channel,
-                    thread_ts=thread_ts,
-                    text=f"✅ *Verified healthy* — `{alarm_name}` back to OK after {elapsed}s.",
-                )
                 resolved_by = f"human-approved by <@{approved_by}>" if approved_by else "runbook"
+                links = []
                 if jira_url:
+                    links.append(f"🎫 <{jira_url}|Jira closed>")
                     asyncio.create_task(
                         _resolve_jira_ticket(
                             jira_url, f"Auto-resolved — verified healthy ({resolved_by})"
                         )
                     )
                 if pd_url:
+                    links.append("📟 PD resolved")
                     asyncio.create_task(
                         _resolve_pagerduty_incident(pd_url, resolved_by=approved_by or "pagemenot")
                     )
+                suffix = "  •  " + "  •  ".join(links) if links else ""
+                await client.chat_postMessage(
+                    channel=channel,
+                    thread_ts=thread_ts,
+                    text=f"✅ *Verified healthy* — `{alarm_name}` back to OK after {elapsed}s.{suffix}",
+                )
                 from pagemenot.rag import write_and_index_postmortem as _wip
 
                 loop.run_in_executor(None, _wip, result, approved_by or "agent", jira_url)
