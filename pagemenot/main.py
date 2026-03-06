@@ -248,11 +248,16 @@ async def sns_webhook(
         dims = {d["name"]: d["value"] for d in trigger.get("Dimensions", [])}
         instance_id = dims.get("InstanceId", "")
         service = (
-            dims.get("ServiceEndpoint")
-            or dims.get("FunctionName")
+            dims.get("FunctionName")
+            or dims.get("DBInstanceIdentifier")
+            or dims.get("DBClusterIdentifier")
+            or dims.get("ServiceName")
+            or dims.get("ClusterName")
             or dims.get("AutoScalingGroupName")
+            or dims.get("LoadBalancer")
+            or dims.get("ServiceEndpoint")
             or instance_id
-            or "aws-ec2"
+            or alarm_name
         )
 
         # Extract severity from alarm description (e.g. "severity: critical")

@@ -807,6 +807,9 @@ def exec_aws(service: str, action: str, params: dict) -> str:
     # Also coerce types: list-type params wrapped in list, integer/boolean params cast
     try:
         op_name = "".join(w.capitalize() for w in action.split("_"))
+        # Case-insensitive lookup handles abbreviations like DB→Db, LB→Lb, etc.
+        _all_ops = {k.lower(): k for k in client.meta.service_model.operation_names}
+        op_name = _all_ops.get(op_name.lower(), op_name)
         members = client.meta.service_model.operation_model(op_name).input_shape.members
         lower_map = {k.lower().replace("_", ""): k for k in members}
         params = {lower_map.get(k.lower().replace("_", ""), k): v for k, v in params.items()}
