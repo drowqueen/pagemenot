@@ -823,6 +823,11 @@ Embedded SQLite on shared EFS/NFS is unsafe for concurrent writes. Run a dedicat
 | `CHROMA_PORT` | `8000` | ChromaDB server port |
 | `REDIS_URL` | unset | Approval state (falls back to JSON file) |
 
+**Redis is required for HA.** When `REDIS_URL` is set, pending approval state (incident details, Jira/PD URLs, exec steps) is stored in Redis. This means:
+- Any replica can handle an Approve/Reject click — not just the one that created the button
+- Container restarts mid-incident do not lose pending approvals — state is reloaded from Redis on startup
+- Without Redis, approval state is local to the container (JSON file fallback) and lost if that container is replaced
+
 For Kubernetes, add ChromaDB as a StatefulSet with a `ReadWriteOnce` PVC. For ECS, run ChromaDB as a sidecar or separate task on a single EC2 instance with an attached EBS volume.
 
 ---
