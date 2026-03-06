@@ -185,6 +185,8 @@ def _parse_alert(source: str, payload: dict) -> dict:
             "severity": payload.get("severity", "high"),
             "description": payload.get("message", ""),
             "external_id": payload.get("alarm_name", ""),
+            "alarm_name": payload.get("alarm_name", ""),
+            "region": payload.get("region", ""),
         }
     else:
         text = payload.get("text", payload.get("description", str(payload)))
