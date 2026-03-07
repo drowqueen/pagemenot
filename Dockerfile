@@ -73,6 +73,7 @@ CMD ["python", "-m", "pagemenot.main"]
 # ══════════════════════════════════════════════════════════════
 FROM base AS aws
 
+USER root
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends unzip && \
@@ -83,6 +84,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     /tmp/aws/install && \
     rm -rf /tmp/awscliv2.zip /tmp/aws && \
     apt-get remove --purge -y unzip && apt-get autoremove -y
+USER appuser
 
 # ══════════════════════════════════════════════════════════════
 # gcp — + gcloud CLI  (~400 MB)
@@ -91,6 +93,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 # ══════════════════════════════════════════════════════════════
 FROM base AS gcp
 
+USER root
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends gnupg && \
@@ -100,6 +103,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       > /etc/apt/sources.list.d/google-cloud-sdk.list && \
     apt-get update && apt-get install -y --no-install-recommends google-cloud-cli && \
     apt-get remove --purge -y gnupg && apt-get autoremove -y
+USER appuser
 
 # ══════════════════════════════════════════════════════════════
 # azure — + Azure CLI  (~300 MB)
@@ -108,6 +112,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 # ══════════════════════════════════════════════════════════════
 FROM base AS azure
 
+USER root
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends gnupg lsb-release && \
@@ -120,6 +125,7 @@ https://packages.microsoft.com/repos/azure-cli/ ${AZ_DIST} main" \
       > /etc/apt/sources.list.d/azure-cli.list && \
     apt-get update && apt-get install -y --no-install-recommends azure-cli && \
     apt-get remove --purge -y gnupg lsb-release && apt-get autoremove -y
+USER appuser
 
 # ══════════════════════════════════════════════════════════════
 # cloud — + AWS CLI + gcloud + Azure CLI  (~1.2 GB extra)
@@ -129,6 +135,7 @@ https://packages.microsoft.com/repos/azure-cli/ ${AZ_DIST} main" \
 # ══════════════════════════════════════════════════════════════
 FROM base AS cloud
 
+USER root
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     # ── build-time deps ──────────────────────────────────────
@@ -159,3 +166,4 @@ https://packages.microsoft.com/repos/azure-cli/ ${AZ_DIST} main" \
       google-cloud-cli azure-cli && \
     # ── purge build-time deps ─────────────────────────────────
     apt-get remove --purge -y unzip gnupg lsb-release && apt-get autoremove -y
+USER appuser
