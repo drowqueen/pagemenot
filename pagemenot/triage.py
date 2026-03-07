@@ -201,8 +201,11 @@ def _parse_alert(source: str, payload: dict) -> dict:
                     "instance_name", "unknown"
                 )
             else:
+                # resource_display_name may be an IP/URL for uptime_url resources — only use
+                # it if it looks like a service name (contains hyphen or underscore)
+                display = incident.get("resource_display_name", "")
                 service = (
-                    incident.get("resource_display_name")
+                    (display if ("-" in display or "_" in display) else None)
                     or labels.get("service_name")
                     or _guess_service(incident.get("condition_name", ""))
                     or "unknown"
