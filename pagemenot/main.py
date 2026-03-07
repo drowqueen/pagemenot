@@ -275,6 +275,10 @@ async def generic_webhook(
         "generic", settings.webhook_secret_generic, body, x_pagemenot_signature, prefix="sha256="
     )
     payload = await request.json()
+    # Skip GCP Cloud Monitoring resolved notifications (state=closed)
+    incident = payload.get("incident", {})
+    if incident and incident.get("state") == "closed":
+        return {"status": "skipped", "reason": "incident closed"}
     asyncio.create_task(_auto_triage("generic", payload))
     return {"status": "accepted"}
 

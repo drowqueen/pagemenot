@@ -188,6 +188,40 @@ def _parse_alert(source: str, payload: dict) -> dict:
             "alarm_name": payload.get("alarm_name", ""),
             "region": payload.get("region", ""),
         }
+    elif source == "generic":
+        incident = payload.get("incident", {})
+        if incident:
+            resource = incident.get("resource", {})
+            resource_type = resource.get("type", "")
+            labels = resource.get("labels", {})
+            if resource_type == "cloud_run_revision":
+                service = labels.get("service_name", "unknown")
+            elif resource_type in ("gce_instance", "gke_container", "k8s_container"):
+                service = incident.get("resource_display_name") or labels.get(
+                    "instance_name", "unknown"
+                )
+            else:
+                service = (
+                    incident.get("resource_display_name")
+                    or labels.get("service_name")
+                    or _guess_service(incident.get("condition_name", ""))
+                    or "unknown"
+                )
+            state = incident.get("state", "open")
+            severity = "high" if state == "open" else "low"
+            return {
+                "title": incident.get("condition_name", "Unknown GCP Alert"),
+                "service": service,
+                "severity": severity,
+                "description": incident.get("summary", incident.get("url", "")),
+            }
+        text = payload.get("text", payload.get("description", str(payload)))
+        return {
+            "title": text[:100],
+            "service": _guess_service(text),
+            "severity": "medium",
+            "description": text,
+        }
     else:
         text = payload.get("text", payload.get("description", str(payload)))
         return {
