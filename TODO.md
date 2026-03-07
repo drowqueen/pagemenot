@@ -1,5 +1,46 @@
 # Pagemenot — Roadmap
 
+## 🔄 IN PROGRESS — GCP testing (branch: `feature/gcp-testing`)
+> Context ran out mid-session. Resume here.
+
+### Next immediate steps (in order)
+- [ ] **Verify build** — check VM `/tmp/build3.log`; confirm `pagemenot` container is up at `34.123.60.64:8080`
+  - `gcloud compute ssh pagemenot --zone=us-central1-a --project=zipintel --command='tail -10 /tmp/build3.log; docker ps'`
+  - If build failed again, check `EXIT` line in log for new error
+- [ ] **Uncomment GCP in `setup.sh`** — remove `# GCP and Azure support coming soon` comment block, uncomment the GCP credential prompts and menu option 3
+- [ ] **Update README** — remove "🔜 coming soon" for GCP; GCP is now supported and tested
+- [ ] **Create PR** `feature/gcp-testing` → `main` once tests pass
+
+### GCP test scenarios (run after container is up)
+- [ ] **Test 1 — Cloud Run unavailable**: `gcloud run services update gcp-hello --ingress=internal --region=us-central1 --project=zipintel` → wait for Cloud Monitoring alert → pagemenot should auto-fix with `--ingress=all`
+- [ ] **Test 2 — GCE VM stopped**: `gcloud compute instances stop gcp-app-vm --zone=us-central1-a --project=zipintel` → wait for uptime check alert → pagemenot should auto-start
+- [ ] **Test 3 — GCE nginx stopped**: `gcloud compute ssh gcp-app-vm --zone=us-central1-a --project=zipintel --command="sudo systemctl stop nginx"` → wait for HTTP uptime alert → pagemenot should auto-restart
+- [ ] **Test 4 — Grafana Cloud alert**: Grafana Infinity rule fires when `gcp-app-vm:80` is unreachable → routes to pagemenot `/webhooks/grafana`
+
+### GCP infra state (do NOT delete until tests pass)
+| Resource | Type | Details |
+|----------|------|---------|
+| `pagemenot` | GCE e2-micro | 34.123.60.64, us-central1-a — pagemenot app VM, keep running |
+| `gcp-app-vm` | GCE e2-micro | 34.172.81.177, us-central1-a — test target, nginx on port 80 |
+| `gcp-hello` | Cloud Run | us-central1, stable tag = `gcp-hello-00001-779` |
+| `pagemenot-sa` | IAM SA | `pagemenot-sa@zipintel.iam.gserviceaccount.com`, attached to pagemenot VM |
+| Uptime checks | Cloud Monitoring | `gcp-hello-uptime`, `gcp-app-vm-uptime` |
+| Alert policies | Cloud Monitoring | Cloud Run unavailable, GCE stopped, GCE nginx down |
+| Contact point | Grafana Cloud | `pagemenot` → `http://34.123.60.64:8080/webhooks/grafana` |
+| Alert rule | Grafana Cloud | `GCE gcp-app-vm nginx service down`, folder `pagemenot-tests` |
+
+### What was fixed in this session
+- `triage.py`: GCP Cloud Monitoring webhook parser (cloud_run_revision, gce_instance, uptime_url)
+- `main.py`: skip `state=closed` GCP incidents at `/webhooks/generic`
+- `Dockerfile`: `USER root` before apt-get + `USER appuser` after in all CLI stages (aws, gcp, azure, cloud) — was causing `Permission denied` on build
+- Runbooks added: `cloud-run-unavailable.md`, `gce-instance-stopped.md`, `gce-nginx-stopped.md` (all exec steps verified)
+- Grafana SA token updated in `.env` (see local `.env`, `GRAFANA_API_KEY`)
+
+### Known: AWS stages untested with new USER fix
+The `aws` Dockerfile stage had the same bug. AWS tests used `base` target, not `aws`. The fix is in place but `aws` stage hasn't been built since the fix — verify if doing future AWS CLI rebuild.
+
+
+
 ## Incident lifecycle
 - [ ] Dedicated war room Slack channel per incident (auto-created on escalation, archived on resolve)
 - [ ] On-call rotation / role assignment in incident thread (IC, Comms Lead, Scribe)
