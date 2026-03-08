@@ -1,6 +1,7 @@
 # High Error Rate (5xx)
 
 service: general
+tags: kubernetes, k8s, http, errors
 date: 2026-01-01
 
 ## Symptoms

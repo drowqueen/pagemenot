@@ -1,6 +1,7 @@
 # High Latency
 
 service: general
+tags: kubernetes, k8s, latency
 date: 2026-01-01
 
 ## Symptoms

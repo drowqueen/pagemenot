@@ -1,6 +1,7 @@
 # Service Rollback Procedure
 
 service: general
+tags: kubernetes, k8s, rollback, deployment
 date: 2026-01-01
 
 ## Symptoms

@@ -1,6 +1,7 @@
 # SSL Certificate Expiry
 
 service: general
+tags: ssl, tls, certificate
 date: 2026-01-01
 
 ## Symptoms

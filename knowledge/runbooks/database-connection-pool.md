@@ -1,6 +1,7 @@
 # Database Connection Pool Exhaustion
 
 service: general
+tags: database, connections
 date: 2026-01-01
 
 ## Symptoms

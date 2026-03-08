@@ -218,13 +218,14 @@ def _detect_cloud_provider(tags_str: str, content: str) -> str:
         return "aws"
     if tags & _K8S_TAGS:
         return "k8s"
-    # Fallback: scan exec commands in content
-    if "gcloud " in content:
-        return "gcp"
-    if re.search(r"\baws ", content):
-        return "aws"
-    if "kubectl " in content:
-        return "k8s"
+    # Content fallback only for untagged docs (tags field absent or empty)
+    if not tags:
+        if "gcloud " in content:
+            return "gcp"
+        if re.search(r"\baws ", content):
+            return "aws"
+        if "kubectl " in content:
+            return "k8s"
     return "generic"
 
 

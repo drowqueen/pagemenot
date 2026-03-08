@@ -1,6 +1,7 @@
 # Pod CrashLoopBackOff
 
 service: general
+tags: kubernetes, k8s, crashloop, pod
 date: 2026-01-01
 
 ## Symptoms

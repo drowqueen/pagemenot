@@ -1,6 +1,7 @@
 # EC2 High CPU
 
 service: ec2
+tags: ec2, aws, cpu
 date: 2026-01-01
 
 ## Symptoms
