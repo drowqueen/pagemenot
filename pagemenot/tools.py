@@ -1182,7 +1182,9 @@ def dispatch_exec_step(step: str, service: str = "") -> str:
         return exec_shell(cmd)
 
 
-def get_runbook_exec_steps(query: str, service: str = "") -> dict[str, list[tuple[str, str]]]:
+def get_runbook_exec_steps(
+    query: str, service: str = "", cloud_provider: str = ""
+) -> dict[str, list[tuple[str, str]]]:
     """Search runbooks by query, return exec steps split by approval requirement.
 
     Returns {"auto": [(tag, filename), ...], "approve": [(tag, filename), ...]}
@@ -1195,8 +1197,14 @@ def get_runbook_exec_steps(query: str, service: str = "") -> dict[str, list[tupl
             settings.chroma_runbooks_collection, metadata={"hnsw:space": "cosine"}
         )
 
+        where = None
+        if cloud_provider and cloud_provider != "unknown":
+            where = {"cloud_provider": {"$in": [cloud_provider, "generic"]}}
+
         results = collection.query(
-            query_texts=[query], n_results=settings.pagemenot_rag_runbooks_n_results
+            query_texts=[query],
+            n_results=settings.pagemenot_rag_runbooks_n_results,
+            where=where,
         )
         if not results["documents"] or not results["documents"][0]:
             return {"auto": [], "approve": []}
