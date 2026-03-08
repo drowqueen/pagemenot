@@ -84,6 +84,7 @@ def _ingest_directory(
                 break
 
         # Extract metadata from frontmatter-style headers
+        tags_str = _extract_field(content, "tags") or ""
         meta = {
             "type": doc_type,
             "title": title,
@@ -94,6 +95,7 @@ def _ingest_directory(
             or "",
             "resolution": _extract_field(content, "resolution") or "",
             "date": _extract_field(content, "date") or "",
+            "cloud_provider": _detect_cloud_provider(tags_str, content),
         }
 
         # Chunk long documents (ChromaDB has limits)
@@ -111,7 +113,9 @@ def _ingest_directory(
         )
 
 
-def index_incident(content: str, filename: str, service: str) -> None:
+def index_incident(
+    content: str, filename: str, service: str, cloud_provider: str = "generic"
+) -> None:
     """Index a single postmortem into ChromaDB incidents collection. Called after human-approved resolution."""
     try:
         client = chromadb.PersistentClient(path=settings.chroma_path)
@@ -129,6 +133,7 @@ def index_incident(content: str, filename: str, service: str) -> None:
             "root_cause": _extract_field(content, "root_cause") or "",
             "resolution": _extract_field(content, "resolution") or "",
             "date": _extract_field(content, "date") or "",
+            "cloud_provider": cloud_provider,
         }
         chunks = _chunk_document(content)
         doc_id = f"postmortem_{stem}"
@@ -190,7 +195,12 @@ def write_and_index_postmortem(
     try:
         path.write_text(content, encoding="utf-8")
         logger.info(f"Postmortem written: {filename}")
-        index_incident(content, filename, service)
+        index_incident(
+            content,
+            filename,
+            service,
+            cloud_provider=getattr(result, "cloud_provider", "generic"),
+        )
     except Exception as e:
         logger.warning(f"Postmortem write/index failed: {e}")
 
