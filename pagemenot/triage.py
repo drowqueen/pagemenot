@@ -112,6 +112,7 @@ class TriageResult:
         ""  # CW alarm name — set for SNS-sourced incidents, enables post-exec verification
     )
     region: str = ""  # AWS region for CW polling
+    cloud_provider: str = "unknown"  # "aws" | "gcp" | "k8s" | "generic" | "unknown"
 
 
 def _parse_alert(source: str, payload: dict) -> dict:
@@ -123,6 +124,7 @@ def _parse_alert(source: str, payload: dict) -> dict:
             "severity": "critical" if payload.get("urgency") == "high" else "medium",
             "description": payload.get("description", ""),
             "external_id": payload.get("id", ""),
+            "cloud_provider": "unknown",
         }
     elif source == "opsgenie":
         priority_map = {"P1": "critical", "P2": "high", "P3": "medium", "P4": "low", "P5": "low"}
@@ -132,6 +134,7 @@ def _parse_alert(source: str, payload: dict) -> dict:
             "severity": priority_map.get(payload.get("priority", "P3"), "medium"),
             "description": payload.get("description", ""),
             "external_id": payload.get("alertId", ""),
+            "cloud_provider": "unknown",
         }
     elif source == "datadog":
         # Datadog sends tags as a list of "key:value" strings, not a dict
@@ -146,6 +149,7 @@ def _parse_alert(source: str, payload: dict) -> dict:
             "severity": "critical" if payload.get("alert_type") == "error" else "medium",
             "description": payload.get("body", payload.get("text", "")),
             "external_id": str(payload.get("id", "")),
+            "cloud_provider": "unknown",
         }
     elif source == "newrelic":
         return {
@@ -158,6 +162,7 @@ def _parse_alert(source: str, payload: dict) -> dict:
             else "medium",
             "description": payload.get("details", ""),
             "external_id": str(payload.get("incident_id", "")),
+            "cloud_provider": "unknown",
         }
     elif source == "grafana":
         alerts = payload.get("alerts", [{}])
@@ -168,6 +173,7 @@ def _parse_alert(source: str, payload: dict) -> dict:
             "service": labels.get("service", labels.get("job", "unknown")),
             "severity": labels.get("severity", "medium"),
             "description": payload.get("message", ""),
+            "cloud_provider": "unknown",
         }
     elif source == "alertmanager":
         labels = payload.get("labels", {})
@@ -177,6 +183,7 @@ def _parse_alert(source: str, payload: dict) -> dict:
             "service": labels.get("service", labels.get("job", "unknown")),
             "severity": labels.get("severity", "medium"),
             "description": annotations.get("description", annotations.get("summary", "")),
+            "cloud_provider": "unknown",
         }
     elif source == "sns":
         return {
@@ -187,6 +194,7 @@ def _parse_alert(source: str, payload: dict) -> dict:
             "external_id": payload.get("alarm_name", ""),
             "alarm_name": payload.get("alarm_name", ""),
             "region": payload.get("region", ""),
+            "cloud_provider": "aws",
         }
     elif source == "generic":
         incident = payload.get("incident", {})
@@ -217,6 +225,7 @@ def _parse_alert(source: str, payload: dict) -> dict:
                 "service": service,
                 "severity": severity,
                 "description": incident.get("summary", incident.get("url", "")),
+                "cloud_provider": "gcp",
             }
         text = payload.get("text", payload.get("description", str(payload)))
         return {
@@ -224,6 +233,7 @@ def _parse_alert(source: str, payload: dict) -> dict:
             "service": _guess_service(text),
             "severity": "medium",
             "description": text,
+            "cloud_provider": "unknown",
         }
     else:
         text = payload.get("text", payload.get("description", str(payload)))
@@ -232,6 +242,7 @@ def _parse_alert(source: str, payload: dict) -> dict:
             "service": _guess_service(text),
             "severity": "medium",
             "description": text,
+            "cloud_provider": "unknown",
         }
 
 
@@ -366,7 +377,9 @@ async def _try_runbook_exec(result: TriageResult):
     query = result.alert_title
     if result.root_cause and result.root_cause != "See detailed analysis below.":
         query = f"{result.alert_title}. {result.root_cause}"
-    step_map = get_runbook_exec_steps(query, service=result.service)
+    step_map = get_runbook_exec_steps(
+        query, service=result.service, cloud_provider=result.cloud_provider
+    )
     auto_steps: list[tuple[str, str]] = step_map["auto"]
     approve_steps: list[tuple[str, str]] = step_map["approve"]
 
@@ -448,6 +461,7 @@ async def run_triage(source: str, payload: dict[str, Any]) -> TriageResult:
 
     result.alarm_name = parsed.get("alarm_name", "")
     result.region = parsed.get("region", "")
+    result.cloud_provider = parsed.get("cloud_provider", "unknown")
 
     # 8. Attempt runbook-driven resolution (only if exec is enabled)
     await _try_runbook_exec(result)
