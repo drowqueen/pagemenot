@@ -75,3 +75,4 @@ docker-compose.override.yml
 # ── Local scripts (never commit) ──────────────────────────────────────────────
 scripts/simulate_incident.py
 scripts/gen-kubeconfig.sh
+.planning/
