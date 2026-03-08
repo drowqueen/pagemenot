@@ -37,7 +37,9 @@ def ingest_all():
         os.makedirs(settings.chroma_path, exist_ok=True)
         client = chromadb.PersistentClient(path=settings.chroma_path)
 
-        _ingest_directory(client, POSTMORTEMS_DIR, settings.chroma_incidents_collection, "postmortem")
+        _ingest_directory(
+            client, POSTMORTEMS_DIR, settings.chroma_incidents_collection, "postmortem"
+        )
         _ingest_directory(client, RUNBOOKS_DIR, settings.chroma_runbooks_collection, "runbook")
 
     except Exception as e:
@@ -87,7 +89,9 @@ def _ingest_directory(
             "title": title,
             "filename": f.name,
             "service": _extract_field(content, "service") or "general",
-            "root_cause": _extract_field(content, "root_cause") or _extract_field(content, "root cause") or "",
+            "root_cause": _extract_field(content, "root_cause")
+            or _extract_field(content, "root cause")
+            or "",
             "resolution": _extract_field(content, "resolution") or "",
             "date": _extract_field(content, "date") or "",
         }
@@ -102,7 +106,9 @@ def _ingest_directory(
     if docs:
         # Upsert (idempotent — safe to re-run)
         collection.upsert(documents=docs, ids=ids, metadatas=metadatas)
-        logger.info(f"Ingested {len(md_files)} {doc_type}s ({len(docs)} chunks) into '{collection_name}'")
+        logger.info(
+            f"Ingested {len(md_files)} {doc_type}s ({len(docs)} chunks) into '{collection_name}'"
+        )
 
 
 def index_incident(content: str, filename: str, service: str) -> None:
@@ -148,8 +154,11 @@ def write_and_index_postmortem(
 
     # Resolve template vars in execution log before persisting
     resolved_log = [
-        re.sub(r"\{\{\s*service\s*\}\}", service,
-               re.sub(r"\{\{\s*namespace\s*\}\}", settings.pagemenot_exec_namespace, entry))
+        re.sub(
+            r"\{\{\s*service\s*\}\}",
+            service,
+            re.sub(r"\{\{\s*namespace\s*\}\}", settings.pagemenot_exec_namespace, entry),
+        )
         for entry in (result.execution_log or [])
     ]
     log_md = "\n\n".join(resolved_log) or "No steps logged."
@@ -158,7 +167,11 @@ def write_and_index_postmortem(
     if not root_cause or root_cause == "See detailed analysis below.":
         root_cause = "Not determined."
 
-    resolution = "Human-approved runbook execution" if resolved_by != "agent" else "Auto-resolved by runbook execution"
+    resolution = (
+        "Human-approved runbook execution"
+        if resolved_by != "agent"
+        else "Auto-resolved by runbook execution"
+    )
 
     content = (
         f"# Postmortem: {result.alert_title}\n\n"
@@ -169,8 +182,7 @@ def write_and_index_postmortem(
         f"## Alert\n{result.alert_title}\n\n"
         f"## Root Cause\n{root_cause}\n\n"
         f"## Execution Log\n{log_md}\n\n"
-        f"## Resolved By\n{resolved_by}\n"
-        + (f"\n## Jira\n{jira_url}\n" if jira_url else "")
+        f"## Resolved By\n{resolved_by}\n" + (f"\n## Jira\n{jira_url}\n" if jira_url else "")
     )
 
     path = POSTMORTEMS_DIR / filename
@@ -181,6 +193,29 @@ def write_and_index_postmortem(
         index_incident(content, filename, service)
     except Exception as e:
         logger.warning(f"Postmortem write/index failed: {e}")
+
+
+_GCP_TAGS = {"gcp", "gce", "cloud-run", "cloud_run"}
+_AWS_TAGS = {"aws", "ec2", "ecs", "lambda", "rds", "s3", "cloudwatch"}
+_K8S_TAGS = {"kubernetes", "k8s", "kubectl"}
+
+
+def _detect_cloud_provider(tags_str: str, content: str) -> str:
+    tags = {t.strip().lower() for t in tags_str.split(",") if t.strip()}
+    if tags & _GCP_TAGS:
+        return "gcp"
+    if tags & _AWS_TAGS:
+        return "aws"
+    if tags & _K8S_TAGS:
+        return "k8s"
+    # Fallback: scan exec commands in content
+    if "gcloud " in content:
+        return "gcp"
+    if re.search(r"\baws ", content):
+        return "aws"
+    if "kubectl " in content:
+        return "k8s"
+    return "generic"
 
 
 def _extract_field(content: str, field: str) -> str | None:
