@@ -373,6 +373,10 @@ def _parse_alert(source: str, payload: dict) -> dict:
         labels = first.get("labels", {})
         _gf_raw = labels.get("cloud_provider", labels.get("cloud", labels.get("provider", "")))
         _gf_provider = _normalize_cloud_provider(_gf_raw)
+        if _gf_provider == ["generic"]:
+            _gf_text = (labels.get("alertname", "") + " " + payload.get("title", "")).lower()
+            if any(k in _gf_text for k in ("gcp", "gce", "cloud run", "cloud sql")):
+                _gf_provider = ["gcp"]
         return {
             "title": payload.get("title", labels.get("alertname", "Unknown")),
             "service": labels.get("service", labels.get("job", "unknown")),
