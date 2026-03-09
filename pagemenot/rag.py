@@ -205,9 +205,11 @@ def write_and_index_postmortem(
         logger.warning(f"Postmortem write/index failed: {e}")
 
 
-_GCP_TAGS = {"gcp", "gce", "cloud-run", "cloud_run"}
+_GCP_TAGS = {"gcp", "gce", "cloud-run", "cloud_run", "cloud-sql", "cloud_sql"}
 _AWS_TAGS = {"aws", "ec2", "ecs", "lambda", "rds", "s3", "cloudwatch"}
 _K8S_TAGS = {"kubernetes", "k8s", "kubectl"}
+_HETZNER_TAGS = {"hetzner", "htz"}
+_ONPREM_TAGS = {"onprem", "on-prem", "on_prem", "bare-metal", "baremetal"}
 
 
 def _detect_cloud_provider(tags_str: str, content: str) -> str:
@@ -218,6 +220,15 @@ def _detect_cloud_provider(tags_str: str, content: str) -> str:
         return "aws"
     if tags & _K8S_TAGS:
         return "k8s"
+    if tags & _HETZNER_TAGS:
+        return "hetzner"
+    if tags & _ONPREM_TAGS:
+        return "onprem"
+    # User-configured aliases — keeps ingest in sync with alert normalization
+    aliases = settings.pagemenot_cloud_provider_aliases
+    for tag in tags:
+        if tag in aliases:
+            return aliases[tag]
     # Content fallback only for untagged docs (tags field absent or empty)
     if not tags:
         if "gcloud " in content:

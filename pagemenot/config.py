@@ -143,6 +143,15 @@ class Settings(BaseSettings):
     pagemenot_verify_poll_interval: int = 15  # CW alarm polling cadence (seconds)
     pagemenot_rag_incidents_n_results: int = 5  # past incidents returned by RAG
     pagemenot_rag_runbooks_n_results: int = 1  # runbooks returned by RAG — best match only
+    # Extra cloud provider label aliases merged into built-in normalization map.
+    # JSON dict: {"ovh": "ovh", "digitalocean": "onprem", "my-bare-metal": "onprem"}
+    # Keys are raw label values from alert sources; values are normalized provider names.
+    # These names are also used as cloud_provider metadata in ChromaDB — tag runbooks accordingly.
+    pagemenot_cloud_provider_aliases: dict[str, str] = {}
+    # Fallback when an alert source carries no cloud_provider label at all.
+    # Leave empty to keep current behaviour (no filter, searches all runbooks).
+    # Pure on-prem deployments: set to "onprem". Hetzner-only: "hetzner".
+    pagemenot_default_cloud_provider: str = ""
     chroma_incidents_collection: str = "incidents"  # ChromaDB collection name for postmortems
     chroma_runbooks_collection: str = "runbooks"  # ChromaDB collection name for runbooks
 

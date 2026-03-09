@@ -254,11 +254,42 @@ class TriageResult:
         ""  # CW alarm name — set for SNS-sourced incidents, enables post-exec verification
     )
     region: str = ""  # AWS region for CW polling
-    cloud_provider: str = "unknown"  # "aws" | "gcp" | "k8s" | "generic" | "unknown"
+    cloud_provider: str = (
+        "unknown"  # "aws" | "gcp" | "k8s" | "hetzner" | "onprem" | "generic" | "unknown"
+    )
+
+
+_CP_NORM: dict[str, str] = {
+    "aws": "aws",
+    "amazon": "aws",
+    "ec2": "aws",
+    "gcp": "gcp",
+    "google": "gcp",
+    "gce": "gcp",
+    "googlecloud": "gcp",
+    "hetzner": "hetzner",
+    "htz": "hetzner",
+    "onprem": "onprem",
+    "on-prem": "onprem",
+    "on_prem": "onprem",
+    "bare-metal": "onprem",
+    "baremetal": "onprem",
+    "metal": "onprem",
+    "k8s": "k8s",
+    "kubernetes": "k8s",
+}
+
+
+def _normalize_cloud_provider(raw: str) -> str:
+    key = raw.strip().lower()
+    if not key:
+        return settings.pagemenot_default_cloud_provider or "unknown"
+    return _CP_NORM.get(key) or settings.pagemenot_cloud_provider_aliases.get(key, "unknown")
 
 
 def _parse_alert(source: str, payload: dict) -> dict:
     """Normalize any alert source into standard fields."""
+    _default_cp = _normalize_cloud_provider("")
     if source == "pagerduty":
         return {
             "title": payload.get("title", payload.get("description", "Unknown")),
@@ -266,7 +297,7 @@ def _parse_alert(source: str, payload: dict) -> dict:
             "severity": "critical" if payload.get("urgency") == "high" else "medium",
             "description": payload.get("description", ""),
             "external_id": payload.get("id", ""),
-            "cloud_provider": "unknown",
+            "cloud_provider": _default_cp,
         }
     elif source == "opsgenie":
         priority_map = {"P1": "critical", "P2": "high", "P3": "medium", "P4": "low", "P5": "low"}
@@ -276,7 +307,7 @@ def _parse_alert(source: str, payload: dict) -> dict:
             "severity": priority_map.get(payload.get("priority", "P3"), "medium"),
             "description": payload.get("description", ""),
             "external_id": payload.get("alertId", ""),
-            "cloud_provider": "unknown",
+            "cloud_provider": _default_cp,
         }
     elif source == "datadog":
         # Datadog sends tags as a list of "key:value" strings, not a dict
@@ -285,19 +316,20 @@ def _parse_alert(source: str, payload: dict) -> dict:
             tags = {k: v for k, v in (t.split(":", 1) for t in tags_raw if ":" in t)}
         else:
             tags = tags_raw if isinstance(tags_raw, dict) else {}
+        _dd_cp = _normalize_cloud_provider(tags.get("cloud_provider", tags.get("cloud", "")))
         return {
             "title": payload.get("title", payload.get("event_title", "Unknown")),
             "service": tags.get("service", _guess_service(str(payload))),
             "severity": "critical" if payload.get("alert_type") == "error" else "medium",
             "description": payload.get("body", payload.get("text", "")),
             "external_id": str(payload.get("id", "")),
-            "cloud_provider": "unknown",
+            "cloud_provider": _dd_cp,
         }
     elif source == "newrelic":
         _nr_targets = payload.get("targets", [])
         _nr_labels = _nr_targets[0].get("labels", {}) if _nr_targets else {}
         _nr_provider = _nr_labels.get("provider", _nr_labels.get("cloud", "")).upper()
-        _nr_cloud = "gcp" if _nr_provider in ("GCP", "GOOGLE") else "unknown"
+        _nr_cloud = "gcp" if _nr_provider in ("GCP", "GOOGLE") else _default_cp
         return {
             "title": payload.get("name", payload.get("condition_name", "Unknown")),
             "service": _nr_targets[0].get("name", "unknown") if _nr_targets else "unknown",
@@ -312,18 +344,8 @@ def _parse_alert(source: str, payload: dict) -> dict:
         alerts = payload.get("alerts", [{}])
         first = alerts[0] if alerts else {}
         labels = first.get("labels", {})
-        _gf_cloud = labels.get(
-            "cloud", labels.get("cloud_provider", labels.get("provider", ""))
-        ).lower()
-        if _gf_cloud in ("gcp", "google", "gce"):
-            _gf_provider = "gcp"
-        else:
-            _gf_text = (labels.get("alertname", "") + " " + payload.get("title", "")).lower()
-            _gf_provider = (
-                "gcp"
-                if any(k in _gf_text for k in ("gcp", "gce", "cloud run", "cloud sql"))
-                else "unknown"
-            )
+        _gf_raw = labels.get("cloud_provider", labels.get("cloud", labels.get("provider", "")))
+        _gf_provider = _normalize_cloud_provider(_gf_raw)
         return {
             "title": payload.get("title", labels.get("alertname", "Unknown")),
             "service": labels.get("service", labels.get("job", "unknown")),
@@ -334,12 +356,13 @@ def _parse_alert(source: str, payload: dict) -> dict:
     elif source == "alertmanager":
         labels = payload.get("labels", {})
         annotations = payload.get("annotations", {})
+        _am_cp = _normalize_cloud_provider(labels.get("cloud_provider", labels.get("cloud", "")))
         return {
             "title": labels.get("alertname", "Unknown"),
             "service": labels.get("service", labels.get("job", "unknown")),
             "severity": labels.get("severity", "medium"),
             "description": annotations.get("description", annotations.get("summary", "")),
-            "cloud_provider": "unknown",
+            "cloud_provider": _am_cp,
         }
     elif source == "sns":
         return {
@@ -402,7 +425,7 @@ def _parse_alert(source: str, payload: dict) -> dict:
             "service": _guess_service(text),
             "severity": "medium",
             "description": text,
-            "cloud_provider": "unknown",
+            "cloud_provider": _default_cp,
         }
     else:
         text = payload.get("text", payload.get("description", str(payload)))
@@ -411,7 +434,7 @@ def _parse_alert(source: str, payload: dict) -> dict:
             "service": _guess_service(text),
             "severity": "medium",
             "description": text,
-            "cloud_provider": "unknown",
+            "cloud_provider": _default_cp,
         }
 
 
@@ -627,6 +650,9 @@ async def run_triage(source: str, payload: dict[str, Any]) -> TriageResult:
     )
 
     # 6. Run crew
+    from pagemenot.tools import _triage_cloud_provider
+
+    _triage_cloud_provider.set(parsed.get("cloud_provider", "unknown"))
     loop = asyncio.get_running_loop()
     raw = await loop.run_in_executor(_executor, _run_crew_sync, summary)
 

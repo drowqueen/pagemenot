@@ -14,6 +14,7 @@ import re
 import shlex
 import subprocess
 import time
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -22,6 +23,9 @@ from crewai.tools import tool
 from pagemenot.config import settings
 
 logger = logging.getLogger("pagemenot.tools")
+
+# Set by triage before crew kickoff so search_runbooks can filter by cloud provider
+_triage_cloud_provider: ContextVar[str] = ContextVar("_triage_cloud_provider", default="unknown")
 
 _SAFE_NAME_RE = re.compile(r"^[a-zA-Z0-9_.\-]+$")
 _GCLOUD_SSH_NOISE = re.compile(
@@ -658,8 +662,15 @@ def search_runbooks(query: str) -> str:
                 "Add markdown files to ./knowledge/runbooks/ and restart."
             )
 
+        cloud_provider = _triage_cloud_provider.get()
+        where = None
+        if cloud_provider and cloud_provider != "unknown":
+            where = {"cloud_provider": {"$in": [cloud_provider, "generic"]}}
+
         results = collection.query(
-            query_texts=[query], n_results=settings.pagemenot_rag_runbooks_n_results
+            query_texts=[query],
+            n_results=settings.pagemenot_rag_runbooks_n_results,
+            where=where,
         )
 
         if not results["documents"] or not results["documents"][0]:
