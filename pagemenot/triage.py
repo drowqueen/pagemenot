@@ -12,7 +12,9 @@ Teams see none of this. They see: alert → triage → result.
 """
 
 import asyncio
+import json
 import logging
+import os
 import re
 import threading
 import time
@@ -28,8 +30,141 @@ _executor = ThreadPoolExecutor(max_workers=3)
 
 # ── Deduplication store ────────────────────────────────────────
 # (service, title_hash) → expiry timestamp (time.monotonic())
+# Persisted to file so container restarts don't lose state.
 _active_incidents: dict[tuple[str, str], float] = {}
 _dedup_lock = threading.Lock()
+_DEDUP_FILE = "/app/data/dedup.json"  # fallback when no state bucket configured
+_DEDUP_OBJECT = "state/dedup.json"  # object key inside the bucket
+
+
+def _bucket_read(bucket_url: str, object_key: str = _DEDUP_OBJECT) -> dict:
+    """Read JSON object from gs://, s3://, or az:// bucket. Returns {} on miss/error."""
+    try:
+        if bucket_url.startswith("gs://"):
+            from google.cloud import storage as gcs
+
+            bucket_name = bucket_url[5:].rstrip("/")
+            client = gcs.Client()
+            blob = client.bucket(bucket_name).blob(object_key)
+            if not blob.exists():
+                return {}
+            return json.loads(blob.download_as_text())
+        elif bucket_url.startswith("s3://"):
+            import boto3
+
+            bucket_name = bucket_url[5:].rstrip("/")
+            s3 = boto3.client("s3")
+            try:
+                obj = s3.get_object(Bucket=bucket_name, Key=object_key)
+                return json.loads(obj["Body"].read())
+            except s3.exceptions.NoSuchKey:
+                return {}
+        elif bucket_url.startswith("az://"):
+            from azure.identity import DefaultAzureCredential
+            from azure.storage.blob import BlobServiceClient
+
+            parts = bucket_url[5:].rstrip("/").split("/", 1)
+            account, container = parts[0], parts[1] if len(parts) > 1 else "pagemenot"
+            client = BlobServiceClient(
+                f"https://{account}.blob.core.windows.net", DefaultAzureCredential()
+            )
+            blob = client.get_blob_client(container=container, blob=object_key)
+            try:
+                return json.loads(blob.download_blob().readall())
+            except Exception:
+                return {}
+        else:
+            logger.warning("Unsupported state bucket scheme: %s", bucket_url)
+            return {}
+    except Exception as e:
+        logger.warning("Could not read from bucket %s/%s: %s", bucket_url, object_key, e)
+        return {}
+
+
+def _bucket_write(bucket_url: str, data: dict, object_key: str = _DEDUP_OBJECT) -> None:
+    """Write JSON object to gs://, s3://, or az:// bucket."""
+    try:
+        payload = json.dumps(data)
+        if bucket_url.startswith("gs://"):
+            from google.cloud import storage as gcs
+
+            bucket_name = bucket_url[5:].rstrip("/")
+            client = gcs.Client()
+            client.bucket(bucket_name).blob(object_key).upload_from_string(
+                payload, content_type="application/json"
+            )
+        elif bucket_url.startswith("s3://"):
+            import boto3
+
+            bucket_name = bucket_url[5:].rstrip("/")
+            boto3.client("s3").put_object(Bucket=bucket_name, Key=object_key, Body=payload)
+        elif bucket_url.startswith("az://"):
+            from azure.identity import DefaultAzureCredential
+            from azure.storage.blob import BlobServiceClient
+
+            parts = bucket_url[5:].rstrip("/").split("/", 1)
+            account, container = parts[0], parts[1] if len(parts) > 1 else "pagemenot"
+            client = BlobServiceClient(
+                f"https://{account}.blob.core.windows.net", DefaultAzureCredential()
+            )
+            client.get_blob_client(container=container, blob=object_key).upload_blob(
+                payload, overwrite=True, content_settings={"content_type": "application/json"}
+            )
+        else:
+            logger.warning("Unsupported state bucket scheme: %s", bucket_url)
+    except Exception as e:
+        logger.warning("Could not write to bucket %s/%s: %s", bucket_url, object_key, e)
+
+
+def _load_dedup() -> None:
+    """Load persisted dedup entries on startup, pruning already-expired ones."""
+    bucket = settings.pagemenot_state_bucket
+    try:
+        if bucket:
+            raw = _bucket_read(bucket)
+        elif os.path.exists(_DEDUP_FILE):
+            with open(_DEDUP_FILE) as f:
+                raw = json.load(f)
+        else:
+            return
+        now = time.monotonic()
+        with _dedup_lock:
+            for k, exp in raw.items():
+                parts = k.split("\x00", 1)
+                if len(parts) == 2 and now < exp:
+                    _active_incidents[(parts[0], parts[1])] = exp
+        logger.info(
+            "Loaded %d dedup entries from %s", len(_active_incidents), bucket or _DEDUP_FILE
+        )
+    except Exception as e:
+        logger.warning("Could not load dedup state: %s", e)
+
+
+def _save_dedup() -> None:
+    """Persist current (non-expired) dedup entries. Called under _dedup_lock."""
+    bucket = settings.pagemenot_state_bucket
+    try:
+        now = time.monotonic()
+        serialisable = {
+            f"{k[0]}\x00{k[1]}": exp for k, exp in _active_incidents.items() if exp > now
+        }
+        if bucket:
+            _bucket_write(bucket, serialisable)
+        else:
+            os.makedirs(os.path.dirname(_DEDUP_FILE), exist_ok=True)
+            with open(_DEDUP_FILE, "w") as f:
+                json.dump(serialisable, f)
+    except Exception as e:
+        logger.warning("Could not save dedup state: %s", e)
+
+
+_load_dedup()
+
+# ── Cloud Run URL patterns (uptime_url resource type) ──────────
+# Pattern 1: with revision ID  e.g. gcp-hello-00001-779-uc.a.run.app
+_CR_WITH_REVISION = re.compile(r"^(.+)-\d{5}-[a-z0-9]{3}-[a-z]{2,4}\.a\.run\.app$")
+# Pattern 2: base service URL  e.g. gcp-hello.uc.a.run.app
+_CR_BASE_URL = re.compile(r"^([a-z0-9-]+)\.[a-z0-9]{2,4}\.a\.run\.app$")
 
 
 def _dedup_key(service: str, title: str) -> tuple[str, str]:
@@ -47,14 +182,21 @@ def _check_and_register(service: str, title: str, severity: str) -> bool:
     key = _dedup_key(service, title)
     now = time.monotonic()
     with _dedup_lock:
-        # Prune expired entries
         expired = [k for k, exp in _active_incidents.items() if now > exp]
         for k in expired:
             del _active_incidents[k]
         if key in _active_incidents:
             return True
         _active_incidents[key] = now + ttl
+        _save_dedup()
         return False
+
+
+def _clear_dedup(service: str, title: str) -> None:
+    key = _dedup_key(service, title)
+    with _dedup_lock:
+        _active_incidents.pop(key, None)
+        _save_dedup()
 
 
 # Import scenarios for mock seeding
@@ -152,28 +294,42 @@ def _parse_alert(source: str, payload: dict) -> dict:
             "cloud_provider": "unknown",
         }
     elif source == "newrelic":
+        _nr_targets = payload.get("targets", [])
+        _nr_labels = _nr_targets[0].get("labels", {}) if _nr_targets else {}
+        _nr_provider = _nr_labels.get("provider", _nr_labels.get("cloud", "")).upper()
+        _nr_cloud = "gcp" if _nr_provider in ("GCP", "GOOGLE") else "unknown"
         return {
             "title": payload.get("name", payload.get("condition_name", "Unknown")),
-            "service": payload.get("targets", [{}])[0].get("name", "unknown")
-            if payload.get("targets")
-            else "unknown",
+            "service": _nr_targets[0].get("name", "unknown") if _nr_targets else "unknown",
             "severity": "critical"
             if payload.get("severity", "").upper() == "CRITICAL"
             else "medium",
             "description": payload.get("details", ""),
             "external_id": str(payload.get("incident_id", "")),
-            "cloud_provider": "unknown",
+            "cloud_provider": _nr_cloud,
         }
     elif source == "grafana":
         alerts = payload.get("alerts", [{}])
         first = alerts[0] if alerts else {}
         labels = first.get("labels", {})
+        _gf_cloud = labels.get(
+            "cloud", labels.get("cloud_provider", labels.get("provider", ""))
+        ).lower()
+        if _gf_cloud in ("gcp", "google", "gce"):
+            _gf_provider = "gcp"
+        else:
+            _gf_text = (labels.get("alertname", "") + " " + payload.get("title", "")).lower()
+            _gf_provider = (
+                "gcp"
+                if any(k in _gf_text for k in ("gcp", "gce", "cloud run", "cloud sql"))
+                else "unknown"
+            )
         return {
             "title": payload.get("title", labels.get("alertname", "Unknown")),
             "service": labels.get("service", labels.get("job", "unknown")),
             "severity": labels.get("severity", "medium"),
             "description": payload.get("message", ""),
-            "cloud_provider": "unknown",
+            "cloud_provider": _gf_provider,
         }
     elif source == "alertmanager":
         labels = payload.get("labels", {})
@@ -208,9 +364,22 @@ def _parse_alert(source: str, payload: dict) -> dict:
                 service = incident.get("resource_display_name") or labels.get(
                     "instance_name", "unknown"
                 )
+            elif resource_type == "uptime_url":
+                host = labels.get("host", "")
+                m = _CR_WITH_REVISION.match(host) or _CR_BASE_URL.match(host)
+                service = (
+                    m.group(1)
+                    if m
+                    else (
+                        _guess_service(
+                            incident.get("policy_name", "")
+                            + " "
+                            + incident.get("condition_name", "")
+                        )
+                        or "unknown"
+                    )
+                )
             else:
-                # resource_display_name may be an IP/URL for uptime_url resources — only use
-                # it if it looks like a service name (contains hyphen or underscore)
                 display = incident.get("resource_display_name", "")
                 service = (
                     (display if ("-" in display or "_" in display) else None)
@@ -407,10 +576,14 @@ async def _try_runbook_exec(result: TriageResult):
     for tag, filename in pairs_to_run:
         try:
             output = await loop.run_in_executor(_executor, dispatch_exec_step, tag, result.service)
-            result.execution_log.append(f"📖 *{filename}*\n✅ `{tag[:120]}`\n```{output[:300]}```")
+            display_tag = tag.replace("{{ service }}", result.service or "UNKNOWN_SERVICE")
+            result.execution_log.append(
+                f"📖 *{filename}*\n✅ `{display_tag[:120]}`\n```{output[:300]}```"
+            )
             logger.info(f"Exec step succeeded [{filename}]: {tag[:80]}")
         except Exception as e:
-            result.execution_log.append(f"📖 *{filename}*\n❌ `{tag[:120]}`\n```{e}```")
+            display_tag = tag.replace("{{ service }}", result.service or "UNKNOWN_SERVICE")
+            result.execution_log.append(f"📖 *{filename}*\n❌ `{display_tag[:120]}`\n```{e}```")
             logger.warning(f"Exec step failed [{filename}]: {tag[:80]} — {e}")
             all_ok = False
             break
