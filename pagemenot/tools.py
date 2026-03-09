@@ -25,7 +25,7 @@ from pagemenot.config import settings
 logger = logging.getLogger("pagemenot.tools")
 
 # Set by triage before crew kickoff so search_runbooks can filter by cloud provider
-_triage_cloud_provider: ContextVar[str] = ContextVar("_triage_cloud_provider", default="unknown")
+_triage_cloud_provider: ContextVar[list[str]] = ContextVar("_triage_cloud_provider", default=[])
 
 _SAFE_NAME_RE = re.compile(r"^[a-zA-Z0-9_.\-]+$")
 _GCLOUD_SSH_NOISE = re.compile(
@@ -662,10 +662,14 @@ def search_runbooks(query: str) -> str:
                 "Add markdown files to ./knowledge/runbooks/ and restart."
             )
 
-        cloud_provider = _triage_cloud_provider.get()
+        cloud_providers = _triage_cloud_provider.get()
         where = None
-        if cloud_provider and cloud_provider != "unknown":
-            where = {"cloud_provider": {"$in": [cloud_provider, "generic"]}}
+        _specific = [
+            p for p in cloud_providers if p in {"gcp", "aws", "k8s", "azure", "onprem", "hetzner"}
+        ]
+        if _specific:
+            _conds = [{"is_generic": {"$eq": 1}}] + [{f"is_{p}": {"$eq": 1}} for p in _specific]
+            where = {"$or": _conds}
 
         results = collection.query(
             query_texts=[query],
@@ -1199,7 +1203,7 @@ def dispatch_exec_step(step: str, service: str = "") -> str:
 
 
 def get_runbook_exec_steps(
-    query: str, service: str = "", cloud_provider: str = ""
+    query: str, service: str = "", cloud_providers: list[str] | None = None
 ) -> dict[str, list[tuple[str, str]]]:
     """Search runbooks by query, return exec steps split by approval requirement.
 
@@ -1214,8 +1218,14 @@ def get_runbook_exec_steps(
         )
 
         where = None
-        if cloud_provider and cloud_provider != "unknown":
-            where = {"cloud_provider": {"$in": [cloud_provider, "generic"]}}
+        _specific = [
+            p
+            for p in (cloud_providers or [])
+            if p in {"gcp", "aws", "k8s", "azure", "onprem", "hetzner"}
+        ]
+        if _specific:
+            _conds = [{"is_generic": {"$eq": 1}}] + [{f"is_{p}": {"$eq": 1}} for p in _specific]
+            where = {"$or": _conds}
 
         results = collection.query(
             query_texts=[query],
@@ -1235,15 +1245,16 @@ def get_runbook_exec_steps(
             if not filename or filename in seen:
                 continue
             seen.add(filename)
-            runbook_path = RUNBOOKS_DIR / filename
-            if runbook_path.exists():
-                content = runbook_path.read_text(encoding="utf-8")
-                for match in re.finditer(r"<!--\s*exec(?::approve)?:\s*.+?\s*-->", content):
-                    tag = match.group(0)
-                    if re.match(r"<!--\s*exec:approve:", tag):
-                        approve_steps.append((tag, filename))
-                    else:
-                        auto_steps.append((tag, filename))
+            _matches = list(RUNBOOKS_DIR.glob(f"**/{filename}"))
+            if not _matches:
+                continue
+            content = _matches[0].read_text(encoding="utf-8")
+            for match in re.finditer(r"<!--\s*exec(?::approve)?:\s*.+?\s*-->", content):
+                tag = match.group(0)
+                if re.match(r"<!--\s*exec:approve:", tag):
+                    approve_steps.append((tag, filename))
+                else:
+                    auto_steps.append((tag, filename))
 
         return {"auto": auto_steps, "approve": approve_steps}
 

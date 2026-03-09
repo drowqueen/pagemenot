@@ -254,37 +254,65 @@ class TriageResult:
         ""  # CW alarm name — set for SNS-sourced incidents, enables post-exec verification
     )
     region: str = ""  # AWS region for CW polling
-    cloud_provider: str = (
-        "unknown"  # "aws" | "gcp" | "k8s" | "hetzner" | "onprem" | "generic" | "unknown"
-    )
+    cloud_provider: list[str] = field(
+        default_factory=lambda: ["generic"]
+    )  # list of providers: "aws", "gcp", "k8s", "hetzner", "onprem", "azure", "generic"
 
 
 _CP_NORM: dict[str, str] = {
+    # AWS
     "aws": "aws",
     "amazon": "aws",
     "ec2": "aws",
+    "ecs": "aws",
+    "rds": "aws",
+    "lambda": "aws",
+    "s3": "aws",
+    "cloudwatch": "aws",
+    # GCP
     "gcp": "gcp",
     "google": "gcp",
     "gce": "gcp",
     "googlecloud": "gcp",
+    "google-cloud": "gcp",
+    "cloud-run": "gcp",
+    "cloud-sql": "gcp",
+    # Azure
+    "azure": "azure",
+    "az": "azure",
+    "aks": "azure",
+    "blob": "azure",
+    "cosmosdb": "azure",
+    "app-service": "azure",
+    "azure-vm": "azure",
+    # K8s
+    "k8s": "k8s",
+    "kubernetes": "k8s",
+    "kubectl": "k8s",
+    "gke": "k8s",
+    "eks": "k8s",
+    # Hetzner (Linux VMs — shell commands, no cloud CLI)
     "hetzner": "hetzner",
+    "hetzner-cloud": "hetzner",
     "htz": "hetzner",
+    # On-prem / bare-metal
     "onprem": "onprem",
     "on-prem": "onprem",
     "on_prem": "onprem",
     "bare-metal": "onprem",
     "baremetal": "onprem",
     "metal": "onprem",
-    "k8s": "k8s",
-    "kubernetes": "k8s",
 }
 
 
-def _normalize_cloud_provider(raw: str) -> str:
+def _normalize_cloud_provider(raw: str) -> list[str]:
+    """Map a raw provider string to a list of normalized provider names."""
     key = raw.strip().lower()
     if not key:
-        return settings.pagemenot_default_cloud_provider or "unknown"
-    return _CP_NORM.get(key) or settings.pagemenot_cloud_provider_aliases.get(key, "unknown")
+        default = settings.pagemenot_default_cloud_provider
+        return [default] if default else ["generic"]
+    normalized = _CP_NORM.get(key) or settings.pagemenot_cloud_provider_aliases.get(key)
+    return [normalized] if normalized else ["generic"]
 
 
 def _parse_alert(source: str, payload: dict) -> dict:
@@ -310,7 +338,6 @@ def _parse_alert(source: str, payload: dict) -> dict:
             "cloud_provider": _default_cp,
         }
     elif source == "datadog":
-        # Datadog sends tags as a list of "key:value" strings, not a dict
         tags_raw = payload.get("tags", [])
         if isinstance(tags_raw, list):
             tags = {k: v for k, v in (t.split(":", 1) for t in tags_raw if ":" in t)}
@@ -329,7 +356,7 @@ def _parse_alert(source: str, payload: dict) -> dict:
         _nr_targets = payload.get("targets", [])
         _nr_labels = _nr_targets[0].get("labels", {}) if _nr_targets else {}
         _nr_provider = _nr_labels.get("provider", _nr_labels.get("cloud", "")).upper()
-        _nr_cloud = "gcp" if _nr_provider in ("GCP", "GOOGLE") else _default_cp
+        _nr_cloud = ["gcp"] if _nr_provider in ("GCP", "GOOGLE") else _default_cp
         return {
             "title": payload.get("name", payload.get("condition_name", "Unknown")),
             "service": _nr_targets[0].get("name", "unknown") if _nr_targets else "unknown",
@@ -373,7 +400,7 @@ def _parse_alert(source: str, payload: dict) -> dict:
             "external_id": payload.get("alarm_name", ""),
             "alarm_name": payload.get("alarm_name", ""),
             "region": payload.get("region", ""),
-            "cloud_provider": "aws",
+            "cloud_provider": ["aws"],
         }
     elif source == "generic":
         incident = payload.get("incident", {})
@@ -417,7 +444,7 @@ def _parse_alert(source: str, payload: dict) -> dict:
                 "service": service,
                 "severity": severity,
                 "description": incident.get("summary", incident.get("url", "")),
-                "cloud_provider": "gcp",
+                "cloud_provider": ["gcp"],
             }
         text = payload.get("text", payload.get("description", str(payload)))
         return {
@@ -494,11 +521,11 @@ def _seed_mock_if_needed(parsed_alert: dict):
     logger.debug(f"No mock scenario found for service '{service}', using defaults")
 
 
-def _run_crew_sync(alert_summary: str) -> str:
+def _run_crew_sync(alert_summary: str, cloud_provider: str = "generic") -> str:
     """Run the crew synchronously (in thread pool)."""
     from pagemenot.crew import build_triage_crew
 
-    crew = build_triage_crew(alert_summary)
+    crew = build_triage_crew(alert_summary, cloud_provider=cloud_provider)
     result = crew.kickoff()
     return str(result)
 
@@ -570,7 +597,7 @@ async def _try_runbook_exec(result: TriageResult):
     if result.root_cause and result.root_cause != "See detailed analysis below.":
         query = f"{result.alert_title}. {result.root_cause}"
     step_map = get_runbook_exec_steps(
-        query, service=result.service, cloud_provider=result.cloud_provider
+        query, service=result.service, cloud_providers=result.cloud_provider
     )
     auto_steps: list[tuple[str, str]] = step_map["auto"]
     approve_steps: list[tuple[str, str]] = step_map["approve"]
@@ -643,7 +670,7 @@ async def run_triage(source: str, payload: dict[str, Any]) -> TriageResult:
     summary = _redact_sensitive(
         f"**Alert:** {parsed['title']}\n"
         f"**Service:** {parsed['service']}\n"
-        f"**Cloud Provider:** {parsed['cloud_provider']}\n"
+        f"**Cloud Provider:** {', '.join(parsed['cloud_provider'])}\n"
         f"**Severity:** {parsed['severity']}\n"
         f"**Description:** {raw_description}\n"
         f"**Time:** {datetime.now(timezone.utc).isoformat()}"
@@ -652,16 +679,18 @@ async def run_triage(source: str, payload: dict[str, Any]) -> TriageResult:
     # 6. Run crew
     from pagemenot.tools import _triage_cloud_provider
 
-    _triage_cloud_provider.set(parsed.get("cloud_provider", "unknown"))
+    _triage_cloud_provider.set(parsed.get("cloud_provider", []))
     loop = asyncio.get_running_loop()
-    raw = await loop.run_in_executor(_executor, _run_crew_sync, summary)
+    raw = await loop.run_in_executor(
+        _executor, _run_crew_sync, summary, ",".join(parsed.get("cloud_provider", ["generic"]))
+    )
 
     # 7. Parse output
     result = _parse_crew_output(raw, parsed)
 
     result.alarm_name = parsed.get("alarm_name", "")
     result.region = parsed.get("region", "")
-    result.cloud_provider = parsed.get("cloud_provider", "unknown")
+    result.cloud_provider = parsed.get("cloud_provider", ["generic"])
 
     # 8. Attempt runbook-driven resolution (only if exec is enabled)
     await _try_runbook_exec(result)

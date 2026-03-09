@@ -1,9 +1,15 @@
 """
 Knowledge ingestion — auto-loads postmortems and runbooks into ChromaDB.
 
-Teams just drop markdown files into:
+Teams just drop markdown files into provider subdirectories:
+  ./knowledge/runbooks/gcp/
+  ./knowledge/runbooks/aws/
+  ./knowledge/runbooks/k8s/
+  ./knowledge/runbooks/onprem/
+  ./knowledge/runbooks/hetzner/
+  ./knowledge/runbooks/azure/
+  ./knowledge/runbooks/generic/
   ./knowledge/postmortems/
-  ./knowledge/runbooks/
 
 Pagemenot ingests them on startup. No commands, no config.
 """
@@ -30,6 +36,26 @@ _KNOWLEDGE_BASE = Path(os.environ.get("KNOWLEDGE_DIR", str(_REPO_ROOT / "knowled
 POSTMORTEMS_DIR = _KNOWLEDGE_BASE / "postmortems"
 RUNBOOKS_DIR = _KNOWLEDGE_BASE / "runbooks"
 
+# Known providers — controls boolean flag metadata keys stored in ChromaDB
+_KNOWN_PROVIDERS = {"gcp", "aws", "k8s", "azure", "onprem", "hetzner", "generic"}
+
+# Tag sets for auto-detection from runbook frontmatter
+_GCP_TAGS = {
+    "gcp",
+    "gce",
+    "cloud-run",
+    "cloud_run",
+    "cloud-sql",
+    "cloud_sql",
+    "google",
+    "google-cloud",
+}
+_AWS_TAGS = {"aws", "ec2", "ecs", "lambda", "rds", "s3", "cloudwatch", "amazon"}
+_K8S_TAGS = {"kubernetes", "k8s", "kubectl", "gke", "eks", "aks"}
+_AZURE_TAGS = {"azure", "az", "aks", "blob", "cosmosdb", "app-service", "azure-vm"}
+_HETZNER_TAGS = {"hetzner", "hetzner-cloud", "htz"}
+_ONPREM_TAGS = {"onprem", "on-prem", "on_prem", "bare-metal", "baremetal"}
+
 
 def ingest_all():
     """Auto-ingest all knowledge on startup. Called from main.py."""
@@ -53,7 +79,7 @@ def _ingest_directory(
     collection_name: str,
     doc_type: str,
 ):
-    """Ingest all markdown files from a directory into a ChromaDB collection."""
+    """Ingest all markdown files from directory tree into a ChromaDB collection."""
     if not directory.exists():
         logger.info(f"No {doc_type}s directory at {directory}. Skipping.")
         return
@@ -76,15 +102,18 @@ def _ingest_directory(
         content = f.read_text(encoding="utf-8")
         doc_id = f"{doc_type}_{f.stem}"
 
-        # Extract title from first heading or filename
         title = f.stem.replace("-", " ").replace("_", " ").title()
         for line in content.split("\n"):
             if line.startswith("# "):
                 title = line.lstrip("# ").strip()
                 break
 
-        # Extract metadata from frontmatter-style headers
         tags_str = _extract_field(content, "tags") or ""
+        # Directory name provides authoritative provider hint (e.g. runbooks/gcp/)
+        dir_hint = f.parent.name if f.parent != directory else ""
+        providers = _detect_cloud_providers(tags_str, content, dir_hint)
+        provider_flags = _provider_flags(providers)
+
         meta = {
             "type": doc_type,
             "title": title,
@@ -95,10 +124,13 @@ def _ingest_directory(
             or "",
             "resolution": _extract_field(content, "resolution") or "",
             "date": _extract_field(content, "date") or "",
-            "cloud_provider": _detect_cloud_provider(tags_str, content),
+            # Human-readable list (comma-separated) — for display/debug
+            "cloud_providers": ",".join(providers),
+            # Legacy field — primary provider, for backward compat
+            "cloud_provider": providers[0] if providers else "generic",
+            **provider_flags,
         }
 
-        # Chunk long documents (ChromaDB has limits)
         chunks = _chunk_document(content, max_chars=1500)
         for i, chunk in enumerate(chunks):
             docs.append(chunk)
@@ -106,7 +138,6 @@ def _ingest_directory(
             metadatas.append(meta)
 
     if docs:
-        # Upsert (idempotent — safe to re-run)
         collection.upsert(documents=docs, ids=ids, metadatas=metadatas)
         logger.info(
             f"Ingested {len(md_files)} {doc_type}s ({len(docs)} chunks) into '{collection_name}'"
@@ -114,10 +145,11 @@ def _ingest_directory(
 
 
 def index_incident(
-    content: str, filename: str, service: str, cloud_provider: str = "generic"
+    content: str, filename: str, service: str, cloud_providers: list[str] | None = None
 ) -> None:
-    """Index a single postmortem into ChromaDB incidents collection. Called after human-approved resolution."""
+    """Index a single postmortem into ChromaDB incidents collection."""
     try:
+        providers = cloud_providers or ["generic"]
         client = chromadb.PersistentClient(path=settings.chroma_path)
         collection = client.get_or_create_collection(
             name=settings.chroma_incidents_collection,
@@ -133,7 +165,9 @@ def index_incident(
             "root_cause": _extract_field(content, "root_cause") or "",
             "resolution": _extract_field(content, "resolution") or "",
             "date": _extract_field(content, "date") or "",
-            "cloud_provider": cloud_provider,
+            "cloud_providers": ",".join(providers),
+            "cloud_provider": providers[0],
+            **_provider_flags(providers),
         }
         chunks = _chunk_document(content)
         doc_id = f"postmortem_{stem}"
@@ -152,12 +186,11 @@ def write_and_index_postmortem(
     resolved_by: str = "agent",
     jira_url: str = "",
 ) -> None:
-    """Write a postmortem for any resolved incident (auto or human-approved) and index into ChromaDB."""
+    """Write a postmortem for any resolved incident and index into ChromaDB."""
     service = result.service or "unknown"
     ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S")
     filename = f"{service}_{ts}-{uuid.uuid4().hex[:6]}.md"
 
-    # Resolve template vars in execution log before persisting
     resolved_log = [
         re.sub(
             r"\{\{\s*service\s*\}\}",
@@ -195,49 +228,66 @@ def write_and_index_postmortem(
     try:
         path.write_text(content, encoding="utf-8")
         logger.info(f"Postmortem written: {filename}")
-        index_incident(
-            content,
-            filename,
-            service,
-            cloud_provider=getattr(result, "cloud_provider", "generic"),
-        )
+        providers = getattr(result, "cloud_provider", ["generic"])
+        if isinstance(providers, str):
+            providers = [providers] if providers else ["generic"]
+        index_incident(content, filename, service, cloud_providers=providers)
     except Exception as e:
         logger.warning(f"Postmortem write/index failed: {e}")
 
 
-_GCP_TAGS = {"gcp", "gce", "cloud-run", "cloud_run", "cloud-sql", "cloud_sql"}
-_AWS_TAGS = {"aws", "ec2", "ecs", "lambda", "rds", "s3", "cloudwatch"}
-_K8S_TAGS = {"kubernetes", "k8s", "kubectl"}
-_HETZNER_TAGS = {"hetzner", "htz"}
-_ONPREM_TAGS = {"onprem", "on-prem", "on_prem", "bare-metal", "baremetal"}
+def _detect_cloud_providers(tags_str: str, content: str, dir_hint: str = "") -> list[str]:
+    """Return all detected cloud providers for a document. Always includes at least ['generic']."""
+    detected: set[str] = set()
 
+    # Directory name is authoritative — runbooks/gcp/ → gcp
+    if dir_hint in _KNOWN_PROVIDERS and dir_hint != "generic":
+        detected.add(dir_hint)
 
-def _detect_cloud_provider(tags_str: str, content: str) -> str:
     tags = {t.strip().lower() for t in tags_str.split(",") if t.strip()}
     if tags & _GCP_TAGS:
-        return "gcp"
+        detected.add("gcp")
     if tags & _AWS_TAGS:
-        return "aws"
+        detected.add("aws")
     if tags & _K8S_TAGS:
-        return "k8s"
+        detected.add("k8s")
+    if tags & _AZURE_TAGS:
+        detected.add("azure")
     if tags & _HETZNER_TAGS:
-        return "hetzner"
+        detected.add("hetzner")
     if tags & _ONPREM_TAGS:
-        return "onprem"
-    # User-configured aliases — keeps ingest in sync with alert normalization
+        detected.add("onprem")
+
+    # User-configured aliases
     aliases = settings.pagemenot_cloud_provider_aliases
     for tag in tags:
         if tag in aliases:
-            return aliases[tag]
-    # Content fallback only for untagged docs (tags field absent or empty)
-    if not tags:
-        if "gcloud " in content:
-            return "gcp"
-        if re.search(r"\baws ", content):
-            return "aws"
-        if "kubectl " in content:
-            return "k8s"
-    return "generic"
+            detected.add(aliases[tag])
+
+    # Content scan — always runs (not gated on empty tags)
+    if "gcloud " in content:
+        detected.add("gcp")
+    if re.search(r"\baws ", content):
+        detected.add("aws")
+    if "kubectl " in content:
+        detected.add("k8s")
+    if re.search(r"\baz ", content):
+        detected.add("azure")
+
+    return sorted(detected) if detected else ["generic"]
+
+
+def _provider_flags(providers: list[str]) -> dict[str, int]:
+    """Return boolean int flags for each known provider, for ChromaDB $or queries."""
+    flags: dict[str, int] = {f"is_{p}": 0 for p in _KNOWN_PROVIDERS}
+    for p in providers:
+        key = f"is_{p}"
+        if key in flags:
+            flags[key] = 1
+    # Generic runbooks match all queries
+    if not providers or providers == ["generic"]:
+        flags["is_generic"] = 1
+    return flags
 
 
 def _extract_field(content: str, field: str) -> str | None:
