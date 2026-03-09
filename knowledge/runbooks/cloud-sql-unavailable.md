@@ -24,11 +24,11 @@ List recent operations for the instance:
 
 Restart the instance (safe to auto-execute — service restart, no data loss):
 
-<!-- exec: gcloud sql instances restart {{ service }} --project=zipintel -->
+<!-- exec: gcloud sql instances restart {{ service }} --project=zipintel --quiet -->
 
 If the instance is in a failed state, patch it back to RUNNABLE:
 
-<!-- exec:approve: gcloud sql instances patch {{ service }} --project=zipintel --activation-policy=ALWAYS -->
+<!-- exec:approve: gcloud sql instances patch {{ service }} --project=zipintel --activation-policy=ALWAYS --quiet -->
 
 ## Escalation
 If instance fails to restart:
