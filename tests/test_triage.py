@@ -244,7 +244,7 @@ class TestParseAlertGCP:
             "targets": [{"name": "gcp-app-vm", "labels": {"provider": "GCP"}}],
         }
         p = _parse_alert("newrelic", payload)
-        assert p["cloud_provider"] == "gcp"
+        assert p["cloud_provider"] == ["gcp"]
 
     def test_newrelic_gcp_cloud_label(self):
         payload = {
@@ -253,7 +253,7 @@ class TestParseAlertGCP:
             "targets": [{"name": "gcp-app-vm", "labels": {"cloud": "google"}}],
         }
         p = _parse_alert("newrelic", payload)
-        assert p["cloud_provider"] == "gcp"
+        assert p["cloud_provider"] == ["gcp"]
 
     def test_newrelic_no_provider_cloud_provider(self):
         payload = {
@@ -262,12 +262,12 @@ class TestParseAlertGCP:
             "targets": [{"name": "some-host", "labels": {"hostname": "some-host"}}],
         }
         p = _parse_alert("newrelic", payload)
-        assert p["cloud_provider"] == "unknown"
+        assert p["cloud_provider"] == ["generic"]
 
     def test_newrelic_empty_targets_cloud_provider(self):
         payload = {"condition_name": "Test", "severity": "CRITICAL", "targets": []}
         p = _parse_alert("newrelic", payload)
-        assert p["cloud_provider"] == "unknown"
+        assert p["cloud_provider"] == ["generic"]
 
     # GCP-03: Grafana
     def test_grafana_gcp_cloud_provider(self):
@@ -278,7 +278,7 @@ class TestParseAlertGCP:
             ],
         }
         p = _parse_alert("grafana", payload)
-        assert p["cloud_provider"] == "gcp"
+        assert p["cloud_provider"] == ["gcp"]
 
     def test_grafana_gcp_keyword_fallback(self):
         payload = {
@@ -286,7 +286,7 @@ class TestParseAlertGCP:
             "alerts": [{"labels": {"alertname": "GCE instance stopped", "service": "gcp-app-vm"}}],
         }
         p = _parse_alert("grafana", payload)
-        assert p["cloud_provider"] == "gcp"
+        assert p["cloud_provider"] == ["gcp"]
 
     def test_grafana_no_cloud_label_cloud_provider(self):
         payload = {
@@ -294,7 +294,7 @@ class TestParseAlertGCP:
             "alerts": [{"labels": {"alertname": "HighLatency", "service": "payment-service"}}],
         }
         p = _parse_alert("grafana", payload)
-        assert p["cloud_provider"] == "unknown"
+        assert p["cloud_provider"] == ["generic"]
 
     # GCP-01: Cloud Monitoring (already working — regression guard)
     def test_generic_gce_instance_cloud_provider(self):
@@ -307,7 +307,7 @@ class TestParseAlertGCP:
             }
         }
         p = _parse_alert("generic", payload)
-        assert p["cloud_provider"] == "gcp"
+        assert p["cloud_provider"] == ["gcp"]
         assert p["service"] == "gcp-app-vm"
 
     def test_generic_uptime_url_cloud_run_cloud_provider(self):
@@ -322,5 +322,5 @@ class TestParseAlertGCP:
             }
         }
         p = _parse_alert("generic", payload)
-        assert p["cloud_provider"] == "gcp"
+        assert p["cloud_provider"] == ["gcp"]
         assert p["service"] == "gcp-hello"
