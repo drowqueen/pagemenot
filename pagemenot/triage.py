@@ -620,6 +620,7 @@ async def run_triage(source: str, payload: dict[str, Any]) -> TriageResult:
     summary = _redact_sensitive(
         f"**Alert:** {parsed['title']}\n"
         f"**Service:** {parsed['service']}\n"
+        f"**Cloud Provider:** {parsed['cloud_provider']}\n"
         f"**Severity:** {parsed['severity']}\n"
         f"**Description:** {raw_description}\n"
         f"**Time:** {datetime.now(timezone.utc).isoformat()}"
