@@ -1,5 +1,6 @@
 services:
   pagemenot:
+    image: us-central1-docker.pkg.dev/zipintel/pagemenot/pagemenot:latest
     build:
       context: .
       target: ${PAGEMENOT_BUILD_TARGET:-base}

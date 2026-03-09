@@ -2,6 +2,7 @@
 
 service: gcp-hello
 tags: gcp, cloud-run, ingress, availability
+alert: Cloud Run uptime check failing, Cloud Run service unavailable
 
 ## Symptoms
 - HTTP 403 or connection refused from external clients

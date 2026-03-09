@@ -24,6 +24,9 @@ from pagemenot.config import settings
 logger = logging.getLogger("pagemenot.tools")
 
 _SAFE_NAME_RE = re.compile(r"^[a-zA-Z0-9_.\-]+$")
+_GCLOUD_SSH_NOISE = re.compile(
+    r"Updating project ssh metadata[^\n]*\n?\.?failed\.?\n?", re.IGNORECASE
+)
 
 
 def _safe_name(name: str) -> str:
@@ -890,7 +893,9 @@ def exec_shell(command: str) -> str:
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "no output").strip()
         raise RuntimeError(f"Command failed: {detail[:300]}")
-    return (result.stdout or result.stderr).strip()[:500]
+    stdout = result.stdout.strip()
+    stderr = _GCLOUD_SSH_NOISE.sub("", result.stderr).strip()
+    return (stdout or stderr or "ok")[:500]
 
 
 def exec_http(method: str, url: str, headers: dict | None = None, body: dict | None = None) -> str:

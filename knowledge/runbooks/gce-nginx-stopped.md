@@ -12,11 +12,11 @@ tags: gcp, gce, nginx, service, availability
 
 Check nginx service status on the instance:
 
-<!-- exec: gcloud compute ssh {{ service }} --zone=us-central1-a --project=zipintel --command="systemctl status nginx --no-pager" -->
+<!-- exec: gcloud compute ssh {{ service }} --zone=us-central1-a --project=zipintel --command="systemctl status nginx --no-pager; true" -->
 
 Check nginx error log:
 
-<!-- exec: gcloud compute ssh {{ service }} --zone=us-central1-a --project=zipintel --command="sudo journalctl -u nginx --no-pager -n 20" -->
+<!-- exec: gcloud compute ssh {{ service }} --zone=us-central1-a --project=zipintel --command="sudo journalctl -u nginx --no-pager -n 20; true" -->
 
 ## Resolution
 

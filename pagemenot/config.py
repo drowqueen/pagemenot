@@ -94,8 +94,11 @@ class Settings(BaseSettings):
     pagemenot_approval_gate: bool = True  # require human approval for [NEEDS APPROVAL] steps
     pagemenot_oncall_channel: Optional[str] = None  # channel to ping on critical escalations
     pagemenot_autoapprove_delay: int = 900  # seconds before auto-executing [AUTO-SAFE] steps
-    pagemenot_dedup_ttl_short: int = 600  # dedup window for critical/high (seconds)
-    pagemenot_dedup_ttl_long: int = 1800  # dedup window for medium/low (seconds)
+    pagemenot_state_bucket: Optional[str] = (
+        None  # gs://bucket, s3://bucket, or az://container for state persistence
+    )
+    pagemenot_dedup_ttl_short: int = 86400  # dedup window for critical/high (seconds) — 24h
+    pagemenot_dedup_ttl_long: int = 86400  # dedup window for medium/low (seconds) — 24h
     # Severity thresholds — controls when each action triggers
     pagemenot_jira_min_severity: str = "low"  # open Jira ticket: low/medium/high/critical
     pagemenot_pd_min_severity: str = "high"  # page PD/escalate: low/medium/high/critical

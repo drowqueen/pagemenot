@@ -23,7 +23,7 @@ from typing import Optional
 from pagemenot.config import settings
 from pagemenot.rag import ingest_all
 from pagemenot.slack_bot import create_slack_app, _chunk_text, _verif_store
-from pagemenot.triage import run_triage, _executor
+from pagemenot.triage import run_triage, _executor, _parse_alert, _clear_dedup
 
 logging.basicConfig(
     level=getattr(logging, settings.log_level),
@@ -278,6 +278,8 @@ async def generic_webhook(
     # Skip GCP Cloud Monitoring resolved notifications (state=closed)
     incident = payload.get("incident", {})
     if incident and incident.get("state") == "closed":
+        parsed = _parse_alert("generic", payload)
+        _clear_dedup(parsed["service"], parsed["title"])
         return {"status": "skipped", "reason": "incident closed"}
     asyncio.create_task(_auto_triage("generic", payload))
     return {"status": "accepted"}
@@ -437,7 +439,10 @@ async def newrelic_webhook(
     await _check_sig("newrelic", settings.webhook_secret_newrelic, body, x_nr_webhook_token)
     payload = await request.json()
     # Only triage open incidents — skip acknowledged/closed states
-    if payload.get("state", "open") == "open":
+    # current_state = NR legacy ("open"/"acknowledged"/"closed")
+    # state = NR One ("CREATED"/"ACKNOWLEDGED"/"CLOSED")
+    incident_state = payload.get("current_state", payload.get("state", "open")).lower()
+    if incident_state not in ("closed", "acknowledged"):
         asyncio.create_task(_auto_triage("newrelic", payload))
     return {"status": "accepted"}
 
