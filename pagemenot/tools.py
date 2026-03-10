@@ -779,6 +779,10 @@ def exec_kubectl(command: str) -> str:
     return result.stdout.strip()[:500]
 
 
+class ExecSkipped(RuntimeError):
+    """Raised when an exec step is skipped due to missing cloud credentials/config."""
+
+
 def exec_aws(service: str, action: str, params: dict) -> str:
     """Execute an AWS operation.
 
@@ -795,7 +799,7 @@ def exec_aws(service: str, action: str, params: dict) -> str:
     import botocore.exceptions
 
     if not settings.aws_region:
-        raise RuntimeError("AWS_REGION not configured — set AWS_REGION in .env")
+        raise ExecSkipped("AWS not configured on this instance — skipped")
 
     if settings.aws_role_arn:
         try:
@@ -955,7 +959,7 @@ def _resolve_lambda_version(service: str) -> str:
     import boto3
 
     if not settings.aws_region:
-        raise RuntimeError("AWS_REGION not configured — set AWS_REGION in .env")
+        raise ExecSkipped("AWS not configured on this instance — skipped")
     client = boto3.client("lambda", region_name=settings.aws_region)
 
     # Prefer stable alias target — it was set to a known-good version

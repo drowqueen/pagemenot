@@ -634,8 +634,11 @@ async def _try_runbook_exec(result: TriageResult):
     mode = "DRY RUN" if settings.pagemenot_exec_dry_run else "EXEC"
     runbooks_used = sorted({fn for _, fn in pairs_to_run})
     logger.info(f"[{mode}] {len(pairs_to_run)} step(s) from {runbooks_used} for {result.service}")
+    from pagemenot.tools import ExecSkipped
+
     loop = asyncio.get_running_loop()
     all_ok = True
+    steps_executed = 0
     for tag, filename in pairs_to_run:
         try:
             output = await loop.run_in_executor(_executor, dispatch_exec_step, tag, result.service)
@@ -644,6 +647,11 @@ async def _try_runbook_exec(result: TriageResult):
                 f"📖 *{filename}*\n✅ `{display_tag[:120]}`\n```{output[:300]}```"
             )
             logger.info(f"Exec step succeeded [{filename}]: {tag[:80]}")
+            steps_executed += 1
+        except ExecSkipped as e:
+            display_tag = tag.replace("{{ service }}", result.service or "UNKNOWN_SERVICE")
+            result.execution_log.append(f"📖 *{filename}*\n⏭️ `{display_tag[:120]}`\n```{e}```")
+            logger.info(f"Exec step skipped [{filename}]: {tag[:80]} — {e}")
         except Exception as e:
             display_tag = tag.replace("{{ service }}", result.service or "UNKNOWN_SERVICE")
             result.execution_log.append(f"📖 *{filename}*\n❌ `{display_tag[:120]}`\n```{e}```")
@@ -651,7 +659,7 @@ async def _try_runbook_exec(result: TriageResult):
             all_ok = False
             break
 
-    if all_ok and pairs_to_run and not result.pending_exec_steps:
+    if all_ok and steps_executed > 0 and not result.pending_exec_steps:
         result.resolved_automatically = True
         logger.info(f"Incident auto-resolved: {result.alert_title}")
 
