@@ -217,6 +217,9 @@ def create_slack_app() -> AsyncApp:
 
         entry = await _approval_store.pop(approval_id)
         if not entry:
+            logger.warning(
+                "Approval %s not found in store (already handled or expired)", approval_id
+            )
             # Silently remove the stale buttons — no noisy message
             try:
                 await client.chat_update(
@@ -819,6 +822,9 @@ async def _do_triage(say, source: str, payload: dict, thread_ts: str | None = No
                         "alert_title": result.alert_title or "",
                         "severity": result.severity or "high",
                         "root_cause": result.root_cause or "",
+                        "alarm_name": result.alarm_name or "",
+                        "region": result.region or "",
+                        "similar_incidents": result.similar_incidents or [],
                         "jira_url": "",
                         "pd_url": "",
                     },

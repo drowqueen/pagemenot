@@ -350,3 +350,19 @@ class TestParseAlertGCP:
         p = _parse_alert("generic", payload)
         assert p["cloud_provider"] == ["gcp"]
         assert p["service"] == "gcp-hello"
+
+    def test_generic_uptime_url_cloud_run_random_suffix(self):
+        """Real CM webhook sends hash suffix e.g. gcp-hello-boqrqyvx4a-uc.a.run.app."""
+        payload = {
+            "incident": {
+                "condition_name": "Cloud Run uptime check",
+                "state": "open",
+                "resource": {
+                    "type": "uptime_url",
+                    "labels": {"host": "gcp-hello-boqrqyvx4a-uc.a.run.app"},
+                },
+            }
+        }
+        p = _parse_alert("generic", payload)
+        assert p["cloud_provider"] == ["gcp"]
+        assert p["service"] == "gcp-hello"

@@ -163,8 +163,10 @@ _load_dedup()
 # ── Cloud Run URL patterns (uptime_url resource type) ──────────
 # Pattern 1: with revision ID  e.g. gcp-hello-00001-779-uc.a.run.app
 _CR_WITH_REVISION = re.compile(r"^(.+)-\d{5}-[a-z0-9]{3}-[a-z]{2,4}\.a\.run\.app$")
-# Pattern 2: base service URL  e.g. gcp-hello.uc.a.run.app
-_CR_BASE_URL = re.compile(r"^([a-z0-9-]+)\.[a-z0-9]{2,4}\.a\.run\.app$")
+# Pattern 2: with random hash suffix  e.g. gcp-hello-boqrqyvx4a-uc.a.run.app
+_CR_RANDOM_SUFFIX = re.compile(r"^([\w-]+?)-[a-z0-9]{6,}-[a-z]{2,4}\.a\.run\.app$")
+# Pattern 3: base service URL  e.g. gcp-hello.uc.a.run.app
+_CR_BASE_URL = re.compile(r"^([a-z0-9-]+)\.[a-z]{2,4}\.a\.run\.app$")
 
 
 def _dedup_key(service: str, title: str) -> tuple[str, str]:
@@ -423,7 +425,11 @@ def _parse_alert(source: str, payload: dict) -> dict:
                 )
             elif resource_type == "uptime_url":
                 host = labels.get("host", "")
-                m = _CR_WITH_REVISION.match(host) or _CR_BASE_URL.match(host)
+                m = (
+                    _CR_WITH_REVISION.match(host)
+                    or _CR_RANDOM_SUFFIX.match(host)
+                    or _CR_BASE_URL.match(host)
+                )
                 service = (
                     m.group(1)
                     if m
