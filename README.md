@@ -502,6 +502,17 @@ aws sns subscribe --topic-arn arn:aws:sns:us-east-1:ACCOUNT:pagemenot-alerts \
   --protocol https --notification-endpoint https://YOUR_HOST/webhooks/sns --region us-east-1
 ```
 
+**Multiple AWS accounts** — each account subscribes its own SNS topics to the same pagemenot endpoint. No config change needed; pagemenot identifies the source from the SNS message payload.
+```bash
+# Account A (244923700407)
+aws sns subscribe --topic-arn arn:aws:sns:eu-west-1:244923700407:pagemenot-alerts \
+  --protocol https --notification-endpoint https://YOUR_HOST/webhooks/sns --region eu-west-1
+
+# Account B (987654321000) — same endpoint, different account
+aws sns subscribe --topic-arn arn:aws:sns:us-east-1:987654321000:pagemenot-alerts \
+  --protocol https --notification-endpoint https://YOUR_HOST/webhooks/sns --region us-east-1
+```
+
 ### GCP Cloud Monitoring
 
 Pagemenot receives Cloud Monitoring alerts via notification channels pointed at `/webhooks/generic`. Supported resource types: `gce_instance`, `uptime_url` (Cloud Run), `cloudsql_database`. Auto-close fires when the incident resolves.
@@ -518,6 +529,20 @@ Cloud Monitoring Alert Policy → Notification Channel (Webhook) → POST /webho
 ### Azure Monitor
 
 > 🔜 **Coming soon** — full Azure support (exec, runbooks, auto-close) is planned. Basic alert ingestion via `/webhooks/generic` works today but autonomous remediation is not yet supported.
+
+### Single instance, all clouds
+
+One pagemenot instance handles alerts from every cloud and every AWS account simultaneously. Each alert arrives via webhook, is routed to the correct runbook pool (AWS, GCP, generic) by cloud provider detection, and executes with the right CLI (`aws`, `gcloud`, `kubectl`). No separate instance per cloud or per account is needed.
+
+```
+AWS account A (eu-west-1) ──SNS──┐
+AWS account B (us-east-1) ──SNS──┤
+GCP project X ────────────────── ┼──► POST /webhooks/* ──► pagemenot ──► Slack / Jira / PD
+GCP project Y ────────────────── ┤
+Grafana / Datadog / New Relic ───┘
+```
+
+Each incident is isolated: cloud provider detected from the alert payload → RAG returns only matching runbooks → exec runs with the appropriate CLI tool.
 
 ---
 
