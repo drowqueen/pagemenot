@@ -317,27 +317,44 @@ def _normalize_cloud_provider(raw: str) -> list[str]:
     return [normalized] if normalized else ["generic"]
 
 
+_GCP_TEXT_KW = ("gcp", "gce", "cloud run", "cloud sql", "cloudsql", "bigquery", "spanner")
+_AWS_TEXT_KW = ("aws", "amazon", "ec2 ", "rds ", "cloudwatch", "ecs ", "lambda", " s3 ")
+
+
+def _detect_cp_from_text(title: str, description: str) -> list[str]:
+    text = (title + " " + description).lower()
+    if any(k in text for k in _GCP_TEXT_KW):
+        return ["gcp"]
+    if any(k in text for k in _AWS_TEXT_KW):
+        return ["aws"]
+    return _normalize_cloud_provider("")
+
+
 def _parse_alert(source: str, payload: dict) -> dict:
     """Normalize any alert source into standard fields."""
     _default_cp = _normalize_cloud_provider("")
     if source == "pagerduty":
+        _pd_title = payload.get("title", payload.get("description", "Unknown"))
+        _pd_desc = payload.get("description", "")
         return {
-            "title": payload.get("title", payload.get("description", "Unknown")),
+            "title": _pd_title,
             "service": payload.get("service", {}).get("name", "unknown"),
             "severity": "critical" if payload.get("urgency") == "high" else "medium",
-            "description": payload.get("description", ""),
+            "description": _pd_desc,
             "external_id": payload.get("id", ""),
-            "cloud_provider": _default_cp,
+            "cloud_provider": _detect_cp_from_text(_pd_title, _pd_desc),
         }
     elif source == "opsgenie":
         priority_map = {"P1": "critical", "P2": "high", "P3": "medium", "P4": "low", "P5": "low"}
+        _og_title = payload.get("message", "Unknown")
+        _og_desc = payload.get("description", "")
         return {
-            "title": payload.get("message", "Unknown"),
+            "title": _og_title,
             "service": payload.get("entity", payload.get("alias", "unknown")),
             "severity": priority_map.get(payload.get("priority", "P3"), "medium"),
-            "description": payload.get("description", ""),
+            "description": _og_desc,
             "external_id": payload.get("alertId", ""),
-            "cloud_provider": _default_cp,
+            "cloud_provider": _detect_cp_from_text(_og_title, _og_desc),
         }
     elif source == "datadog":
         tags_raw = payload.get("tags", [])

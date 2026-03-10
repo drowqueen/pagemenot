@@ -339,11 +339,7 @@ def create_slack_app() -> AsyncApp:
                         root_cause=entry.get("root_cause", ""),
                         execution_log=exec_log,
                     )
-                    asyncio.create_task(
-                        asyncio.get_running_loop().run_in_executor(
-                            None, _wip, _r, user_id, jira_url
-                        )
-                    )
+                    asyncio.get_running_loop().run_in_executor(None, _wip, _r, user_id, jira_url)
                 except Exception as _pm_err:
                     logger.warning("Postmortem task setup failed (non-fatal): %s", _pm_err)
         else:
@@ -466,10 +462,8 @@ def create_slack_app() -> AsyncApp:
                 severity=entry.get("severity", "unknown"),
                 root_cause=entry.get("root_cause", ""),
             )
-            asyncio.create_task(
-                asyncio.get_running_loop().run_in_executor(
-                    None, _wip, _r, user_id, entry.get("jira_url", "")
-                )
+            asyncio.get_running_loop().run_in_executor(
+                None, _wip, _r, user_id, entry.get("jira_url", "")
             )
         except Exception as _e:
             logger.warning("Postmortem task setup failed (non-fatal): %s", _e)
