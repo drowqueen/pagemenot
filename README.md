@@ -31,10 +31,12 @@ Self-hosted. No new infrastructure. Connects to your existing monitoring stack.
 |----------|--------|
 | AWS (EC2, RDS, ECS, EKS, CloudWatch) | ✅ Production-ready |
 | On-premises / bare metal (Kubernetes, Prometheus, Alertmanager) | ✅ Production-ready |
-| GCP (GKE, GCE, Cloud Run, Cloud Monitoring) | 🔜 Coming soon |
+| GCP (GCE, Cloud Run, Cloud SQL, Cloud Monitoring) | ✅ Production-ready |
 | Azure (AKS, VMs, App Service, Azure Monitor) | 🔜 Coming soon |
 
-AWS and on-prem have been rigorously tested end-to-end: CloudWatch alarm delivery, EC2 remediation with approval gates, autonomous RDS recovery, CW verify-and-close, and postmortem indexing.
+AWS and on-prem are tested end-to-end: CloudWatch alarm delivery, EC2 remediation with approval gates, autonomous RDS recovery, CW verify-and-close, and postmortem indexing.
+
+GCP is tested end-to-end: Cloud Monitoring alert ingestion, Cloud Run ingress restore (auto), Cloud SQL restart (auto), approval-gated traffic shifts, gcloud SSH exec, and postmortem indexing.
 
 ---
 
@@ -216,7 +218,7 @@ This is the first decision. Pagemenot builds a Docker image with the CLI tools y
 |-----------------|--------------------------|-----------------|----------------|
 | Kubernetes only | `base` _(default)_ | kubectl (amd64 + arm64) | — |
 | AWS — EKS / ECS / EC2 | `aws` | kubectl + AWS CLI v2 | +~500 MB |
-| GCP — GKE / GCE | `gcp` | kubectl + gcloud | +~400 MB — 🔜 coming soon |
+| GCP — GKE / GCE / Cloud Run | `gcp` | kubectl + gcloud | +~400 MB |
 | Azure — AKS | `azure` | kubectl + Azure CLI | +~300 MB — 🔜 coming soon |
 | Multi-cloud | `cloud` | kubectl + AWS CLI + gcloud + Azure CLI | +~1.2 GB — 🔜 coming soon |
 
@@ -689,12 +691,26 @@ knowledge/postmortems/    ← past incident write-ups
 
 Restart → auto-ingested into ChromaDB.
 
+**Runbook directory layout — organize by cloud provider:**
+
+```
+knowledge/runbooks/
+├── aws/          ← AWS-specific (EC2, RDS, ECS, CloudWatch)
+├── gcp/          ← GCP-specific (GCE, Cloud Run, Cloud SQL, GKE)
+├── azure/        ← Azure-specific (coming soon)
+├── k8s/          ← provider-agnostic Kubernetes
+└── generic/      ← any stack (high CPU, OOM, latency)
+```
+
+Runbooks are tagged with `cloud_provider` in frontmatter. RAG retrieval filters by provider so GCP alerts only match GCP runbooks (and generic ones), preventing cross-cloud hallucinations. Single-cloud deployments work the same way — just populate the relevant subdirectory and leave the others empty.
+
 **Runbook format:**
 
 ```markdown
 # Service — Issue Title
 
 service: my-service
+cloud_provider: gcp   # aws | gcp | azure | k8s | generic
 
 ## Symptoms
 - alert conditions
