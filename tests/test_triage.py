@@ -255,6 +255,32 @@ class TestParseAlertGCP:
         p = _parse_alert("newrelic", payload)
         assert p["cloud_provider"] == ["gcp"]
 
+    def test_newrelic_aws_provider_label(self):
+        payload = {
+            "condition_name": "RDS CPU high",
+            "severity": "CRITICAL",
+            "targets": [{"name": "rds-prod", "labels": {"provider": "AWS"}}],
+        }
+        p = _parse_alert("newrelic", payload)
+        assert p["cloud_provider"] == ["aws"]
+
+    def test_newrelic_amazon_cloud_label(self):
+        payload = {
+            "condition_name": "EC2 down",
+            "severity": "CRITICAL",
+            "targets": [{"name": "web-01", "labels": {"cloud": "amazon"}}],
+        }
+        p = _parse_alert("newrelic", payload)
+        assert p["cloud_provider"] == ["aws"]
+
+    def test_grafana_aws_keyword_fallback(self):
+        payload = {
+            "title": "AWS RDS connection pool exhausted",
+            "alerts": [{"labels": {"alertname": "AWS RDS connection pool exhausted"}}],
+        }
+        p = _parse_alert("grafana", payload)
+        assert p["cloud_provider"] == ["aws"]
+
     def test_newrelic_no_provider_cloud_provider(self):
         payload = {
             "condition_name": "Host not reporting",

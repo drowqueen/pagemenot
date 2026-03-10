@@ -356,7 +356,8 @@ def _parse_alert(source: str, payload: dict) -> dict:
         _nr_targets = payload.get("targets", [])
         _nr_labels = _nr_targets[0].get("labels", {}) if _nr_targets else {}
         _nr_provider = _nr_labels.get("provider", _nr_labels.get("cloud", "")).upper()
-        _nr_cloud = ["gcp"] if _nr_provider in ("GCP", "GOOGLE") else _default_cp
+        _NR_CP = {"GCP": "gcp", "GOOGLE": "gcp", "AWS": "aws", "AMAZON": "aws", "AZURE": "azure"}
+        _nr_cloud = [_NR_CP[_nr_provider]] if _nr_provider in _NR_CP else _default_cp
         return {
             "title": payload.get("name", payload.get("condition_name", "Unknown")),
             "service": _nr_targets[0].get("name", "unknown") if _nr_targets else "unknown",
@@ -377,6 +378,8 @@ def _parse_alert(source: str, payload: dict) -> dict:
             _gf_text = (labels.get("alertname", "") + " " + payload.get("title", "")).lower()
             if any(k in _gf_text for k in ("gcp", "gce", "cloud run", "cloud sql")):
                 _gf_provider = ["gcp"]
+            elif any(k in _gf_text for k in ("aws", "amazon")):
+                _gf_provider = ["aws"]
         return {
             "title": payload.get("title", labels.get("alertname", "Unknown")),
             "service": labels.get("service", labels.get("job", "unknown")),
