@@ -30,5 +30,8 @@ services:
 
 volumes:
   appdata:
+    external: true
   chromadata:
+    external: true
   chromacache:
+    external: true
