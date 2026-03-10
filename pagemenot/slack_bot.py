@@ -10,13 +10,14 @@ They see:
 import asyncio
 import json
 import logging
+import os
 import uuid
 
 from slack_bolt.async_app import AsyncApp
 from slack_sdk.web.async_client import AsyncWebClient
 
 from pagemenot.config import settings
-from pagemenot.triage import run_triage, _executor
+from pagemenot.triage import run_triage, _executor, _bucket_read, _bucket_write
 
 # Set by main.py at startup — triggers CW alarm polling after approval exec (avoids circular import)
 _post_verification_task = None
@@ -34,37 +35,52 @@ _channel_name_cache: dict[str, str] = {}
 
 
 class _ApprovalStore:
-    """Pending approval store — Redis → JSON file → in-memory (in priority order)."""
+    """Pending approval store — Redis → bucket (GCS/S3) → JSON file → in-memory."""
 
     _FILE = "/app/data/approvals.json"
+    _BUCKET_KEY = "state/approvals.json"
 
-    def __init__(self, file: str | None = None):
+    def __init__(self, file: str | None = None, bucket_key: str | None = None):
         if file:
             self._FILE = file
+        if bucket_key:
+            self._BUCKET_KEY = bucket_key
         self._mem: dict[str, dict] = {}
         self._redis = None
-        self._load_file()
+        self._load_state()
 
-    def _load_file(self):
+    def _load_state(self):
+        bucket = settings.pagemenot_state_bucket
         try:
-            import os
-
-            if os.path.exists(self._FILE):
+            if bucket:
+                self._mem = _bucket_read(bucket, self._BUCKET_KEY) or {}
+                if self._mem:
+                    logger.info(
+                        "Loaded %d approvals from bucket %s/%s",
+                        len(self._mem),
+                        bucket,
+                        self._BUCKET_KEY,
+                    )
+            elif os.path.exists(self._FILE):
                 with open(self._FILE) as f:
                     self._mem = json.load(f)
                 logger.info("Loaded %d pending approvals from %s", len(self._mem), self._FILE)
         except Exception as e:
-            logger.warning("Could not load approvals file: %s", e)
+            logger.warning("Could not load approvals state: %s", e)
 
-    def _save_file(self):
+    def _save_state(self):
+        import os
+
+        bucket = settings.pagemenot_state_bucket
         try:
-            import os
-
-            os.makedirs(os.path.dirname(self._FILE), exist_ok=True)
-            with open(self._FILE, "w") as f:
-                json.dump(self._mem, f)
+            if bucket:
+                _bucket_write(bucket, self._mem, self._BUCKET_KEY)
+            else:
+                os.makedirs(os.path.dirname(self._FILE), exist_ok=True)
+                with open(self._FILE, "w") as f:
+                    json.dump(self._mem, f)
         except Exception as e:
-            logger.warning("Could not save approvals file: %s", e)
+            logger.warning("Could not save approvals state: %s", e)
 
     async def _client(self):
         if self._redis is None and settings.redis_url:
@@ -82,7 +98,7 @@ class _ApprovalStore:
             await r.setex(key, ttl, json.dumps(value))
         else:
             self._mem[key] = value
-            self._save_file()
+            self._save_state()
 
     async def pop(self, key: str) -> dict | None:
         r = await self._client()
@@ -94,7 +110,7 @@ class _ApprovalStore:
             return json.loads(result) if result else None
         value = self._mem.pop(key, None)
         if value is not None:
-            self._save_file()
+            self._save_state()
         return value
 
     async def get_all(self) -> dict[str, dict]:
@@ -102,8 +118,10 @@ class _ApprovalStore:
         return dict(self._mem)
 
 
-_approval_store = _ApprovalStore()
-_verif_store = _ApprovalStore(file="/app/data/verifications.json")
+_approval_store = _ApprovalStore(bucket_key="state/approvals.json")
+_verif_store = _ApprovalStore(
+    file="/app/data/verifications.json", bucket_key="state/verifications.json"
+)
 
 
 def create_slack_app() -> AsyncApp:
@@ -199,6 +217,9 @@ def create_slack_app() -> AsyncApp:
 
         entry = await _approval_store.pop(approval_id)
         if not entry:
+            logger.warning(
+                "Approval %s not found in store (already handled or expired)", approval_id
+            )
             # Silently remove the stale buttons — no noisy message
             try:
                 await client.chat_update(
@@ -318,11 +339,7 @@ def create_slack_app() -> AsyncApp:
                         root_cause=entry.get("root_cause", ""),
                         execution_log=exec_log,
                     )
-                    asyncio.create_task(
-                        asyncio.get_running_loop().run_in_executor(
-                            None, _wip, _r, user_id, jira_url
-                        )
-                    )
+                    asyncio.get_running_loop().run_in_executor(None, _wip, _r, user_id, jira_url)
                 except Exception as _pm_err:
                     logger.warning("Postmortem task setup failed (non-fatal): %s", _pm_err)
         else:
@@ -445,10 +462,8 @@ def create_slack_app() -> AsyncApp:
                 severity=entry.get("severity", "unknown"),
                 root_cause=entry.get("root_cause", ""),
             )
-            asyncio.create_task(
-                asyncio.get_running_loop().run_in_executor(
-                    None, _wip, _r, user_id, entry.get("jira_url", "")
-                )
+            asyncio.get_running_loop().run_in_executor(
+                None, _wip, _r, user_id, entry.get("jira_url", "")
             )
         except Exception as _e:
             logger.warning("Postmortem task setup failed (non-fatal): %s", _e)
@@ -801,6 +816,9 @@ async def _do_triage(say, source: str, payload: dict, thread_ts: str | None = No
                         "alert_title": result.alert_title or "",
                         "severity": result.severity or "high",
                         "root_cause": result.root_cause or "",
+                        "alarm_name": result.alarm_name or "",
+                        "region": result.region or "",
+                        "similar_incidents": result.similar_incidents or [],
                         "jira_url": "",
                         "pd_url": "",
                     },

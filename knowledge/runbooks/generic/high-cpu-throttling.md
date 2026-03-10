@@ -1,6 +1,7 @@
 # High CPU Throttling
 
 service: general
+tags: kubernetes, k8s, cpu, throttling
 date: 2026-01-01
 
 ## Symptoms

@@ -1,4 +1,5 @@
 """Unit tests for pagemenot.triage — pure functions only."""
+
 import hashlib
 import time
 
@@ -26,6 +27,7 @@ def clear_dedup():
 
 # ── _dedup_key ─────────────────────────────────────────────────────────────
 
+
 class TestDedupKey:
     def test_deterministic(self):
         assert _dedup_key("checkout", "OOMKilled") == _dedup_key("checkout", "OOMKilled")
@@ -50,6 +52,7 @@ class TestDedupKey:
 
 
 # ── _check_and_register ────────────────────────────────────────────────────
+
 
 class TestCheckAndRegister:
     def test_first_call_not_duplicate(self):
@@ -76,6 +79,7 @@ class TestCheckAndRegister:
 
 # ── _parse_alert ───────────────────────────────────────────────────────────
 
+
 class TestParseAlert:
     def _am(self, status="firing", alertname="OOMKilled", service="checkout", severity="critical"):
         return {
@@ -93,23 +97,31 @@ class TestParseAlert:
     def test_alertmanager_resolved_same_key_as_firing(self):
         fire = _parse_alert("alertmanager", self._am(status="firing"))
         resolve = _parse_alert("alertmanager", self._am(status="resolved"))
-        assert _dedup_key(fire["service"], fire["title"]) == _dedup_key(resolve["service"], resolve["title"])
+        assert _dedup_key(fire["service"], fire["title"]) == _dedup_key(
+            resolve["service"], resolve["title"]
+        )
 
     def test_pagerduty_returns_required_fields(self):
-        p = _parse_alert("pagerduty", {
-            "title": "High error rate on payment-service",
-            "service": {"name": "payment-service"},
-            "urgency": "high",
-        })
+        p = _parse_alert(
+            "pagerduty",
+            {
+                "title": "High error rate on payment-service",
+                "service": {"name": "payment-service"},
+                "urgency": "high",
+            },
+        )
         assert p["title"]
         assert p["severity"] in ("critical", "high", "medium", "low", "unknown")
 
     def test_grafana_returns_required_fields(self):
-        p = _parse_alert("grafana", {
-            "status": "firing",
-            "title": "High latency",
-            "ruleName": "HighLatency",
-        })
+        p = _parse_alert(
+            "grafana",
+            {
+                "status": "firing",
+                "title": "High latency",
+                "ruleName": "HighLatency",
+            },
+        )
         assert p["title"]
         assert p["severity"] in ("critical", "high", "medium", "low", "unknown")
 
@@ -120,6 +132,7 @@ class TestParseAlert:
 
 
 # ── _parse_crew_output ────────────────────────────────────────────────────
+
 
 class TestParseCrewOutput:
     def _alert(self):
@@ -180,6 +193,7 @@ class TestParseCrewOutput:
 
 # ── Escalation gate (pure logic) ──────────────────────────────────────────
 
+
 class TestEscalationGate:
     def _make(self, severity, steps=None, approval=None):
         return TriageResult(
@@ -204,7 +218,9 @@ class TestEscalationGate:
         assert self._gate(r) == (False, True)
 
     def test_mixed_steps_with_approval_escalates(self):
-        r = self._make("high", steps=["[AUTO-SAFE] check logs"], approval=["[NEEDS APPROVAL] rollback"])
+        r = self._make(
+            "high", steps=["[AUTO-SAFE] check logs"], approval=["[NEEDS APPROVAL] rollback"]
+        )
         assert self._gate(r) == (False, True)
 
     def test_no_steps_high_critical_escalates(self):
@@ -214,3 +230,139 @@ class TestEscalationGate:
     def test_no_steps_medium_low_no_escalation(self):
         assert self._gate(self._make("medium"))[1] is False
         assert self._gate(self._make("low"))[1] is False
+
+
+# ── TestParseAlertGCP ─────────────────────────────────────────────────────
+
+
+class TestParseAlertGCP:
+    # GCP-02: New Relic
+    def test_newrelic_gcp_cloud_provider(self):
+        payload = {
+            "condition_name": "Host not reporting",
+            "severity": "CRITICAL",
+            "targets": [{"name": "gcp-app-vm", "labels": {"provider": "GCP"}}],
+        }
+        p = _parse_alert("newrelic", payload)
+        assert p["cloud_provider"] == ["gcp"]
+
+    def test_newrelic_gcp_cloud_label(self):
+        payload = {
+            "condition_name": "Host not reporting",
+            "severity": "CRITICAL",
+            "targets": [{"name": "gcp-app-vm", "labels": {"cloud": "google"}}],
+        }
+        p = _parse_alert("newrelic", payload)
+        assert p["cloud_provider"] == ["gcp"]
+
+    def test_newrelic_aws_provider_label(self):
+        payload = {
+            "condition_name": "RDS CPU high",
+            "severity": "CRITICAL",
+            "targets": [{"name": "rds-prod", "labels": {"provider": "AWS"}}],
+        }
+        p = _parse_alert("newrelic", payload)
+        assert p["cloud_provider"] == ["aws"]
+
+    def test_newrelic_amazon_cloud_label(self):
+        payload = {
+            "condition_name": "EC2 down",
+            "severity": "CRITICAL",
+            "targets": [{"name": "web-01", "labels": {"cloud": "amazon"}}],
+        }
+        p = _parse_alert("newrelic", payload)
+        assert p["cloud_provider"] == ["aws"]
+
+    def test_grafana_aws_keyword_fallback(self):
+        payload = {
+            "title": "AWS RDS connection pool exhausted",
+            "alerts": [{"labels": {"alertname": "AWS RDS connection pool exhausted"}}],
+        }
+        p = _parse_alert("grafana", payload)
+        assert p["cloud_provider"] == ["aws"]
+
+    def test_newrelic_no_provider_cloud_provider(self):
+        payload = {
+            "condition_name": "Host not reporting",
+            "severity": "CRITICAL",
+            "targets": [{"name": "some-host", "labels": {"hostname": "some-host"}}],
+        }
+        p = _parse_alert("newrelic", payload)
+        assert p["cloud_provider"] == ["generic"]
+
+    def test_newrelic_empty_targets_cloud_provider(self):
+        payload = {"condition_name": "Test", "severity": "CRITICAL", "targets": []}
+        p = _parse_alert("newrelic", payload)
+        assert p["cloud_provider"] == ["generic"]
+
+    # GCP-03: Grafana
+    def test_grafana_gcp_cloud_provider(self):
+        payload = {
+            "title": "GCP VM Down",
+            "alerts": [
+                {"labels": {"alertname": "GCP VM Down", "service": "gcp-app-vm", "cloud": "gcp"}}
+            ],
+        }
+        p = _parse_alert("grafana", payload)
+        assert p["cloud_provider"] == ["gcp"]
+
+    def test_grafana_gcp_keyword_fallback(self):
+        payload = {
+            "title": "GCE instance stopped",
+            "alerts": [{"labels": {"alertname": "GCE instance stopped", "service": "gcp-app-vm"}}],
+        }
+        p = _parse_alert("grafana", payload)
+        assert p["cloud_provider"] == ["gcp"]
+
+    def test_grafana_no_cloud_label_cloud_provider(self):
+        payload = {
+            "title": "High latency",
+            "alerts": [{"labels": {"alertname": "HighLatency", "service": "payment-service"}}],
+        }
+        p = _parse_alert("grafana", payload)
+        assert p["cloud_provider"] == ["generic"]
+
+    # GCP-01: Cloud Monitoring (already working — regression guard)
+    def test_generic_gce_instance_cloud_provider(self):
+        payload = {
+            "incident": {
+                "condition_name": "gcp-app-vm instance stopped",
+                "state": "open",
+                "resource": {"type": "gce_instance", "labels": {"instance_name": "gcp-app-vm"}},
+                "resource_display_name": "gcp-app-vm",
+            }
+        }
+        p = _parse_alert("generic", payload)
+        assert p["cloud_provider"] == ["gcp"]
+        assert p["service"] == "gcp-app-vm"
+
+    def test_generic_uptime_url_cloud_run_cloud_provider(self):
+        payload = {
+            "incident": {
+                "condition_name": "Cloud Run uptime check",
+                "state": "open",
+                "resource": {
+                    "type": "uptime_url",
+                    "labels": {"host": "gcp-hello-00001-779-uc.a.run.app"},
+                },
+            }
+        }
+        p = _parse_alert("generic", payload)
+        assert p["cloud_provider"] == ["gcp"]
+        assert p["service"] == "gcp-hello"
+
+    def test_generic_uptime_url_cloud_run_random_suffix(self):
+        """Real CM webhook sends hash suffix e.g. gcp-hello-boqrqyvx4a-uc.a.run.app."""
+        payload = {
+            "incident": {
+                "condition_name": "Cloud Run uptime check",
+                "state": "open",
+                "resource": {
+                    "type": "uptime_url",
+                    "labels": {"host": "gcp-hello-boqrqyvx4a-uc.a.run.app"},
+                },
+            }
+        }
+        p = _parse_alert("generic", payload)
+        assert p["cloud_provider"] == ["gcp"]
+        assert p["service"] == "gcp-hello"

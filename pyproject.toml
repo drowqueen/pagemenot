@@ -40,6 +40,10 @@ dependencies = [
 
     # AWS SDK
     "boto3>=1.34",
+
+    # Cloud state bucket (GCS/S3/Azure)
+    "google-cloud-storage>=2.16",
+    "azure-storage-blob>=12.19",
 ]
 
 [project.optional-dependencies]

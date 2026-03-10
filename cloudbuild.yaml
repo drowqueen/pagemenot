@@ -1,0 +1,15 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    env: ['DOCKER_BUILDKIT=1']
+    args:
+      - build
+      - --target=gcp
+      - -t
+      - us-central1-docker.pkg.dev/zipintel/pagemenot/pagemenot:latest
+      - .
+
+images:
+  - us-central1-docker.pkg.dev/zipintel/pagemenot/pagemenot:latest
+
+options:
+  logging: CLOUD_LOGGING_ONLY

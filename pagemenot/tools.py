@@ -14,6 +14,7 @@ import re
 import shlex
 import subprocess
 import time
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -23,7 +24,13 @@ from pagemenot.config import settings
 
 logger = logging.getLogger("pagemenot.tools")
 
+# Set by triage before crew kickoff so search_runbooks can filter by cloud provider
+_triage_cloud_provider: ContextVar[list[str]] = ContextVar("_triage_cloud_provider", default=[])
+
 _SAFE_NAME_RE = re.compile(r"^[a-zA-Z0-9_.\-]+$")
+_GCLOUD_SSH_NOISE = re.compile(
+    r"Updating project ssh metadata[^\n]*\n?\.?failed\.?\n?", re.IGNORECASE
+)
 
 
 def _safe_name(name: str) -> str:
@@ -655,8 +662,19 @@ def search_runbooks(query: str) -> str:
                 "Add markdown files to ./knowledge/runbooks/ and restart."
             )
 
+        cloud_providers = _triage_cloud_provider.get()
+        where = None
+        _specific = [
+            p for p in cloud_providers if p in {"gcp", "aws", "k8s", "azure", "onprem", "hetzner"}
+        ]
+        if _specific:
+            _conds = [{"is_generic": {"$eq": 1}}] + [{f"is_{p}": {"$eq": 1}} for p in _specific]
+            where = {"$or": _conds}
+
         results = collection.query(
-            query_texts=[query], n_results=settings.pagemenot_rag_runbooks_n_results
+            query_texts=[query],
+            n_results=settings.pagemenot_rag_runbooks_n_results,
+            where=where,
         )
 
         if not results["documents"] or not results["documents"][0]:
@@ -761,6 +779,10 @@ def exec_kubectl(command: str) -> str:
     return result.stdout.strip()[:500]
 
 
+class ExecSkipped(RuntimeError):
+    """Raised when an exec step is skipped due to missing cloud credentials/config."""
+
+
 def exec_aws(service: str, action: str, params: dict) -> str:
     """Execute an AWS operation.
 
@@ -777,7 +799,7 @@ def exec_aws(service: str, action: str, params: dict) -> str:
     import botocore.exceptions
 
     if not settings.aws_region:
-        raise RuntimeError("AWS_REGION not configured — set AWS_REGION in .env")
+        raise ExecSkipped("AWS not configured on this instance — skipped")
 
     if settings.aws_role_arn:
         try:
@@ -890,7 +912,9 @@ def exec_shell(command: str) -> str:
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "no output").strip()
         raise RuntimeError(f"Command failed: {detail[:300]}")
-    return (result.stdout or result.stderr).strip()[:500]
+    stdout = result.stdout.strip()
+    stderr = _GCLOUD_SSH_NOISE.sub("", result.stderr).strip()
+    return (stdout or stderr or "ok")[:500]
 
 
 def exec_http(method: str, url: str, headers: dict | None = None, body: dict | None = None) -> str:
@@ -935,7 +959,7 @@ def _resolve_lambda_version(service: str) -> str:
     import boto3
 
     if not settings.aws_region:
-        raise RuntimeError("AWS_REGION not configured — set AWS_REGION in .env")
+        raise ExecSkipped("AWS not configured on this instance — skipped")
     client = boto3.client("lambda", region_name=settings.aws_region)
 
     # Prefer stable alias target — it was set to a known-good version
@@ -1182,7 +1206,9 @@ def dispatch_exec_step(step: str, service: str = "") -> str:
         return exec_shell(cmd)
 
 
-def get_runbook_exec_steps(query: str, service: str = "") -> dict[str, list[tuple[str, str]]]:
+def get_runbook_exec_steps(
+    query: str, service: str = "", cloud_providers: list[str] | None = None
+) -> dict[str, list[tuple[str, str]]]:
     """Search runbooks by query, return exec steps split by approval requirement.
 
     Returns {"auto": [(tag, filename), ...], "approve": [(tag, filename), ...]}
@@ -1195,8 +1221,20 @@ def get_runbook_exec_steps(query: str, service: str = "") -> dict[str, list[tupl
             settings.chroma_runbooks_collection, metadata={"hnsw:space": "cosine"}
         )
 
+        where = None
+        _specific = [
+            p
+            for p in (cloud_providers or [])
+            if p in {"gcp", "aws", "k8s", "azure", "onprem", "hetzner"}
+        ]
+        if _specific:
+            _conds = [{"is_generic": {"$eq": 1}}] + [{f"is_{p}": {"$eq": 1}} for p in _specific]
+            where = {"$or": _conds}
+
         results = collection.query(
-            query_texts=[query], n_results=settings.pagemenot_rag_runbooks_n_results
+            query_texts=[query],
+            n_results=settings.pagemenot_rag_runbooks_n_results,
+            where=where,
         )
         if not results["documents"] or not results["documents"][0]:
             return {"auto": [], "approve": []}
@@ -1211,15 +1249,16 @@ def get_runbook_exec_steps(query: str, service: str = "") -> dict[str, list[tupl
             if not filename or filename in seen:
                 continue
             seen.add(filename)
-            runbook_path = RUNBOOKS_DIR / filename
-            if runbook_path.exists():
-                content = runbook_path.read_text(encoding="utf-8")
-                for match in re.finditer(r"<!--\s*exec(?::approve)?:\s*.+?\s*-->", content):
-                    tag = match.group(0)
-                    if re.match(r"<!--\s*exec:approve:", tag):
-                        approve_steps.append((tag, filename))
-                    else:
-                        auto_steps.append((tag, filename))
+            _matches = list(RUNBOOKS_DIR.glob(f"**/{filename}"))
+            if not _matches:
+                continue
+            content = _matches[0].read_text(encoding="utf-8")
+            for match in re.finditer(r"<!--\s*exec(?::approve)?:\s*.+?\s*-->", content):
+                tag = match.group(0)
+                if re.match(r"<!--\s*exec:approve:", tag):
+                    approve_steps.append((tag, filename))
+                else:
+                    auto_steps.append((tag, filename))
 
         return {"auto": auto_steps, "approve": approve_steps}
 

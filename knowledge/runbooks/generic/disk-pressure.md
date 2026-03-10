@@ -1,6 +1,7 @@
 # Disk Pressure
 
 service: general
+tags: kubernetes, k8s, disk, node
 date: 2026-01-01
 
 ## Symptoms

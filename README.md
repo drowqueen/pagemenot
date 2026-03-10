@@ -23,6 +23,7 @@ Self-hosted. No new infrastructure. Connects to your existing monitoring stack.
 - **Works with any LLM** — Ollama (self-hosted, air-gapped), OpenAI, Anthropic, Gemini; switch with one env var
 - **Connects to your stack** — Prometheus, Grafana, Loki, Datadog, New Relic, PagerDuty, OpsGenie, Jira, GitHub, Kubernetes
 - **Webhook receiver** — Grafana, Alertmanager, Datadog, New Relic, PagerDuty, CloudWatch, Azure Monitor, generic
+- **Multicloud** — AWS and GCP alerts handled in parallel with full isolation; each incident routed to the right runbooks, exec tools, and cloud credentials
 - **No new infrastructure** — single Docker container; ChromaDB embedded by default
 
 ## Platform support
@@ -31,10 +32,12 @@ Self-hosted. No new infrastructure. Connects to your existing monitoring stack.
 |----------|--------|
 | AWS (EC2, RDS, ECS, EKS, CloudWatch) | ✅ Production-ready |
 | On-premises / bare metal (Kubernetes, Prometheus, Alertmanager) | ✅ Production-ready |
-| GCP (GKE, GCE, Cloud Run, Cloud Monitoring) | 🔜 Coming soon |
+| GCP (GCE, Cloud Run, Cloud SQL, Cloud Monitoring) | ✅ Production-ready |
 | Azure (AKS, VMs, App Service, Azure Monitor) | 🔜 Coming soon |
 
-AWS and on-prem have been rigorously tested end-to-end: CloudWatch alarm delivery, EC2 remediation with approval gates, autonomous RDS recovery, CW verify-and-close, and postmortem indexing.
+AWS and on-prem are tested end-to-end: CloudWatch alarm delivery, EC2 remediation with approval gates, autonomous RDS recovery, CW verify-and-close, and postmortem indexing.
+
+GCP is tested end-to-end: Cloud Monitoring alert ingestion, Cloud Run ingress restore (auto), Cloud SQL restart (auto), approval-gated traffic shifts, gcloud SSH exec, and postmortem indexing.
 
 ---
 
@@ -182,8 +185,8 @@ Pagemenot requires a **persistent process** (Slack Socket Mode needs a long-live
 |----------|--------------|-------|
 | AWS ECS (Fargate) | 0.25 vCPU / 512 MB | pagemenot only; Ollama on separate EC2 GPU instance |
 | AWS EC2 | t3.small+ | collocate pagemenot + Ollama on GPU instance |
-| GCP Cloud Run | `--min-instances 1`, 512 MB | 🔜 coming soon |
-| GCP GKE | 1 replica, 256m CPU / 512 MB | 🔜 coming soon |
+| GCP Cloud Run | `--min-instances 1`, 512 MB | ✅ |
+| GCP GKE | 1 replica, 256m CPU / 512 MB | ✅ |
 | Azure Container Apps | 0.25 vCPU / 0.5 GB, min=1 | 🔜 coming soon |
 | Kubernetes (any) | 1 replica; GPU node pool for Ollama | tolerations for GPU node required |
 | Hetzner CX22 + GX2-15 | €4 + €35/mo | cheapest GPU-enabled setup |
@@ -216,9 +219,9 @@ This is the first decision. Pagemenot builds a Docker image with the CLI tools y
 |-----------------|--------------------------|-----------------|----------------|
 | Kubernetes only | `base` _(default)_ | kubectl (amd64 + arm64) | — |
 | AWS — EKS / ECS / EC2 | `aws` | kubectl + AWS CLI v2 | +~500 MB |
-| GCP — GKE / GCE | `gcp` | kubectl + gcloud | +~400 MB — 🔜 coming soon |
+| GCP — GKE / GCE / Cloud Run | `gcp` | kubectl + gcloud | +~400 MB |
 | Azure — AKS | `azure` | kubectl + Azure CLI | +~300 MB — 🔜 coming soon |
-| Multi-cloud | `cloud` | kubectl + AWS CLI + gcloud + Azure CLI | +~1.2 GB — 🔜 coming soon |
+| Multi-cloud (AWS + GCP) | `cloud` | kubectl + AWS CLI + gcloud + Azure CLI | +~1.2 GB |
 
 kubectl is always included and auto-detects `amd64` / `arm64` at build time.
 
@@ -438,7 +441,7 @@ Maps service names to GitHub repos for deploy correlation. Safe to commit — no
 | New Relic | `POST /webhooks/newrelic` | ✓ |
 | PagerDuty | `POST /webhooks/pagerduty` | ✓ |
 | AWS CloudWatch | `POST /webhooks/sns` | ✓ (SNS `OK` state) |
-| GCP Cloud Monitoring | `POST /webhooks/generic` | — (🔜 coming soon) |
+| GCP Cloud Monitoring | `POST /webhooks/generic` | ✓ |
 | Azure Monitor | `POST /webhooks/generic` | — (🔜 coming soon) |
 | OpsGenie | `POST /webhooks/opsgenie` | ✓ |
 | Anything else | `POST /webhooks/generic` | — |
@@ -501,7 +504,16 @@ aws sns subscribe --topic-arn arn:aws:sns:us-east-1:ACCOUNT:pagemenot-alerts \
 
 ### GCP Cloud Monitoring
 
-> 🔜 **Coming soon** — full GCP support (exec, runbooks, auto-close) is planned. Basic alert ingestion via `/webhooks/generic` works today but autonomous remediation is not yet supported.
+Pagemenot receives Cloud Monitoring alerts via notification channels pointed at `/webhooks/generic`. Supported resource types: `gce_instance`, `uptime_url` (Cloud Run), `cloudsql_database`. Auto-close fires when the incident resolves.
+
+```
+Cloud Monitoring Alert Policy → Notification Channel (Webhook) → POST /webhooks/generic
+```
+
+**Required:**
+1. Create a webhook notification channel pointing to `https://YOUR_HOST/webhooks/generic`
+2. Attach it to your alert policies
+3. Use the `gcp` image variant so `gcloud` is available for exec steps
 
 ### Azure Monitor
 
@@ -689,12 +701,26 @@ knowledge/postmortems/    ← past incident write-ups
 
 Restart → auto-ingested into ChromaDB.
 
+**Runbook directory layout — organize by cloud provider:**
+
+```
+knowledge/runbooks/
+├── aws/          ← AWS-specific (EC2, RDS, ECS, CloudWatch)
+├── gcp/          ← GCP-specific (GCE, Cloud Run, Cloud SQL, GKE)
+├── azure/        ← Azure-specific (coming soon)
+├── k8s/          ← provider-agnostic Kubernetes
+└── generic/      ← any stack (high CPU, OOM, latency)
+```
+
+Runbooks are tagged with `cloud_provider` in frontmatter. RAG retrieval filters by provider so GCP alerts only match GCP runbooks (and generic ones), preventing cross-cloud hallucinations. Single-cloud deployments work the same way — just populate the relevant subdirectory and leave the others empty.
+
 **Runbook format:**
 
 ```markdown
 # Service — Issue Title
 
 service: my-service
+cloud_provider: gcp   # aws | gcp | azure | k8s | generic
 
 ## Symptoms
 - alert conditions
@@ -780,7 +806,7 @@ make install   # pull image, start
 | Any Linux server | `docker compose up -d` |
 | Kubernetes | 1-replica Deployment, env from Secret |
 | AWS ECS / Fargate | Push to ECR, min 0.5 vCPU / 512MB |
-| GCP Cloud Run | `--min-instances 1` required (Socket Mode needs persistent connection) — 🔜 coming soon |
+| GCP Cloud Run | `--min-instances 1` required (Socket Mode needs persistent connection) |
 
 Not suitable for FaaS (Lambda, Cloud Functions) — Slack Socket Mode requires a persistent connection.
 

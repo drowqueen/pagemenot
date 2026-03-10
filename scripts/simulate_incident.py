@@ -23,7 +23,7 @@ import os
 import random
 import sys
 import httpx
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Load .env so webhook secrets are available without exporting to shell
@@ -31,6 +31,7 @@ _env_file = Path(__file__).parent.parent / ".env"
 if _env_file.exists():
     try:
         from dotenv import load_dotenv
+
         load_dotenv(_env_file, override=False)
     except ImportError:
         pass
@@ -39,21 +40,21 @@ PAGEMENOT_URL = os.environ.get("PAGEMENOT_URL", "http://localhost:8080")
 
 # Webhook HMAC secrets — read from env (same vars as pagemenot config)
 _SECRETS = {
-    "pagerduty":    os.getenv("WEBHOOK_SECRET_PAGERDUTY", ""),
-    "grafana":      os.getenv("WEBHOOK_SECRET_GRAFANA", ""),
+    "pagerduty": os.getenv("WEBHOOK_SECRET_PAGERDUTY", ""),
+    "grafana": os.getenv("WEBHOOK_SECRET_GRAFANA", ""),
     "alertmanager": os.getenv("WEBHOOK_SECRET_ALERTMANAGER", ""),
-    "datadog":      os.getenv("WEBHOOK_SECRET_DATADOG", ""),
-    "newrelic":     os.getenv("WEBHOOK_SECRET_NEWRELIC", ""),
-    "generic":      os.getenv("WEBHOOK_SECRET_GENERIC", ""),
+    "datadog": os.getenv("WEBHOOK_SECRET_DATADOG", ""),
+    "newrelic": os.getenv("WEBHOOK_SECRET_NEWRELIC", ""),
+    "generic": os.getenv("WEBHOOK_SECRET_GENERIC", ""),
 }
 
 _SIG_HEADERS = {
-    "pagerduty":    ("X-PagerDuty-Signature", "v1="),
-    "grafana":      ("X-Grafana-Signature", ""),
+    "pagerduty": ("X-PagerDuty-Signature", "v1="),
+    "grafana": ("X-Grafana-Signature", ""),
     "alertmanager": ("X-Alertmanager-Token", ""),
-    "datadog":      ("X-Datadog-Signature", ""),
-    "newrelic":     ("X-NR-Webhook-Token", ""),
-    "generic":      ("X-Pagemenot-Signature", "sha256="),
+    "datadog": ("X-Datadog-Signature", ""),
+    "newrelic": ("X-NR-Webhook-Token", ""),
+    "generic": ("X-Pagemenot-Signature", "sha256="),
 }
 
 
@@ -124,7 +125,6 @@ SCENARIOS = {
             "resource_pressure": False,
         },
     },
-
     "checkout-oom": {
         "name": "Checkout Service OOMKilled During Traffic Spike",
         "pagerduty": {
@@ -167,7 +167,6 @@ SCENARIOS = {
             "resource_pressure": True,
         },
     },
-
     "db-connection-pool": {
         "name": "Database Connection Pool Exhaustion",
         "pagerduty": {
@@ -209,7 +208,6 @@ SCENARIOS = {
             "resource_pressure": False,
         },
     },
-
     "cert-renewal": {
         "name": "TLS Certificate Expiry — api-gateway cert renewal failing",
         "pagerduty": {
@@ -243,7 +241,6 @@ SCENARIOS = {
             "resource_pressure": False,
         },
     },
-
     "traffic-spike": {
         "name": "Unexpected Traffic Spike from Bot Attack",
         "pagerduty": {
@@ -276,7 +273,6 @@ SCENARIOS = {
             "resource_pressure": True,
         },
     },
-
     "nginx-cache-flush": {
         "name": "Nginx Cache Stale — Auto-Resolve Demo",
         "pagerduty": {
@@ -308,13 +304,45 @@ SCENARIOS = {
                 "author": "deploy-bot",
                 "merged_at": "2026-03-03T08:40:00Z",
                 "files_changed": ["nginx.conf"],
-                "diff_preview": "- proxy_cache_key \"v2:$host$request_uri\";\n+ proxy_cache_key \"v3:$host$request_uri\";",
+                "diff_preview": '- proxy_cache_key "v2:$host$request_uri";\n+ proxy_cache_key "v3:$host$request_uri";',
             }
         ],
         "mock_k8s": {
             "pods": "2/2 Running",
             "restarts": 0,
             "events": "No unusual events",
+            "resource_pressure": False,
+        },
+    },
+    "cloud-sql-down": {
+        "name": "Cloud SQL Instance Unavailable — Auto-Restart",
+        "pagerduty": {
+            "id": "P1234567",
+            "title": "Cloud SQL pagemenot-test-sql unavailable — database/up = 0",
+            "description": "Cloud SQL instance pagemenot-test-sql stopped reporting metrics. Application DB connections timing out. cloudsql.googleapis.com/database/up absent for 120s.",
+            "urgency": "high",
+            "service": {"name": "pagemenot-test-sql", "id": "PSQL001"},
+        },
+        "mock_metrics": {
+            "error_rate": {"before": 0.2, "after": 100.0, "unit": "%"},
+            "request_rate": {"before": 450, "after": 0, "unit": "req/s"},
+            "latency_p99": {"before": 0.03, "after": 30.0, "unit": "s"},
+            "cpu_percent": {"before": 5, "after": 0, "unit": "%"},
+            "memory_mb": {"before": 256, "after": 0, "unit": "MB"},
+            "pod_restarts": {"before": 0, "after": 0, "unit": ""},
+        },
+        "mock_logs": [
+            "2026-03-09T20:00:01Z ERROR app: sqlalchemy.exc.OperationalError: (pymysql.err.OperationalError) (2003, \"Can't connect to MySQL server on 'pagemenot-test-sql'\")",
+            "2026-03-09T20:00:03Z ERROR app: DB connection pool exhausted — all 20 connections failed",
+            "2026-03-09T20:00:10Z ERROR app: Health check FAIL — database unreachable",
+            "2026-03-09T20:00:15Z WARN  app: Retrying DB connection (attempt 3/3) — failed",
+            "2026-03-09T20:00:20Z ERROR app: Shutting down — database unavailable",
+        ],
+        "mock_deploys": [],
+        "mock_k8s": {
+            "pods": "N/A — Cloud SQL managed instance",
+            "restarts": 0,
+            "events": "Cloud SQL instance STOPPED",
             "resource_pressure": False,
         },
     },
@@ -359,7 +387,7 @@ def send_alert(scenario_name: str):
         print("Available scenarios:\n")
         for name, s in SCENARIOS.items():
             print(f"  {name:25s} — {s['name']}")
-        print(f"\n  --random                    — Pick a random scenario")
+        print("\n  --random                    — Pick a random scenario")
         print("\nSource flags (test webhook parsing without real accounts):")
         print("  --source pagerduty          (default)")
         print("  --source opsgenie")
@@ -385,22 +413,32 @@ def send_alert(scenario_name: str):
     payloads = {
         "pagerduty": (
             "/webhooks/pagerduty",
-            {"messages": [{"event": "incident.triggered", "incident": {
-                **pd,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "assignments": [{"summary": "oncall-sre"}],
-                "status": "triggered",
-            }}]},
+            {
+                "messages": [
+                    {
+                        "event": "incident.triggered",
+                        "incident": {
+                            **pd,
+                            "created_at": datetime.now(timezone.utc).isoformat(),
+                            "assignments": [{"summary": "oncall-sre"}],
+                            "status": "triggered",
+                        },
+                    }
+                ]
+            },
         ),
         "opsgenie": (
             "/webhooks/opsgenie",
-            {"action": "Create", "alert": {
-                "alertId": pd["id"],
-                "message": pd["title"],
-                "entity": service,
-                "priority": "P1" if pd["urgency"] == "high" else "P3",
-                "description": pd.get("description", ""),
-            }},
+            {
+                "action": "Create",
+                "alert": {
+                    "alertId": pd["id"],
+                    "message": pd["title"],
+                    "entity": service,
+                    "priority": "P1" if pd["urgency"] == "high" else "P3",
+                    "description": pd.get("description", ""),
+                },
+            },
         ),
         "datadog": (
             "/webhooks/datadog",
@@ -424,11 +462,19 @@ def send_alert(scenario_name: str):
         ),
         "alertmanager": (
             "/webhooks/alertmanager",
-            {"alerts": [{"status": "firing", "labels": {
-                "alertname": pd["title"],
-                "service": service,
-                "severity": "critical" if pd["urgency"] == "high" else "warning",
-            }, "annotations": {"description": pd.get("description", "")}}]},
+            {
+                "alerts": [
+                    {
+                        "status": "firing",
+                        "labels": {
+                            "alertname": pd["title"],
+                            "service": service,
+                            "severity": "critical" if pd["urgency"] == "high" else "warning",
+                        },
+                        "annotations": {"description": pd.get("description", "")},
+                    }
+                ]
+            },
         ),
     }
 

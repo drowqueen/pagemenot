@@ -94,8 +94,11 @@ class Settings(BaseSettings):
     pagemenot_approval_gate: bool = True  # require human approval for [NEEDS APPROVAL] steps
     pagemenot_oncall_channel: Optional[str] = None  # channel to ping on critical escalations
     pagemenot_autoapprove_delay: int = 900  # seconds before auto-executing [AUTO-SAFE] steps
-    pagemenot_dedup_ttl_short: int = 600  # dedup window for critical/high (seconds)
-    pagemenot_dedup_ttl_long: int = 1800  # dedup window for medium/low (seconds)
+    pagemenot_state_bucket: Optional[str] = (
+        None  # gs://bucket, s3://bucket, or az://container for state persistence
+    )
+    pagemenot_dedup_ttl_short: int = 86400  # dedup window for critical/high (seconds) — 24h
+    pagemenot_dedup_ttl_long: int = 86400  # dedup window for medium/low (seconds) — 24h
     # Severity thresholds — controls when each action triggers
     pagemenot_jira_min_severity: str = "low"  # open Jira ticket: low/medium/high/critical
     pagemenot_pd_min_severity: str = "high"  # page PD/escalate: low/medium/high/critical
@@ -140,6 +143,15 @@ class Settings(BaseSettings):
     pagemenot_verify_poll_interval: int = 15  # CW alarm polling cadence (seconds)
     pagemenot_rag_incidents_n_results: int = 5  # past incidents returned by RAG
     pagemenot_rag_runbooks_n_results: int = 1  # runbooks returned by RAG — best match only
+    # Extra cloud provider label aliases merged into built-in normalization map.
+    # JSON dict: {"ovh": "ovh", "digitalocean": "onprem", "my-bare-metal": "onprem"}
+    # Keys are raw label values from alert sources; values are normalized provider names.
+    # These names are also used as cloud_provider metadata in ChromaDB — tag runbooks accordingly.
+    pagemenot_cloud_provider_aliases: dict[str, str] = {}
+    # Fallback when an alert source carries no cloud_provider label at all.
+    # Leave empty to keep current behaviour (no filter, searches all runbooks).
+    # Pure on-prem deployments: set to "onprem". Hetzner-only: "hetzner".
+    pagemenot_default_cloud_provider: str = ""
     chroma_incidents_collection: str = "incidents"  # ChromaDB collection name for postmortems
     chroma_runbooks_collection: str = "runbooks"  # ChromaDB collection name for runbooks
 

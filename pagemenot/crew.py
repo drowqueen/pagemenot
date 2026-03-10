@@ -26,7 +26,7 @@ def _build_llm() -> LLM:
         return LLM(model=f"openai/{settings.llm_model}", api_key=settings.openai_api_key)
 
 
-def build_triage_crew(alert_summary: str) -> Crew:
+def build_triage_crew(alert_summary: str, cloud_provider: str = "generic") -> Crew:
     """Build a complete triage crew for a specific incident and return it ready to kickoff."""
     llm = _build_llm()
     available = get_available_tools()
@@ -146,6 +146,8 @@ def build_triage_crew(alert_summary: str) -> Crew:
     remediate_task = Task(
         description=(
             "Propose remediation based on the diagnosis:\n"
+            f"- Cloud provider: {cloud_provider}. Only propose {cloud_provider} CLI commands. "
+            "Do NOT use kubectl unless cloud_provider is k8s or kubernetes.\n"
             "- Search runbooks for existing procedures\n"
             "- List steps in order, safest first\n"
             "- Tag every step [AUTO-SAFE] or [NEEDS APPROVAL]\n"
