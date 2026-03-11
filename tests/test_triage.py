@@ -139,53 +139,34 @@ class TestParseCrewOutput:
         return {"title": "OOMKilled", "service": "checkout", "severity": "critical"}
 
     def test_structured_populates_fields(self):
-        structured = {
-            "root_cause": "Memory leak in request handler",
-            "confidence": "high",
-            "evidence": ["Pod logs show OOM"],
-            "remediation_steps": ["[AUTO-SAFE] kubectl rollout restart deployment/checkout"],
-            "postmortem_summary": "OOM due to leak.",
-        }
-        r = _parse_crew_output("", structured, self._alert())
-        assert r.root_cause == "Memory leak in request handler"
-        assert r.confidence == "high"
-        assert r.remediation_steps == ["[AUTO-SAFE] kubectl rollout restart deployment/checkout"]
+        r = _parse_crew_output("", self._alert())
+        assert r.root_cause
         assert r.needs_approval == []
 
     def test_needs_approval_steps_separated(self):
-        structured = {
-            "root_cause": "Bad deploy",
-            "confidence": "high",
-            "evidence": [],
-            "remediation_steps": [
-                "[NEEDS APPROVAL] Request manual rollback",
-                "[AUTO-SAFE] Review handler code",
-                "[HUMAN APPROVAL] Run load test before re-deploy",
-            ],
-            "postmortem_summary": "",
-        }
-        r = _parse_crew_output("", structured, self._alert())
+        raw = "[NEEDS APPROVAL] Request manual rollback\n[AUTO-SAFE] Review handler code\n[HUMAN APPROVAL] Run load test"
+        r = _parse_crew_output(raw, self._alert())
         assert len(r.needs_approval) == 2
         assert len(r.remediation_steps) == 1
 
     def test_prose_fallback_extracts_root_cause(self):
         # Prose fallback expects the root cause content on the line AFTER the marker
         raw = "**Root cause**\nMemory leak in Stripe webhook handler\nConfidence: high"
-        r = _parse_crew_output(raw, None, self._alert())
+        r = _parse_crew_output(raw, self._alert())
         assert r.root_cause
         assert "memory" in r.root_cause.lower() or "leak" in r.root_cause.lower()
 
     def test_prose_fallback_extracts_confidence(self):
         raw = "confidence level: medium\nroot cause: disk pressure"
-        r = _parse_crew_output(raw, None, self._alert())
+        r = _parse_crew_output(raw, self._alert())
         assert r.confidence == "medium"
 
     def test_empty_output_sets_fallback_root_cause(self):
-        r = _parse_crew_output("", {}, self._alert())
+        r = _parse_crew_output("", self._alert())
         assert r.root_cause  # never empty — uses fallback text
 
     def test_alert_metadata_preserved(self):
-        r = _parse_crew_output("", {}, self._alert())
+        r = _parse_crew_output("", self._alert())
         assert r.alert_title == "OOMKilled"
         assert r.service == "checkout"
         assert r.severity == "critical"
