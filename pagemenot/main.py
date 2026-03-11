@@ -122,6 +122,40 @@ async def lifespan(app: FastAPI):
 
     _sbot._post_verification_task = _schedule_verification
 
+    import os as _os
+
+    _os.makedirs("/app/.azure", exist_ok=True)
+    if settings.azure_client_id and settings.azure_tenant_id and settings.azure_client_secret:
+        import subprocess as _sp
+
+        try:
+            _sp.run(
+                [
+                    "az",
+                    "login",
+                    "--service-principal",
+                    "--tenant",
+                    settings.azure_tenant_id,
+                    "--username",
+                    settings.azure_client_id,
+                    "--password",
+                    settings.azure_client_secret,
+                ],
+                check=True,
+                capture_output=True,
+                timeout=30,
+            )
+            if settings.azure_subscription_id:
+                _sp.run(
+                    ["az", "account", "set", "--subscription", settings.azure_subscription_id],
+                    check=True,
+                    capture_output=True,
+                    timeout=30,
+                )
+            logger.info("Azure CLI authenticated via service principal")
+        except Exception as _az_err:
+            logger.warning("Azure CLI auth failed — az exec steps will fail: %s", _az_err)
+
     # Resume any CW verifications that were in-flight when the container last stopped
     _pending = await _verif_store.get_all()
     if _pending:
@@ -444,6 +478,26 @@ async def newrelic_webhook(
     incident_state = payload.get("current_state", payload.get("state", "open")).lower()
     if incident_state not in ("closed", "acknowledged"):
         asyncio.create_task(_auto_triage("newrelic", payload))
+    return {"status": "accepted"}
+
+
+@app.post("/webhooks/azure")
+@limiter.limit(settings.pagemenot_webhook_rate_limit)
+async def azure_monitor_webhook(
+    request: Request,
+    x_pagemenot_signature: Optional[str] = Header(default=None),
+):
+    body = await request.body()
+    await _check_sig(
+        "azure", settings.webhook_secret_azure, body, x_pagemenot_signature, prefix="sha256="
+    )
+    payload = await request.json()
+    essentials = payload.get("data", {}).get("essentials", {})
+    if essentials.get("monitorCondition") == "Resolved":
+        parsed = _parse_alert("azure", payload)
+        _clear_dedup(parsed["service"], parsed["title"])
+        return {"status": "skipped", "reason": "azure alert resolved"}
+    asyncio.create_task(_auto_triage("azure", payload))
     return {"status": "accepted"}
 
 

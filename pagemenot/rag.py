@@ -277,6 +277,11 @@ def _detect_cloud_providers(tags_str: str, content: str, dir_hint: str = "") -> 
     return sorted(detected) if detected else ["generic"]
 
 
+def _detect_cloud_provider(tags_str: str, content: str) -> str:
+    """Single-value wrapper around _detect_cloud_providers for backward-compat tests."""
+    return _detect_cloud_providers(tags_str, content)[0]
+
+
 def _provider_flags(providers: list[str]) -> dict[str, int]:
     """Return boolean int flags for each known provider, for ChromaDB $or queries."""
     flags: dict[str, int] = {f"is_{p}": 0 for p in _KNOWN_PROVIDERS}
