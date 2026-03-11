@@ -69,7 +69,7 @@
 **Goal:** Add Azure Monitor alert ingestion, az CLI exec, runbooks for VM and App Service, and end-to-end testing against real Azure free-tier resources. One pagemenot instance (GCP VM) handles all three clouds.
 **Requirements:** AZ-01, AZ-02, AZ-03, AZ-04, AZ-05, AZ-06, AZ-07, AZ-08 (sub: webhook returns 200 for Fired — covered by AZ-01), AZ-09 (sub: webhook skips Resolved — covered by AZ-02)
 **Depends on:** Phase 3
-**Plans:** 6/6 plans complete
+**Plans:** 1/5 plans executed
 
 Plans:
 - [ ] 04-01-PLAN.md — Azure test scaffold (TDD: failing tests for all AZ requirements)
