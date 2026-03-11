@@ -465,3 +465,19 @@ class TestParseAlertAzure:
         p = _parse_alert("azure", {"data": {}})
         assert isinstance(p, dict)
         assert p["cloud_provider"] == ["azure"]
+
+
+# ── TestDispatchExecAzure ─────────────────────────────────────────────────
+
+
+from unittest.mock import patch  # noqa: E402
+
+
+class TestDispatchExecAzure:
+    def test_az_routes_to_exec_shell(self):
+        from pagemenot.tools import dispatch_exec_step
+
+        with patch("pagemenot.tools.exec_shell") as mock_shell:
+            mock_shell.return_value = "ok"
+            dispatch_exec_step("az vm start --resource-group my-rg --name my-vm", "my-vm")
+        mock_shell.assert_called_once()
