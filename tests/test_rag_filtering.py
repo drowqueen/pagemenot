@@ -1,5 +1,6 @@
 """Tests for cloud provider filtering in RAG retrieval."""
 
+import pathlib
 import tempfile
 from pathlib import Path
 
@@ -130,3 +131,45 @@ def test_aws_no_regression(chroma_client):
     assert any("aws-rb" in f for f in filenames)
     assert any("gen-rb" in f for f in filenames)
     assert not any("gcp-rb" in f for f in filenames)
+
+
+# ---------------------------------------------------------------------------
+# AZ-07: Azure runbooks parseable by RAG
+# ---------------------------------------------------------------------------
+
+
+class TestAzureRunbooks:
+    """AZ-07: Azure runbook files parseable by RAG with azure tag detection."""
+
+    RUNBOOK_DIR = pathlib.Path("knowledge/runbooks/azure")
+
+    def test_runbook_dir_exists(self):
+        assert self.RUNBOOK_DIR.is_dir(), "knowledge/runbooks/azure/ directory must exist"
+
+    def test_vm_runbook_has_azure_tag(self):
+        rb = self.RUNBOOK_DIR / "azure-vm-stopped.md"
+        assert rb.exists(), "azure-vm-stopped.md must exist"
+        content = rb.read_text()
+        assert "azure" in content.lower(), (
+            "runbook must contain 'azure' tag for RAG cloud_provider detection"
+        )
+
+    def test_app_service_runbook_has_azure_tag(self):
+        rb = self.RUNBOOK_DIR / "azure-app-service-down.md"
+        assert rb.exists(), "azure-app-service-down.md must exist"
+        content = rb.read_text()
+        assert "azure" in content.lower()
+
+    def test_runbooks_have_exec_steps(self):
+        for rb in self.RUNBOOK_DIR.glob("*.md"):
+            content = rb.read_text()
+            assert "<!-- exec:" in content, f"{rb.name} must have at least one <!-- exec: --> step"
+
+    def test_runbooks_have_cloud_provider_frontmatter(self):
+        import re
+
+        for rb in self.RUNBOOK_DIR.glob("*.md"):
+            content = rb.read_text()
+            assert re.search(r"cloud_provider:\s*azure", content), (
+                f"{rb.name} must have 'cloud_provider: azure' in frontmatter"
+            )

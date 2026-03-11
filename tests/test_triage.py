@@ -479,5 +479,7 @@ class TestDispatchExecAzure:
 
         with patch("pagemenot.tools.exec_shell") as mock_shell:
             mock_shell.return_value = "ok"
-            dispatch_exec_step("az vm start --resource-group my-rg --name my-vm", "my-vm")
+            dispatch_exec_step(
+                "<!-- exec: az vm start --resource-group my-rg --name my-vm -->", "my-vm"
+            )
         mock_shell.assert_called_once()
