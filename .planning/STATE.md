@@ -8,7 +8,7 @@ progress:
   total_phases: 3
   completed_phases: 1
   total_plans: 4
-  completed_plans: 3
+  completed_plans: 4
 ---
 
 # Pagemenot — Project State
@@ -19,19 +19,19 @@ See: .planning/PROJECT.md (updated 2026-03-08)
 
 **Core value:** Alert fires -> pagemenot resolves it autonomously or hands off with full context already done.
 **Current milestone:** GCP Support
-**Current focus:** Phase 2 — Plan 02-03
+**Current focus:** Phase 2 — Plan 02-04
 
 ## Milestone 1: GCP Support
 
 | Phase | Name | Status | Plans |
 |-------|------|--------|-------|
 | 1 | RAG Cloud Provider Filtering | Complete (2026-03-08) | 1/1 |
-| 2 | GCP Alert Ingestion + Exec | In Progress (2/4) | 2/4 |
+| 2 | GCP Alert Ingestion + Exec | In Progress (3/4) | 3/4 |
 | 3 | End-to-End Tests + Ship | Pending | 2 |
 
 ## Active Work
 
-Phase 2 Plans 02-01 and 02-02 complete. Ready for 02-03 (approval flow — test all three service types with approve/reject buttons). 02-04 added: AWS ECS setup + reject gate + multicloud test.
+Phase 2 Plans 02-01, 02-02, and 02-03 complete. Ready for 02-04 (AWS ECS setup + reject gate + multicloud test).
 
 ## Decisions
 
@@ -50,11 +50,14 @@ Phase 2 Plans 02-01 and 02-02 complete. Ready for 02-03 (approval flow — test 
 - **Phase 2 Plan 02:** GCP-07 confirmed — Cloud Run update-traffic step is exec:approve: (intentional, not a gap); ingress restore auto-executes, traffic update requires approval button.
 - **Phase 2 Plan 02:** GCP-08 confirmed — Cloud SQL restart auto-resolves; use `gcloud sql instances restart` for test trigger, never `--activation-policy=NEVER`.
 - **Phase 2 Plan 02:** Auto-resolve path confirmed: no Jira/PD created when incident resolves without human action.
+- **Phase 2 Plan 03:** exec: (auto) steps always run regardless of PAGEMENOT_APPROVAL_GATE; only exec:approve: steps are gated behind Slack buttons.
+- **Phase 2 Plan 03:** Reject path posts "Rejected — no action taken" and exits with no exec. No additional config needed.
+- **Phase 2 Plan 03:** GCP-09 and GCP-10 satisfied. APPROVAL_GATE restored to false after test wave.
 - **Ops:** After adding/modifying runbooks on VM: `docker restart pagemenot` OR `docker exec pagemenot python3 -c "from pagemenot import rag; rag.ingest_all()"`. Hourly re-ingest exists but creates a window where wrong runbook matches.
 
 ## Session
 
-- Stopped at: Completed 02-02 (Cloud Run + Cloud SQL E2E verified). Ready for 02-03.
+- Stopped at: Completed 02-03 (approval flow verified — GCP-09 + GCP-10). Ready for 02-04.
 - Resume file: None
 
 ## Accumulated Context
