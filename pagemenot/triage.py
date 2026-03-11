@@ -256,6 +256,7 @@ class TriageResult:
         ""  # CW alarm name — set for SNS-sourced incidents, enables post-exec verification
     )
     region: str = ""  # AWS region for CW polling
+    account_id: str = ""  # AWS account ID extracted from SNS TopicArn
     cloud_provider: list[str] = field(
         default_factory=lambda: ["generic"]
     )  # list of providers: "aws", "gcp", "k8s", "hetzner", "onprem", "azure", "generic"
@@ -426,6 +427,7 @@ def _parse_alert(source: str, payload: dict) -> dict:
             "external_id": payload.get("alarm_name", ""),
             "alarm_name": payload.get("alarm_name", ""),
             "region": payload.get("region", ""),
+            "account_id": payload.get("account_id", ""),
             "cloud_provider": ["aws"],
         }
     elif source == "generic":
@@ -658,7 +660,14 @@ async def _try_runbook_exec(result: TriageResult):
     steps_executed = 0
     for tag, filename in pairs_to_run:
         try:
-            output = await loop.run_in_executor(_executor, dispatch_exec_step, tag, result.service)
+            output = await loop.run_in_executor(
+                _executor,
+                dispatch_exec_step,
+                tag,
+                result.service,
+                result.region,
+                result.account_id,
+            )
             display_tag = tag.replace("{{ service }}", result.service or "UNKNOWN_SERVICE")
             result.execution_log.append(
                 f"📖 *{filename}*\n✅ `{display_tag[:120]}`\n```{output[:300]}```"
@@ -728,6 +737,7 @@ async def run_triage(source: str, payload: dict[str, Any]) -> TriageResult:
 
     result.alarm_name = parsed.get("alarm_name", "")
     result.region = parsed.get("region", "")
+    result.account_id = parsed.get("account_id", "")
     result.cloud_provider = parsed.get("cloud_provider", ["generic"])
 
     # 8. Attempt runbook-driven resolution (only if exec is enabled)

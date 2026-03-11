@@ -324,6 +324,8 @@ async def sns_webhook(
         new_state = message.get("NewStateValue", "")
         alarm_name = message.get("AlarmName", "CloudWatch Alarm")
         region = message.get("Region", "")
+        topic_arn = payload.get("TopicArn", "")
+        account_id = topic_arn.split(":")[4] if topic_arn.count(":") >= 5 else ""
         trigger = message.get("Trigger", {})
         metric = trigger.get("MetricName", "")
         dim_list = trigger.get("Dimensions", [])
@@ -390,6 +392,7 @@ async def sns_webhook(
             "service": service,
             "severity": alarm_severity,
             "region": region,
+            "account_id": account_id,
             "metric": metric,
             "dimensions": dims,
             "source": "cloudwatch",
@@ -1094,6 +1097,7 @@ async def _auto_triage(source: str, payload: dict):
                     "similar_incidents": result.similar_incidents or [],
                     "alarm_name": result.alarm_name,
                     "region": result.region,
+                    "account_id": result.account_id,
                 },
             )
             steps_text = "\n".join(f"• `{s[:100]}`" for s in result.pending_exec_steps[:5])
@@ -1154,6 +1158,7 @@ async def _auto_triage(source: str, payload: dict):
                     "similar_incidents": result.similar_incidents or [],
                     "alarm_name": result.alarm_name,
                     "region": result.region,
+                    "account_id": result.account_id,
                 },
             )
             manual_text = "\n".join(f"• {s[:120]}" for s in result.needs_approval[:5])

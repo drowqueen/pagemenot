@@ -123,8 +123,11 @@ class Settings(BaseSettings):
     # External LLM compliance gate
     llm_external_enterprise_confirmed: bool = False  # must be true to use non-Ollama LLMs
     # Cloud execution credentials
-    aws_role_arn: Optional[str] = None  # IAM role pagemenot assumes for AWS ops
-    aws_region: Optional[str] = None  # required if using AWS runbook steps
+    aws_role_arn: Optional[str] = (
+        None  # IAM role pagemenot assumes for AWS ops (single-account fallback)
+    )
+    aws_accounts: dict[str, str] = {}  # account_id → role_arn; per-account override of aws_role_arn
+    aws_region: Optional[str] = None  # default region; per-alert region takes precedence
     google_application_credentials: Optional[str] = None  # path to GCP service account JSON
     azure_tenant_id: Optional[str] = None
     azure_client_id: Optional[str] = None
