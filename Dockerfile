@@ -108,30 +108,29 @@ USER appuser
 # ══════════════════════════════════════════════════════════════
 # azure — + Azure CLI  (~300 MB)
 # PAGEMENOT_BUILD_TARGET=azure
-# gnupg, lsb-release: setup only — removed after repo configured
+# gnupg: setup only — removed after key import
 # ══════════════════════════════════════════════════════════════
 FROM base AS azure
 
 USER root
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends gnupg lsb-release && \
+    apt-get update && apt-get install -y --no-install-recommends gnupg && \
     mkdir -p /etc/apt/keyrings && \
-    curl -fsSLS https://packages.microsoft.com/keys/microsoft.asc \
+    curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
       | gpg --dearmor -o /etc/apt/keyrings/microsoft.gpg && \
-    AZ_DIST=$(lsb_release -cs) && \
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/microsoft.gpg] \
-https://packages.microsoft.com/repos/azure-cli/ ${AZ_DIST} main" \
+https://packages.microsoft.com/repos/azure-cli/ bookworm main" \
       > /etc/apt/sources.list.d/azure-cli.list && \
     apt-get update && apt-get install -y --no-install-recommends azure-cli && \
-    apt-get remove --purge -y gnupg lsb-release && apt-get autoremove -y
+    apt-get remove --purge -y gnupg && apt-get autoremove -y
 USER appuser
 
 # ══════════════════════════════════════════════════════════════
 # cloud — + AWS CLI + gcloud + Azure CLI  (~1.2 GB extra)
 # PAGEMENOT_BUILD_TARGET=cloud
 # FROM base (not aws): all three CLIs in one RUN, one cleanup pass.
-# Build deps (unzip, gnupg, lsb-release) installed and purged in same layer.
+# Build deps (unzip, gnupg) installed and purged in same layer.
 # ══════════════════════════════════════════════════════════════
 FROM base AS cloud
 
@@ -140,7 +139,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     # ── build-time deps ──────────────────────────────────────
     apt-get update && apt-get install -y --no-install-recommends \
-      unzip gnupg lsb-release && \
+      unzip gnupg && \
     # ── AWS CLI v2 ───────────────────────────────────────────
     ARCH=$(uname -m) && \
     curl -fsSLo /tmp/awscliv2.zip \
@@ -155,15 +154,14 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       > /etc/apt/sources.list.d/google-cloud-sdk.list && \
     # ── azure repo ───────────────────────────────────────────
     mkdir -p /etc/apt/keyrings && \
-    curl -fsSLS https://packages.microsoft.com/keys/microsoft.asc \
+    curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
       | gpg --dearmor -o /etc/apt/keyrings/microsoft.gpg && \
-    AZ_DIST=$(lsb_release -cs) && \
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/microsoft.gpg] \
-https://packages.microsoft.com/repos/azure-cli/ ${AZ_DIST} main" \
+https://packages.microsoft.com/repos/azure-cli/ bookworm main" \
       > /etc/apt/sources.list.d/azure-cli.list && \
     # ── install all CLIs in one pass ─────────────────────────
     apt-get update && apt-get install -y --no-install-recommends \
       google-cloud-cli azure-cli && \
     # ── purge build-time deps ─────────────────────────────────
-    apt-get remove --purge -y unzip gnupg lsb-release && apt-get autoremove -y
+    apt-get remove --purge -y unzip gnupg && apt-get autoremove -y
 USER appuser
