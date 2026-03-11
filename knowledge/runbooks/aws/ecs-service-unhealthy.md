@@ -24,9 +24,9 @@ List recently stopped tasks for failure details:
 
 ## Resolution
 
-Force a new deployment to replace unhealthy tasks. Auto-executes when confidence is high:
+Force a new deployment to replace unhealthy tasks (requires approval):
 
-<!-- exec: aws ecs update-service --cluster {{ service }} --service {{ service }} --force-new-deployment -->
+<!-- exec:approve: aws ecs update-service --cluster {{ service }} --service {{ service }} --force-new-deployment -->
 
 ## Escalation
 If tasks continue failing after force-new-deployment:
