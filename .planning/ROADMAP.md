@@ -29,7 +29,7 @@
 1. ~~GCP alert parsing — fix `cloud_provider` detection for New Relic infra (GCP VM) and Grafana alerts; Cloud SQL runbook with `<!-- exec: -->` steps~~ **Complete (2026-03-09)**
 2. ~~GCP exec verification — validate Cloud Run ingress restore and Cloud SQL instance restart exec steps; confirm auto-resolve end-to-end for both~~ **Complete (2026-03-11)**
 3. ~~Approval flow — test all three service types (GCE nginx, Cloud Run, Cloud SQL) with approval button; confirm exec runs only after approve click~~ **Complete (2026-03-11)**
-4. AWS ECS + multicloud — stand up ECS cluster (EC2 t2.micro), test reject/approve gate for ECS, fire simultaneous AWS+GCP alerts to validate multicloud independence
+4. ~~AWS ECS + multicloud — stand up ECS cluster (EC2 t2.micro), test reject/approve gate for ECS, fire simultaneous AWS+GCP alerts to validate multicloud independence~~ **Complete (2026-03-11)**
 
 ### Success Criteria
 1. New Relic infra alert for gcp-app-vm routes through `/webhooks/newrelic` and sets `cloud_provider="gcp"`

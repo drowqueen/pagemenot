@@ -2,13 +2,13 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: in_progress
-last_updated: "2026-03-11T00:00:00.000Z"
+status: unknown
+last_updated: "2026-03-11T08:04:52.527Z"
 progress:
-  total_phases: 3
-  completed_phases: 1
-  total_plans: 4
-  completed_plans: 4
+  total_phases: 4
+  completed_phases: 2
+  total_plans: 10
+  completed_plans: 5
 ---
 
 # Pagemenot — Project State
@@ -19,19 +19,19 @@ See: .planning/PROJECT.md (updated 2026-03-08)
 
 **Core value:** Alert fires -> pagemenot resolves it autonomously or hands off with full context already done.
 **Current milestone:** GCP Support
-**Current focus:** Phase 2 — Plan 02-04
+**Current focus:** Phase 3 — Plan 03-01
 
 ## Milestone 1: GCP Support
 
 | Phase | Name | Status | Plans |
 |-------|------|--------|-------|
 | 1 | RAG Cloud Provider Filtering | Complete (2026-03-08) | 1/1 |
-| 2 | GCP Alert Ingestion + Exec | In Progress (3/4) | 3/4 |
+| 2 | GCP Alert Ingestion + Exec | Complete (2026-03-11) | 4/4 |
 | 3 | End-to-End Tests + Ship | Pending | 2 |
 
 ## Active Work
 
-Phase 2 Plans 02-01, 02-02, and 02-03 complete. Ready for 02-04 (AWS ECS setup + reject gate + multicloud test).
+Phase 2 complete (all 4 plans). Ready for Phase 3 (End-to-End Tests + Ship).
 
 ## Decisions
 
@@ -53,11 +53,12 @@ Phase 2 Plans 02-01, 02-02, and 02-03 complete. Ready for 02-04 (AWS ECS setup +
 - **Phase 2 Plan 03:** exec: (auto) steps always run regardless of PAGEMENOT_APPROVAL_GATE; only exec:approve: steps are gated behind Slack buttons.
 - **Phase 2 Plan 03:** Reject path posts "Rejected — no action taken" and exits with no exec. No additional config needed.
 - **Phase 2 Plan 03:** GCP-09 and GCP-10 satisfied. APPROVAL_GATE restored to false after test wave.
+- **Phase 2 Plan 04:** ECS force-new-deployment gated as exec:approve:. Reject path confirmed: "Rejected — no action taken", no exec side-effects. Approve path confirmed: force-new-deployment runs, task recovers. Multicloud confirmed: simultaneous ECS (SNS/CloudWatch) + Cloud Run (mock webhook) → independent Slack threads, no cross-contamination. ECS cluster pagemenot-ecs-demo kept (EC2 worker stopped); start worker before Phase 3 ECS tests.
 - **Ops:** After adding/modifying runbooks on VM: `docker restart pagemenot` OR `docker exec pagemenot python3 -c "from pagemenot import rag; rag.ingest_all()"`. Hourly re-ingest exists but creates a window where wrong runbook matches.
 
 ## Session
 
-- Stopped at: Completed 02-03 (approval flow verified — GCP-09 + GCP-10). Ready for 02-04.
+- Stopped at: Completed 02-04 (ECS reject/approve gate + multicloud test verified). Phase 2 complete.
 - Resume file: None
 
 ## Accumulated Context
