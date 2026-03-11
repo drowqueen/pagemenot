@@ -27,7 +27,7 @@
 
 ### Plans
 1. ~~GCP alert parsing — fix `cloud_provider` detection for New Relic infra (GCP VM) and Grafana alerts; Cloud SQL runbook with `<!-- exec: -->` steps~~ **Complete (2026-03-09)**
-2. GCP exec verification — validate Cloud Run ingress restore and Cloud SQL instance restart exec steps; confirm auto-resolve end-to-end for both
+2. ~~GCP exec verification — validate Cloud Run ingress restore and Cloud SQL instance restart exec steps; confirm auto-resolve end-to-end for both~~ **Complete (2026-03-11)**
 3. Approval flow — test all three service types (GCE nginx, Cloud Run, Cloud SQL) with approval button; confirm exec runs only after approve click
 4. AWS ECS + multicloud — stand up ECS cluster (EC2 t2.micro), test reject/approve gate for ECS, fire simultaneous AWS+GCP alerts to validate multicloud independence
 
@@ -67,7 +67,7 @@
 ## Phase 4: Azure Monitor Support and Testing
 
 **Goal:** Add Azure Monitor alert ingestion, az CLI exec, runbooks for VM and App Service, and end-to-end testing against real Azure free-tier resources. One pagemenot instance (GCP VM) handles all three clouds.
-**Requirements:** AZ-01, AZ-02, AZ-03, AZ-04, AZ-05, AZ-06
+**Requirements:** AZ-01, AZ-02, AZ-03, AZ-04, AZ-05, AZ-06, AZ-07, AZ-08 (sub: webhook returns 200 for Fired — covered by AZ-01), AZ-09 (sub: webhook skips Resolved — covered by AZ-02)
 **Depends on:** Phase 3
 **Plans:** 5 plans
 
