@@ -347,3 +347,121 @@ class TestParseAlertGCP:
         p = _parse_alert("generic", payload)
         assert p["cloud_provider"] == ["gcp"]
         assert p["service"] == "gcp-hello"
+
+
+# ── Azure Monitor alert fixtures ──────────────────────────────────────────
+
+AZURE_VM_ALERT = {
+    "schemaId": "azureMonitorCommonAlertSchema",
+    "data": {
+        "essentials": {
+            "alertId": "/subscriptions/sub123/providers/Microsoft.AlertsManagement/alerts/abc",
+            "alertRule": "VM CPU High",
+            "severity": "Sev1",
+            "monitorCondition": "Fired",
+            "alertTargetIDs": [
+                "/subscriptions/sub123/resourcegroups/my-rg/providers/microsoft.compute/virtualmachines/my-vm"
+            ],
+            "configurationItems": ["my-vm"],
+            "firedDateTime": "2026-03-11T10:00:00Z",
+            "description": "CPU > 90% for 5 minutes",
+        },
+        "alertContext": {},
+    },
+}
+
+AZURE_APP_SERVICE_ALERT = {
+    "schemaId": "azureMonitorCommonAlertSchema",
+    "data": {
+        "essentials": {
+            "alertRule": "App Service Unavailable",
+            "severity": "Sev0",
+            "monitorCondition": "Fired",
+            "alertTargetIDs": [
+                "/subscriptions/sub123/resourcegroups/my-rg/providers/microsoft.web/sites/my-app"
+            ],
+            "configurationItems": ["my-app"],
+            "description": "HTTP 5xx rate > 50%",
+        },
+        "alertContext": {},
+    },
+}
+
+AZURE_RESOLVED_ALERT = {
+    "schemaId": "azureMonitorCommonAlertSchema",
+    "data": {
+        "essentials": {
+            "alertRule": "VM CPU High",
+            "severity": "Sev1",
+            "monitorCondition": "Resolved",
+            "alertTargetIDs": [
+                "/subscriptions/sub123/resourcegroups/my-rg/providers/microsoft.compute/virtualmachines/my-vm"
+            ],
+            "configurationItems": ["my-vm"],
+            "description": "",
+        },
+        "alertContext": {},
+    },
+}
+
+
+# ── TestParseAlertAzure ────────────────────────────────────────────────────
+
+
+class TestParseAlertAzure:
+    def test_fired_fields(self):
+        p = _parse_alert("azure", AZURE_VM_ALERT)
+        assert p["title"] == "VM CPU High"
+        assert p["service"] == "my-vm"
+        assert p["cloud_provider"] == ["azure"]
+        assert p["severity"] in ("critical", "high", "medium", "low", "unknown")
+
+    def test_app_service_service_extraction(self):
+        p = _parse_alert("azure", AZURE_APP_SERVICE_ALERT)
+        assert p["service"] == "my-app"
+
+    def test_resolved_parseable(self):
+        p = _parse_alert("azure", AZURE_RESOLVED_ALERT)
+        assert isinstance(p, dict)
+        assert "service" in p
+
+    @pytest.mark.parametrize(
+        "sev_input,expected",
+        [
+            ("Sev0", "critical"),
+            ("Sev1", "high"),
+            ("Sev2", "medium"),
+            ("Sev3", "low"),
+            ("Sev4", "low"),
+        ],
+    )
+    def test_severity_mapping(self, sev_input, expected):
+        payload = {
+            "schemaId": "azureMonitorCommonAlertSchema",
+            "data": {
+                "essentials": {
+                    "alertRule": "Test Alert",
+                    "severity": sev_input,
+                    "monitorCondition": "Fired",
+                    "alertTargetIDs": [
+                        "/subscriptions/sub123/resourcegroups/rg/providers/microsoft.compute/virtualmachines/vm"
+                    ],
+                    "configurationItems": ["vm"],
+                    "description": "test",
+                },
+                "alertContext": {},
+            },
+        }
+        p = _parse_alert("azure", payload)
+        assert p["severity"] == expected
+
+    def test_service_from_last_segment(self):
+        target = AZURE_VM_ALERT["data"]["essentials"]["alertTargetIDs"][0]
+        last_segment = target.split("/")[-1]
+        p = _parse_alert("azure", AZURE_VM_ALERT)
+        assert p["service"] == last_segment
+
+    def test_legacy_payload_no_essentials(self):
+        p = _parse_alert("azure", {"data": {}})
+        assert isinstance(p, dict)
+        assert p["cloud_provider"] == ["azure"]
