@@ -119,6 +119,7 @@ class Settings(BaseSettings):
     webhook_secret_newrelic: Optional[str] = None
     webhook_secret_generic: Optional[str] = None
     webhook_secret_jira: Optional[str] = None
+    webhook_secret_azure: Optional[str] = None
 
     # External LLM compliance gate
     llm_external_enterprise_confirmed: bool = False  # must be true to use non-Ollama LLMs

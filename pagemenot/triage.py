@@ -428,6 +428,40 @@ def _parse_alert(source: str, payload: dict) -> dict:
             "region": payload.get("region", ""),
             "cloud_provider": ["aws"],
         }
+    elif source == "azure":
+        _az_sev = {
+            "Sev0": "critical",
+            "Sev1": "high",
+            "Sev2": "medium",
+            "Sev3": "low",
+            "Sev4": "low",
+        }
+        essentials = payload.get("data", {}).get("essentials", {})
+        if not essentials:
+            text = str(payload)
+            return {
+                "title": payload.get("alertRule", payload.get("name", text[:80])),
+                "service": _guess_service(text),
+                "severity": "medium",
+                "description": text[:200],
+                "external_id": "",
+                "cloud_provider": ["azure"],
+            }
+        target_ids = essentials.get("alertTargetIDs", [])
+        raw_target = target_ids[0] if target_ids else ""
+        service = (
+            raw_target.rstrip("/").split("/")[-1]
+            if raw_target
+            else (essentials.get("configurationItems", ["unknown"])[0])
+        )
+        return {
+            "title": essentials.get("alertRule", "Unknown Azure Alert"),
+            "service": service,
+            "severity": _az_sev.get(essentials.get("severity", "Sev2"), "medium"),
+            "description": essentials.get("description", ""),
+            "external_id": essentials.get("alertId", ""),
+            "cloud_provider": ["azure"],
+        }
     elif source == "generic":
         incident = payload.get("incident", {})
         if incident:
