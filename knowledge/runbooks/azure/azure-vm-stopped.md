@@ -7,8 +7,9 @@ cloud_provider: azure
 # Azure VM Stopped / Unreachable
 
 ## Symptoms
-- VM health check failing
-- Azure Monitor metric absent or CPU/heartbeat alert firing
+- VM stopped, deallocated, or unreachable
+- Heartbeat absent, VM powered off, deallocate operation fired
+- Azure Monitor activity log alert: deallocate, stop, VM offline
 - Resource ID: microsoft.compute/virtualmachines
 
 ## Diagnosis
