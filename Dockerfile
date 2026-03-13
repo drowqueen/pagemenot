@@ -36,8 +36,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 COPY --from=builder /venv /venv
 ENV PATH="/venv/bin:$PATH"
 
-# One layer for all app code
-COPY pagemenot/ pagemenot/ scripts/ scripts/ knowledge/ knowledge/
+# One layer for all app code — knowledge/ NOT included; runbooks are customer-supplied at runtime
+COPY pagemenot/ pagemenot/ scripts/ scripts/
 
 # kubectl — single binary, arch-aware, pinned version; sha256 verified
 ARG KUBECTL_VERSION=v1.35.2
@@ -52,7 +52,8 @@ RUN ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') && \
 
 RUN groupadd --system --gid 1000 appgroup && \
     useradd --system --uid 1000 --gid appgroup --no-create-home appuser && \
-    mkdir -p /app/data/chroma /app/.config/crewai && \
+    mkdir -p /app/data/chroma /app/.config/crewai \
+            /app/knowledge/runbooks /app/knowledge/postmortems && \
     echo '{"show_tracing_ui": false}' > /app/.config/crewai/settings.json && \
     chown -R appuser:appgroup /app /venv
 

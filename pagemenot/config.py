@@ -96,6 +96,9 @@ class Settings(BaseSettings):
     pagemenot_state_bucket: Optional[str] = (
         None  # gs://bucket, s3://bucket, or az://container for state persistence
     )
+    pagemenot_runbook_bucket: str = (
+        ""  # bucket to sync runbooks from at startup: gs://bucket/path, s3://bucket/path, or az://account/container
+    )
     pagemenot_dedup_ttl_short: int = 86400  # dedup window for critical/high (seconds) — 24h
     pagemenot_dedup_ttl_long: int = 86400  # dedup window for medium/low (seconds) — 24h
     # Severity thresholds — controls when each action triggers
