@@ -1213,7 +1213,7 @@ def get_runbook_exec_steps(
 
     Returns {"auto": [(tag, filename), ...], "approve": [(tag, filename), ...]}
       - auto: <!-- exec: cmd --> steps — run immediately, no human needed
-      - approve: <!-- exec:approve: cmd --> steps — queued for human approval when APPROVAL_GATE=true
+      - approve: <!-- exec:approve: cmd --> steps — always queued for human approval
     """
     try:
         client = _chroma_client()

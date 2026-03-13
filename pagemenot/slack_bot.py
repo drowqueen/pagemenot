@@ -766,7 +766,7 @@ async def _do_triage(say, source: str, payload: dict, thread_ts: str | None = No
         # Approval gate: pending runbook exec steps require human sign-off.
         # High confidence + exec enabled → auto-approve after delay (cancellable).
         # Otherwise → show approve/reject buttons.
-        if result.pending_exec_steps and settings.pagemenot_approval_gate:
+        if result.pending_exec_steps:
             channel = working_msg.get("channel", settings.pagemenot_channel)
             if result.confidence == "high" and settings.pagemenot_exec_enabled:
                 task_id = str(uuid.uuid4())[:8]

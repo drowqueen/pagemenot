@@ -646,8 +646,7 @@ async def _try_runbook_exec(result: TriageResult):
     """Attempt autonomous runbook execution. Mutates result in place.
 
     <!-- exec: cmd -->         → always runs immediately (DRY_RUN aware)
-    <!-- exec:approve: cmd --> → runs immediately when APPROVAL_GATE=false,
-                                 or queued in result.pending_exec_steps when APPROVAL_GATE=true
+    <!-- exec:approve: cmd --> → always queued in result.pending_exec_steps for human approval
     """
     if not settings.pagemenot_exec_enabled:
         return
@@ -669,16 +668,16 @@ async def _try_runbook_exec(result: TriageResult):
     if not auto_steps and not approve_steps:
         return
 
-    # Queue approve steps for human review if gate is enabled
-    if settings.pagemenot_approval_gate and approve_steps:
+    # Queue approve steps — always requires human sign-off (tag-driven, not config-driven)
+    if approve_steps:
         result.pending_exec_steps = [tag for tag, _ in approve_steps]
         approve_runbooks = sorted({fn for _, fn in approve_steps})
         logger.info(
-            f"[APPROVAL GATE] {len(approve_steps)} step(s) queued for approval from: {approve_runbooks}"
+            f"[APPROVAL QUEUED] {len(approve_steps)} step(s) queued for approval from: {approve_runbooks}"
         )
 
-    # Run auto steps + (approve steps when gate is off)
-    pairs_to_run = auto_steps + ([] if settings.pagemenot_approval_gate else approve_steps)
+    # Run auto steps only — approve steps always wait for human
+    pairs_to_run = auto_steps
     if not pairs_to_run:
         return
 

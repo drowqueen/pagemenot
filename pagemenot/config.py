@@ -91,7 +91,6 @@ class Settings(BaseSettings):
     )
     pagemenot_exec_enabled: bool = True  # master switch for autonomous execution
     pagemenot_exec_dry_run: bool = True  # true = simulate; false = real execution
-    pagemenot_approval_gate: bool = True  # require human approval for [NEEDS APPROVAL] steps
     pagemenot_oncall_channel: Optional[str] = None  # channel to ping on critical escalations
     pagemenot_autoapprove_delay: int = 900  # seconds before auto-executing [AUTO-SAFE] steps
     pagemenot_state_bucket: Optional[str] = (

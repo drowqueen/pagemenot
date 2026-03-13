@@ -1126,11 +1126,7 @@ async def _auto_triage(source: str, payload: dict):
 
         # Approval buttons — after Jira/PD so urls are stored in entry
         _approval_sev_min = _SEV.get(settings.pagemenot_approval_min_severity, 2)
-        if (
-            result.pending_exec_steps
-            and settings.pagemenot_approval_gate
-            and sev_rank >= _approval_sev_min
-        ):
+        if result.pending_exec_steps and sev_rank >= _approval_sev_min:
             from pagemenot.slack_bot import _approval_store
             import uuid as _uuid
 
@@ -1188,7 +1184,6 @@ async def _auto_triage(source: str, payload: dict):
         if (
             not result.pending_exec_steps
             and result.needs_approval
-            and settings.pagemenot_approval_gate
             and sev_rank >= _approval_sev_min
         ):
             from pagemenot.slack_bot import _approval_store
@@ -1240,7 +1235,6 @@ async def _auto_triage(source: str, payload: dict):
         # Always index triage result for RAG — unless pending human approval (written on approve)
         _needs_human = bool(
             result.pending_exec_steps
-            and settings.pagemenot_approval_gate
             and sev_rank >= _SEV.get(settings.pagemenot_approval_min_severity, 2)
         )
         if not _needs_human:
