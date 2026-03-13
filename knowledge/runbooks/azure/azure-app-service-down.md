@@ -19,7 +19,7 @@ Check App Service state:
 
 Check recent application logs:
 
-<!-- exec: az webapp log tail --resource-group {{ resource_group }} --name {{ service }} --provider application -->
+<!-- exec: az webapp log show --resource-group {{ resource_group }} --name {{ service }} --provider application --num-lines 20 2>&1 || echo "no logs available" -->
 
 ## Resolution
 
