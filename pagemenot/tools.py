@@ -902,12 +902,17 @@ def exec_shell(command: str) -> str:
     _exec_enabled()
     if settings.pagemenot_exec_dry_run:
         return f"[DRY RUN] would execute: {command}"
+    timeout = (
+        settings.pagemenot_az_timeout
+        if command.lstrip().startswith("az ")
+        else settings.pagemenot_subprocess_timeout
+    )
     result = subprocess.run(
         command,
         shell=True,
         capture_output=True,
         text=True,
-        timeout=settings.pagemenot_subprocess_timeout,
+        timeout=timeout,
     )
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "no output").strip()

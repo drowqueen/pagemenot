@@ -1102,6 +1102,12 @@ async def _auto_triage(source: str, payload: dict):
                 _page_pagerduty(result) if sev_rank >= pd_min else asyncio.sleep(0),
             ]
             jira_url, pd_url = await asyncio.gather(*tasks, return_exceptions=True)
+            if isinstance(jira_url, Exception):
+                logger.warning("Jira ticket creation failed: %s", jira_url)
+                jira_url = None
+            if isinstance(pd_url, Exception):
+                logger.warning("PagerDuty incident creation failed: %s", pd_url)
+                pd_url = None
             if isinstance(jira_url, str):
                 await client.chat_postMessage(
                     channel=channel,

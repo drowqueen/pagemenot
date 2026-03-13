@@ -19,7 +19,7 @@ Check VM power state:
 
 Check recent VM activity log:
 
-<!-- exec: az monitor activity-log list --resource-group {{ resource_group }} --resource-type Microsoft.Compute/virtualMachines --max-events 5 --query "[].{time:eventTimestamp, op:operationName.value, status:status.value}" -o table -->
+<!-- exec: az monitor activity-log list --resource-group {{ resource_group }} --offset 1h --query "[].{time:eventTimestamp, op:operationName.value, status:status.value}" -o table -->
 
 ## Resolution
 
