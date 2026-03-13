@@ -902,8 +902,11 @@ def exec_shell(command: str) -> str:
     _exec_enabled()
     if settings.pagemenot_exec_dry_run:
         return f"[DRY RUN] would execute: {command}"
+    _az_read = re.search(r"\baz\s+\S+\s+show\b|\baz\s+\S+\s+list\b", command)
     timeout = (
-        settings.pagemenot_az_timeout
+        settings.pagemenot_az_read_timeout
+        if _az_read
+        else settings.pagemenot_az_timeout
         if command.lstrip().startswith("az ")
         else settings.pagemenot_subprocess_timeout
     )

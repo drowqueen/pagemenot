@@ -140,6 +140,7 @@ class Settings(BaseSettings):
     pagemenot_http_timeout: int = 10  # seconds for all httpx calls
     pagemenot_subprocess_timeout: int = 30  # seconds for kubectl/aws/shell exec
     pagemenot_az_timeout: int = 120  # seconds for az vm run-command (slow, provisions extension)
+    pagemenot_az_read_timeout: int = 30  # seconds for read-only az show/list commands
     pagemenot_slack_chunk_size: int = 2900  # chars per Slack message block
     pagemenot_slack_max_chunks: int = 3  # max blocks posted per triage result
     pagemenot_approval_ttl: int = 3600  # seconds before an approval entry expires

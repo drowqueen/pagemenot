@@ -259,6 +259,7 @@ class TriageResult:
     cloud_provider: list[str] = field(
         default_factory=lambda: ["generic"]
     )  # list of providers: "aws", "gcp", "k8s", "hetzner", "onprem", "azure", "generic"
+    _op: str = ""  # Azure alertContext operationName — enriches runbook RAG query
 
 
 _CP_NORM: dict[str, str] = {
@@ -454,10 +455,20 @@ def _parse_alert(source: str, payload: dict) -> dict:
             if raw_target
             else (essentials.get("configurationItems", ["unknown"])[0])
         )
+        _op = (
+            payload.get("data", {})
+            .get("alertContext", {})
+            .get("properties", {})
+            .get("operationName", "")
+            .lower()
+        )
+        _sev = _az_sev.get(essentials.get("severity", "Sev2"), "medium")
+        if any(x in _op for x in ("deallocate", "stop", "delete")):
+            _sev = "critical"
         return {
             "title": essentials.get("alertRule", "Unknown Azure Alert"),
             "service": service,
-            "severity": _az_sev.get(essentials.get("severity", "Sev2"), "medium"),
+            "severity": _sev,
             "description": essentials.get("description", ""),
             "external_id": essentials.get("alertId", ""),
             "cloud_provider": ["azure"],
@@ -601,6 +612,7 @@ def _parse_crew_output(raw: str, parsed_alert: dict) -> TriageResult:
         service=parsed_alert["service"],
         severity=parsed_alert["severity"],
         raw_output=raw,
+        _op=parsed_alert.get("_op", ""),
     )
 
     lower = raw.lower()
@@ -655,10 +667,13 @@ async def _try_runbook_exec(result: TriageResult):
 
     # Only use tagged steps from verified runbook files.
     # LLM-generated text is NEVER passed to dispatch_exec_step — prompt injection risk.
-    # Query with alert title + root cause — crew diagnosis improves runbook matching
+    # Query with alert title + root cause + operationName for better runbook disambiguation
     query = result.alert_title
     if result.root_cause and result.root_cause != "See detailed analysis below.":
         query = f"{result.alert_title}. {result.root_cause}"
+    _op = getattr(result, "_op", "") or ""
+    if _op:
+        query = f"{query}. operation: {_op}"
     step_map = get_runbook_exec_steps(
         query, service=result.service, cloud_providers=result.cloud_provider
     )
