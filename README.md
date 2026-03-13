@@ -33,7 +33,7 @@ Self-hosted. No new infrastructure. Connects to your existing monitoring stack.
 | AWS (EC2, RDS, ECS, EKS, CloudWatch) | ✅ Production-ready |
 | On-premises / bare metal (Kubernetes, Prometheus, Alertmanager) | ✅ Production-ready |
 | GCP (GCE, Cloud Run, Cloud SQL, Cloud Monitoring) | ✅ Production-ready |
-| Azure (AKS, VMs, App Service, Azure Monitor) | 🔜 Coming soon |
+| Azure (VMs, App Service, Function Apps, Azure Monitor) | ✅ Production-ready |
 
 AWS and on-prem are tested end-to-end: CloudWatch alarm delivery, EC2 remediation with approval gates, autonomous RDS recovery, CW verify-and-close, and postmortem indexing.
 
@@ -423,7 +423,7 @@ Set vars in `.env` → integration activates. Unset → mock fallback.
 | Execution | Kubernetes (pod) | No config — in-cluster ServiceAccount auto-detected |
 | Execution | Kubernetes (EC2/ECS/bare metal) | `KUBECONFIG_PATH` — path to a kubeconfig file |
 | Ticketing | Jira Service Management | `JIRA_SM_URL` + `JIRA_SM_EMAIL` + `JIRA_SM_API_TOKEN` |
-| Alerts | Azure Monitor | Action Group → Webhook → `/webhooks/generic` — 🔜 coming soon |
+| Alerts | Azure Monitor | Action Group → Webhook → `/webhooks/azure` |
 
 ### `config/services.yaml`
 
@@ -442,7 +442,7 @@ Maps service names to GitHub repos for deploy correlation. Safe to commit — no
 | PagerDuty | `POST /webhooks/pagerduty` | ✓ |
 | AWS CloudWatch | `POST /webhooks/sns` | ✓ (SNS `OK` state) |
 | GCP Cloud Monitoring | `POST /webhooks/generic` | ✓ |
-| Azure Monitor | `POST /webhooks/generic` | — (🔜 coming soon) |
+| Azure Monitor | `POST /webhooks/azure` | ✓ |
 | OpsGenie | `POST /webhooks/opsgenie` | ✓ |
 | Anything else | `POST /webhooks/generic` | — |
 
@@ -528,7 +528,11 @@ Cloud Monitoring Alert Policy → Notification Channel (Webhook) → POST /webho
 
 ### Azure Monitor
 
-> 🔜 **Coming soon** — full Azure support (exec, runbooks, auto-close) is planned. Basic alert ingestion via `/webhooks/generic` works today but autonomous remediation is not yet supported.
+1. In Azure Monitor, create an Action Group with a webhook pointing to `https://YOUR_HOST/webhooks/azure`
+2. Enable **Use common alert schema** on the action
+3. Attach the action group to your alert rules
+4. Set `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_SUBSCRIPTION_ID`, and `AZURE_RESOURCE_GROUP` in `.env`
+5. Use the `azure` or `cloud` image variant so `az` CLI is available for exec steps
 
 ### Single instance, all clouds
 
@@ -732,7 +736,7 @@ Restart → auto-ingested into ChromaDB.
 knowledge/runbooks/
 ├── aws/          ← AWS-specific (EC2, RDS, ECS, CloudWatch)
 ├── gcp/          ← GCP-specific (GCE, Cloud Run, Cloud SQL, GKE)
-├── azure/        ← Azure-specific (coming soon)
+├── azure/        ← Azure-specific (VM, App Service, Function App)
 ├── k8s/          ← provider-agnostic Kubernetes
 └── generic/      ← any stack (high CPU, OOM, latency)
 ```
@@ -977,13 +981,95 @@ aws iam put-role-policy --role-name pagemenot-exec \
 
 The instance profile / task role / IRSA approach is preferred — no static credentials stored anywhere.
 
-### Azure Monitor alerts
-
-> 🔜 **Coming soon.**
-
 ### GCP
 
-> 🔜 **Coming soon.**
+pagemenot authenticates via a GCP service account. Required for `gcloud ...` runbook exec steps.
+
+**Service account permissions needed:**
+
+| Permission | Purpose |
+|------------|---------|
+| `compute.instances.get` / `start` / `stop` | GCE instance ops |
+| `compute.instances.setMetadata` | SSH key injection |
+| `run.services.update` | Cloud Run traffic shifts |
+| `cloudsql.instances.restart` | Cloud SQL restart |
+| `iam.serviceAccounts.actAs` | run-command via compute |
+
+**Wiring:**
+
+| Deployment | How to grant access | `.env` |
+|------------|--------------------|----|
+| GCE VM | Attach service account to instance | `GOOGLE_APPLICATION_CREDENTIALS` not needed — ADC uses instance metadata |
+| GKE | Workload Identity — annotate SA with `iam.gke.io/gcp-service-account` | Not needed |
+| Docker / bare metal | Download SA JSON key, mount into container | `GOOGLE_APPLICATION_CREDENTIALS=/app/sa.json` |
+| Local dev | `gcloud auth application-default login` or SA JSON | `GOOGLE_APPLICATION_CREDENTIALS` path |
+
+```bash
+# Create service account
+gcloud iam service-accounts create pagemenot-exec \
+  --project=YOUR_PROJECT
+
+# Grant required roles
+gcloud projects add-iam-policy-binding YOUR_PROJECT \
+  --member="serviceAccount:pagemenot-exec@YOUR_PROJECT.iam.gserviceaccount.com" \
+  --role="roles/compute.instanceAdmin.v1"
+
+gcloud projects add-iam-policy-binding YOUR_PROJECT \
+  --member="serviceAccount:pagemenot-exec@YOUR_PROJECT.iam.gserviceaccount.com" \
+  --role="roles/run.admin"
+
+gcloud projects add-iam-policy-binding YOUR_PROJECT \
+  --member="serviceAccount:pagemenot-exec@YOUR_PROJECT.iam.gserviceaccount.com" \
+  --role="roles/cloudsql.editor"
+```
+
+### Azure
+
+pagemenot authenticates via a service principal (Entra ID app registration). Required for `az ...` runbook exec steps.
+
+Azure RBAC works differently from AWS IAM roles:
+- No "assume role" step — the service principal authenticates directly
+- Permissions are granted via **role assignments** on a resource group or subscription scope
+- `Contributor` on the resource group is sufficient for all pagemenot exec operations
+
+**Create service principal and grant access:**
+
+```bash
+# Create service principal with Contributor on your resource group
+az ad sp create-for-rbac \
+  --name pagemenot-exec \
+  --role Contributor \
+  --scopes /subscriptions/SUBSCRIPTION_ID/resourceGroups/YOUR_RESOURCE_GROUP \
+  --output json
+# → appId, password, tenant (save these)
+
+# Or scope to subscription if you have multiple resource groups
+az ad sp create-for-rbac \
+  --name pagemenot-exec \
+  --role Contributor \
+  --scopes /subscriptions/SUBSCRIPTION_ID \
+  --output json
+```
+
+**`.env` variables:**
+
+```env
+AZURE_TENANT_ID=<tenant from above>
+AZURE_CLIENT_ID=<appId from above>
+AZURE_CLIENT_SECRET=<password from above>
+AZURE_SUBSCRIPTION_ID=<your subscription ID>
+AZURE_RESOURCE_GROUP=<resource group containing your VMs / App Services>
+```
+
+**Wiring:**
+
+| Deployment | How to grant access |
+|------------|---------------------|
+| Azure VM / AKS | Use [Managed Identity](https://learn.microsoft.com/en-us/azure/active-directory/managed-identities-azure-resources/overview) — assign Contributor role to the VM's identity; no client secret needed |
+| Docker / bare metal (GCP/AWS/on-prem) | Service principal credentials via env vars above |
+| Local dev | `az login` + set `AZURE_SUBSCRIPTION_ID` and `AZURE_RESOURCE_GROUP` |
+
+Managed Identity is preferred when running on Azure — eliminates the client secret entirely.
 
 ---
 

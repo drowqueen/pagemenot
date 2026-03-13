@@ -1073,11 +1073,14 @@ def dispatch_exec_step(step: str, service: str = "") -> str:
             _lambda_version = _resolve_lambda_version(safe_service)
         return _lambda_version
 
+    rg = settings.azure_resource_group or ""
     for _raw, _sub in [
         ("{{ service }}", safe_service),
         ("{{service}}", safe_service),
         ("{{ namespace }}", namespace),
         ("{{namespace}}", namespace),
+        ("{{ resource_group }}", rg),
+        ("{{resource_group}}", rg),
     ]:
         cmd = cmd.replace(_raw, _sub)
 

@@ -130,6 +130,7 @@ class Settings(BaseSettings):
     azure_client_id: Optional[str] = None
     azure_client_secret: Optional[str] = None
     azure_subscription_id: Optional[str] = None
+    azure_resource_group: Optional[str] = None  # resource group for az CLI exec steps
 
     pagemenot_dedup_short_ttl_severities: str = (
         "critical,high"  # severities that use dedup_ttl_short
