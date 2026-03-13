@@ -1,6 +1,7 @@
 """Pagemenot configuration — all from environment variables."""
 
 from pydantic_settings import BaseSettings
+from pydantic import model_validator
 from typing import Optional
 
 
@@ -96,9 +97,7 @@ class Settings(BaseSettings):
     pagemenot_state_bucket: Optional[str] = (
         None  # gs://bucket, s3://bucket, or az://container for state persistence
     )
-    pagemenot_runbook_bucket: str = (
-        ""  # bucket to sync runbooks from at startup: gs://bucket/path, s3://bucket/path, or az://account/container
-    )
+    pagemenot_runbook_bucket: str = ""  # bucket to sync runbooks from at startup: gs://bucket/path, s3://bucket/path, or az://account/container
     pagemenot_dedup_ttl_short: int = 86400  # dedup window for critical/high (seconds) — 24h
     pagemenot_dedup_ttl_long: int = 86400  # dedup window for medium/low (seconds) — 24h
     # Severity thresholds — controls when each action triggers
@@ -160,7 +159,21 @@ class Settings(BaseSettings):
     chroma_incidents_collection: str = "incidents"  # ChromaDB collection name for postmortems
     chroma_runbooks_collection: str = "runbooks"  # ChromaDB collection name for runbooks
 
+    pagemenot_ssl_keyfile: Optional[str] = None
+    pagemenot_ssl_certfile: Optional[str] = None
+    pagemenot_https_port: int = 8443
+
     log_level: str = "INFO"
+
+    @model_validator(mode="after")
+    def validate_ssl_config(self) -> "Settings":
+        keyfile = self.pagemenot_ssl_keyfile
+        certfile = self.pagemenot_ssl_certfile
+        if (keyfile is None) != (certfile is None):
+            raise ValueError(
+                "PAGEMENOT_SSL_KEYFILE and PAGEMENOT_SSL_CERTFILE must be set together"
+            )
+        return self
 
     @property
     def enabled_integrations(self) -> list[str]:

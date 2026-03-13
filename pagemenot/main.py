@@ -1276,4 +1276,12 @@ async def _auto_triage(source: str, payload: dict):
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("pagemenot.main:app", host="0.0.0.0", port=8080, log_level="info")
+    _ssl = settings.pagemenot_ssl_keyfile and settings.pagemenot_ssl_certfile
+    uvicorn.run(
+        "pagemenot.main:app",
+        host="0.0.0.0",
+        port=settings.pagemenot_https_port if _ssl else 8080,
+        log_level="info",
+        ssl_keyfile=settings.pagemenot_ssl_keyfile or None,
+        ssl_certfile=settings.pagemenot_ssl_certfile or None,
+    )
