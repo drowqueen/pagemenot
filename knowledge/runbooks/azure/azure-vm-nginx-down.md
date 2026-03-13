@@ -7,9 +7,8 @@ cloud_provider: azure
 # Azure VM — nginx Down
 
 ## Symptoms
-- Port 80 HTTP probe failing, nginx process crashed or stopped
-- VM is running and reachable but web server is down
-- NOT for deallocated or powered-off VMs — use azure-vm-stopped.md instead
+- Port 80 health probe failing / HTTP availability alert firing
+- VM is running but nginx process stopped
 - Resource ID: microsoft.compute/virtualmachines
 
 ## Diagnosis
