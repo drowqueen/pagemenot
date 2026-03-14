@@ -455,13 +455,12 @@ def _parse_alert(source: str, payload: dict) -> dict:
             if raw_target
             else (essentials.get("configurationItems", ["unknown"])[0])
         )
+        alert_ctx = payload.get("data", {}).get("alertContext", {})
         _op = (
-            payload.get("data", {})
-            .get("alertContext", {})
-            .get("properties", {})
-            .get("operationName", "")
-            .lower()
-        )
+            alert_ctx.get("operationName")
+            or (alert_ctx.get("properties") or {}).get("operationName")
+            or ""
+        ).lower()
         _sev = _az_sev.get(essentials.get("severity", "Sev2"), "medium")
         if any(x in _op for x in ("deallocate", "stop", "delete")):
             _sev = "critical"

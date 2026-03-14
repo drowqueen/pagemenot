@@ -1,6 +1,6 @@
 ---
 service: azure-func
-tags: azure, functions, serverless, availability
+tags: azure, functions, function-app, func, serverless, availability, stopped, unhealthy, restart, functionapp
 cloud_provider: azure
 ---
 
