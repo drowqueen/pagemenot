@@ -126,7 +126,7 @@ def _ingest_directory(
         logger.info(f"No {doc_type}s directory at {directory}. Skipping.")
         return
 
-    md_files = list(directory.glob("**/*.md"))
+    md_files = [f for f in directory.glob("**/*.md") if "_staging" not in f.parts]
     if not md_files:
         logger.info(f"No {doc_type}s found in {directory}.")
         return
