@@ -17,17 +17,17 @@ Covers: Azure Cache for Redis unavailable or connection failures from applicatio
 
 Check Redis instance state and stats:
 
-<!-- exec: az redis show --name {{ service }} --resource-group {{ resource_group }} --query "{provisioningState:provisioningState,hostName:hostName,port:port,sku:sku.name}" -o json -->
+<!-- exec: az redis show --name pagemenot-redis --resource-group pagemenot-rg --query "{provisioningState:provisioningState,hostName:hostName,port:port,sku:sku.name}" -o json -->
 
-<!-- exec: az redis list-keys --name {{ service }} --resource-group {{ resource_group }} --query "primaryKey" -o tsv -->
+<!-- exec: az redis list-keys --name pagemenot-redis --resource-group pagemenot-rg --query "primaryKey" -o tsv -->
 
 ## Resolution
 
 Force reboot the Redis instance (clears stuck connections, applies pending updates):
 
-<!-- exec:approve: az redis force-reboot --name {{ service }} --resource-group {{ resource_group }} --reboot-type AllNodes -->
+<!-- exec:approve: az redis force-reboot --name pagemenot-redis --resource-group pagemenot-rg --reboot-type AllNodes -->
 
 ## Escalation
 1. If reboot doesn't restore connections, check VNet/NSG rules
-2. Check eviction policy: `az redis show --name {{ service }} --resource-group {{ resource_group }} --query redisConfiguration.maxmemory-policy`
+2. Check eviction policy: `az redis show --name pagemenot-redis --resource-group pagemenot-rg --query redisConfiguration.maxmemory-policy`
 3. Escalate to platform team if data loss suspected
