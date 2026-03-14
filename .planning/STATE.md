@@ -3,12 +3,12 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: unknown
-last_updated: "2026-03-11T11:46:15.428Z"
+last_updated: "2026-03-14T19:19:08.969Z"
 progress:
   total_phases: 4
   completed_phases: 2
   total_plans: 12
-  completed_plans: 9
+  completed_plans: 10
 ---
 
 # Pagemenot — Project State
@@ -60,11 +60,17 @@ Phase 4 in progress (04-01, 04-02 complete). Next: 04-03 (Cloud Build trigger to
 - [Phase 04-azure-monitor-support-and-testing]: 04-01: test_webhooks.py payloads defined inline — no import coupling with test_triage.py
 - [Phase 04-azure-monitor-support-and-testing]: 04-01: TestDispatchExecAzure RED failure is ValueError (untagged step) — acceptable, not SyntaxError/ImportError
 - [Phase 04-azure-monitor-support-and-testing]: 04-02: _detect_cloud_provider singular alias added to rag.py; TestDispatchExecAzure fixed to use <!-- exec: --> wrapper; cloudbuild --target=cloud ships multi-cloud CLI image
+- [Phase 04-azure-monitor-support-and-testing]: 04-03: Cloud Build runs from local machine; VM pulls from AR (e2-micro OOMs on local build)
 
 ## Session
 
-- Stopped at: Completed 04-02 (Azure production code — 18 azure tests green)
+- Stopped at: 2026-03-14 — Mid-wave-2 testing. Container back up (docker compose up issued, serial port confirmed start at 11:18 UTC). Runbook bugs fixed (cosmos-db filter, func-app tags). Re-fire and verify in next session.
 - Resume file: None
+
+## Known Issues (carried forward)
+- Slack approval buttons from pre-restart triages are stale — approval store wiped on container restart. Re-fire incidents to get fresh buttons.
+- gcloud compute ssh via IAP in screen sessions loses stdout (works in interactive terminal or loop pattern with 2>&1 capture). Workaround: use gcp-wait loop pattern or interactive terminal.
+- azure-function-app-unhealthy.md RAG fix deployed (tags updated, SCP'd to VM). Re-ingest needed: `docker exec pagemenot python3 -c "from pagemenot import rag; rag.ingest_all()"`
 
 ## Accumulated Context
 
