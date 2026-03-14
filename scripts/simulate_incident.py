@@ -12,6 +12,10 @@ Usage:
   python scripts/simulate_incident.py cert-renewal
   python scripts/simulate_incident.py traffic-spike
   python scripts/simulate_incident.py ec2-nginx-down
+  python scripts/simulate_incident.py azure-vm-stopped
+  python scripts/simulate_incident.py azure-vm-nginx-down
+  python scripts/simulate_incident.py azure-app-service-down
+  python scripts/simulate_incident.py azure-function-app-unhealthy
   python scripts/simulate_incident.py --list
   python scripts/simulate_incident.py --random
 """
@@ -46,6 +50,7 @@ _SECRETS = {
     "datadog": os.getenv("WEBHOOK_SECRET_DATADOG", ""),
     "newrelic": os.getenv("WEBHOOK_SECRET_NEWRELIC", ""),
     "generic": os.getenv("WEBHOOK_SECRET_GENERIC", ""),
+    "azure": os.getenv("WEBHOOK_SECRET_AZURE", ""),
 }
 
 _SIG_HEADERS = {
@@ -55,6 +60,7 @@ _SIG_HEADERS = {
     "datadog": ("X-Datadog-Signature", ""),
     "newrelic": ("X-NR-Webhook-Token", ""),
     "generic": ("X-Pagemenot-Signature", "sha256="),
+    "azure": ("X-Pagemenot-Signature", "sha256="),
 }
 
 
@@ -346,6 +352,263 @@ SCENARIOS = {
             "resource_pressure": False,
         },
     },
+    "azure-vm-stopped": {
+        "name": "Azure VM Stopped — Heartbeat Absent, Auto-Start",
+        "_source": "azure",
+        "azure": {
+            "schemaId": "azureMonitorCommonAlertSchema",
+            "data": {
+                "essentials": {
+                    "alertId": "/subscriptions/00000000-0000-0000-0000-000000000001/providers/Microsoft.AlertsManagement/alerts/az-vm-stopped-001",
+                    "alertRule": "pagemenot-test-vm heartbeat absent",
+                    "severity": "Sev1",
+                    "signalType": "Metric",
+                    "monitorCondition": "Fired",
+                    "monitoringService": "Platform",
+                    "alertTargetIDs": [
+                        "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/pagemenot-rg/providers/Microsoft.Compute/virtualMachines/pagemenot-test-vm"
+                    ],
+                    "configurationItems": ["pagemenot-test-vm"],
+                    "description": "VM pagemenot-test-vm heartbeat absent for >5 minutes. Instance appears stopped or deallocated.",
+                },
+                "alertContext": {
+                    "properties": {
+                        "operationName": "Microsoft.Compute/virtualMachines/deallocate/action",
+                        "status": "Succeeded",
+                    }
+                },
+            },
+        },
+        "pagerduty": {
+            "id": "PAZ00001",
+            "title": "pagemenot-test-vm heartbeat absent",
+            "description": "VM heartbeat absent for >5 minutes. Instance deallocated.",
+            "urgency": "high",
+            "service": {"name": "pagemenot-test-vm", "id": "PSVC_AZ01"},
+        },
+    },
+    "azure-app-service-down": {
+        "name": "Azure App Service Down — Availability Alert, Auto-Restart",
+        "_source": "azure",
+        "azure": {
+            "schemaId": "azureMonitorCommonAlertSchema",
+            "data": {
+                "essentials": {
+                    "alertId": "/subscriptions/00000000-0000-0000-0000-000000000001/providers/Microsoft.AlertsManagement/alerts/az-app-svc-001",
+                    "alertRule": "pagemenot-test-app availability < 100%",
+                    "severity": "Sev1",
+                    "signalType": "Metric",
+                    "monitorCondition": "Fired",
+                    "monitoringService": "Platform",
+                    "alertTargetIDs": [
+                        "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/pagemenot-rg/providers/Microsoft.Web/sites/pagemenot-test-app"
+                    ],
+                    "configurationItems": ["pagemenot-test-app"],
+                    "description": "App Service pagemenot-test-app HTTP availability check failing. Restart required.",
+                },
+                "alertContext": {"properties": {}},
+            },
+        },
+        "pagerduty": {
+            "id": "PAZ00002",
+            "title": "pagemenot-test-app availability < 100%",
+            "description": "App Service HTTP availability check failing.",
+            "urgency": "high",
+            "service": {"name": "pagemenot-test-app", "id": "PSVC_AZ02"},
+        },
+    },
+    "azure-function-app-unhealthy": {
+        "name": "Azure Function App Unhealthy — Grafana Alert, Auto-Restart",
+        "_source": "grafana",
+        "grafana_payload": {
+            "receiver": "pagemenot",
+            "status": "firing",
+            "alerts": [
+                {
+                    "status": "firing",
+                    "labels": {
+                        "alertname": "pagemenot-test-func health check failing",
+                        "service": "pagemenot-test-func",
+                        "severity": "critical",
+                        "cloud_provider": "azure",
+                    },
+                    "annotations": {
+                        "summary": "pagemenot-test-func health check failing",
+                        "description": "Azure Function App pagemenot-test-func is unhealthy. HTTP trigger not responding. Restart required.",
+                    },
+                    "fingerprint": "az-func-001",
+                }
+            ],
+            "groupLabels": {"alertname": "pagemenot-test-func health check failing"},
+            "commonLabels": {"service": "pagemenot-test-func", "cloud_provider": "azure"},
+            "commonAnnotations": {},
+            "externalURL": "https://grafana.com",
+            "version": "1",
+            "groupKey": "az-func-001",
+        },
+        "pagerduty": {
+            "id": "PAZ00003",
+            "title": "pagemenot-test-func health check failing",
+            "description": "Azure Function App health check failing.",
+            "urgency": "high",
+            "service": {"name": "pagemenot-test-func", "id": "PSVC_AZ03"},
+        },
+    },
+    "azure-vm-nginx-down": {
+        "name": "Azure VM Nginx Down — HTTP Probe Failing, Auto-Restart",
+        "_source": "azure",
+        "azure": {
+            "schemaId": "azureMonitorCommonAlertSchema",
+            "data": {
+                "essentials": {
+                    "alertId": "/subscriptions/00000000-0000-0000-0000-000000000001/providers/Microsoft.AlertsManagement/alerts/az-vm-nginx-001",
+                    "alertRule": "pagemenot-test-vm HTTP probe failing",
+                    "severity": "Sev1",
+                    "signalType": "Metric",
+                    "monitorCondition": "Fired",
+                    "monitoringService": "Platform",
+                    "alertTargetIDs": [
+                        "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/pagemenot-rg/providers/Microsoft.Compute/virtualMachines/pagemenot-test-vm"
+                    ],
+                    "configurationItems": ["pagemenot-test-vm"],
+                    "description": "HTTP probe to pagemenot-test-vm port 80 returning connection refused. Nginx process appears to have crashed.",
+                },
+                "alertContext": {
+                    "properties": {
+                        "operationName": "Microsoft.Compute/virtualMachines/runCommand/action",
+                        "status": "Failed",
+                    }
+                },
+            },
+        },
+        "pagerduty": {
+            "id": "PAZ00004",
+            "title": "pagemenot-test-vm HTTP probe failing — nginx down",
+            "description": "HTTP probe to pagemenot-test-vm port 80 returning connection refused. Nginx process crashed.",
+            "urgency": "high",
+            "service": {"name": "pagemenot-test-vm", "id": "PSVC_AZ04"},
+        },
+    },
+    "azure-cosmos-db-throttled": {
+        "name": "Azure Cosmos DB Throttled — 429 RU Exhausted",
+        "_source": "azure",
+        "azure": {
+            "schemaId": "azureMonitorCommonAlertSchema",
+            "data": {
+                "essentials": {
+                    "alertId": "/subscriptions/00000000-0000-0000-0000-000000000001/providers/Microsoft.AlertsManagement/alerts/az-cosmos-001",
+                    "alertRule": "pagemenot-cosmos RU consumption 100%",
+                    "severity": "Sev1",
+                    "signalType": "Metric",
+                    "monitorCondition": "Fired",
+                    "monitoringService": "Platform",
+                    "alertTargetIDs": [
+                        "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/pagemenot-rg/providers/Microsoft.DocumentDB/databaseAccounts/pagemenot-cosmos"
+                    ],
+                    "configurationItems": ["pagemenot-cosmos"],
+                    "description": "Cosmos DB pagemenot-cosmos NormalizedRUConsumption at 100% for 5 minutes. Requests returning 429 TooManyRequests.",
+                },
+                "alertContext": {"properties": {}},
+            },
+        },
+        "pagerduty": {
+            "id": "PAZ00005",
+            "title": "pagemenot-cosmos RU exhausted — 429 throttling",
+            "description": "Cosmos DB NormalizedRUConsumption at 100%. Application requests failing with 429.",
+            "urgency": "high",
+            "service": {"name": "pagemenot-cosmos", "id": "PSVC_AZ05"},
+        },
+    },
+    "azure-sql-paused": {
+        "name": "Azure SQL Database Paused — Serverless Auto-Pause",
+        "_source": "azure",
+        "azure": {
+            "schemaId": "azureMonitorCommonAlertSchema",
+            "data": {
+                "essentials": {
+                    "alertId": "/subscriptions/00000000-0000-0000-0000-000000000001/providers/Microsoft.AlertsManagement/alerts/az-sql-001",
+                    "alertRule": "pagemenot-db connection failures",
+                    "severity": "Sev2",
+                    "signalType": "Metric",
+                    "monitorCondition": "Fired",
+                    "monitoringService": "Platform",
+                    "alertTargetIDs": [
+                        "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/pagemenot-rg/providers/Microsoft.Sql/servers/pagemenot-sql-srv/databases/pagemenot-db"
+                    ],
+                    "configurationItems": ["pagemenot-db"],
+                    "description": "Azure SQL Database pagemenot-db is paused due to serverless auto-pause. Application connections failing.",
+                },
+                "alertContext": {"properties": {}},
+            },
+        },
+        "pagerduty": {
+            "id": "PAZ00006",
+            "title": "pagemenot-db paused — serverless auto-pause triggered",
+            "description": "Azure SQL Serverless DB auto-paused. Application connections returning database unavailable errors.",
+            "urgency": "high",
+            "service": {"name": "pagemenot-db", "id": "PSVC_AZ06"},
+        },
+    },
+    "azure-postgres-down": {
+        "name": "Azure PostgreSQL Flexible Server Down",
+        "_source": "azure",
+        "azure": {
+            "schemaId": "azureMonitorCommonAlertSchema",
+            "data": {
+                "essentials": {
+                    "alertId": "/subscriptions/00000000-0000-0000-0000-000000000001/providers/Microsoft.AlertsManagement/alerts/az-postgres-001",
+                    "alertRule": "pagemenot-postgres is_db_alive = 0",
+                    "severity": "Sev1",
+                    "signalType": "Metric",
+                    "monitorCondition": "Fired",
+                    "monitoringService": "Platform",
+                    "alertTargetIDs": [
+                        "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/pagemenot-rg/providers/Microsoft.DBforPostgreSQL/flexibleServers/pagemenot-postgres"
+                    ],
+                    "configurationItems": ["pagemenot-postgres"],
+                    "description": "PostgreSQL Flexible Server pagemenot-postgres is unavailable. is_db_alive metric = 0.",
+                },
+                "alertContext": {"properties": {}},
+            },
+        },
+        "pagerduty": {
+            "id": "PAZ00007",
+            "title": "pagemenot-postgres down — is_db_alive = 0",
+            "description": "PostgreSQL Flexible Server unavailable. Active connections dropped to 0.",
+            "urgency": "high",
+            "service": {"name": "pagemenot-postgres", "id": "PSVC_AZ07"},
+        },
+    },
+    "azure-redis-down": {
+        "name": "Azure Redis Cache — Connection Failures",
+        "_source": "azure",
+        "azure": {
+            "schemaId": "azureMonitorCommonAlertSchema",
+            "data": {
+                "essentials": {
+                    "alertId": "/subscriptions/00000000-0000-0000-0000-000000000001/providers/Microsoft.AlertsManagement/alerts/az-redis-001",
+                    "alertRule": "pagemenot-redis connectedclients = 0",
+                    "severity": "Sev1",
+                    "signalType": "Metric",
+                    "monitorCondition": "Fired",
+                    "monitoringService": "Platform",
+                    "alertTargetIDs": [
+                        "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/pagemenot-rg/providers/Microsoft.Cache/Redis/pagemenot-redis"
+                    ],
+                    "configurationItems": ["pagemenot-redis"],
+                    "description": "Azure Redis Cache pagemenot-redis showing 0 connected clients. Cache unavailable.",
+                },
+                "alertContext": {"properties": {}},
+            },
+        },
+        "pagerduty": {
+            "id": "PAZ00008",
+            "title": "pagemenot-redis connection failures — cache unavailable",
+            "description": "Redis Cache connectedclients dropped to 0. Application cache layer failing.",
+            "urgency": "high",
+            "service": {"name": "pagemenot-redis", "id": "PSVC_AZ08"},
+        },
+    },
     "ec2-nginx-down": {
         "name": "EC2 Nginx Service Down — Requires Approval to Restart",
         "pagerduty": {
@@ -406,7 +669,9 @@ def send_alert(scenario_name: str):
         print(f"Available: {', '.join(SCENARIOS.keys())}")
         sys.exit(1)
 
-    source = sys.argv[3] if len(sys.argv) > 3 and sys.argv[2] == "--source" else "pagerduty"
+    # Azure/Grafana scenarios define _source to override the default pagerduty source
+    default_source = scenario.get("_source", "pagerduty")
+    source = sys.argv[3] if len(sys.argv) > 3 and sys.argv[2] == "--source" else default_source
     pd = scenario["pagerduty"]
     service = pd["service"]["name"]
 
@@ -478,6 +743,12 @@ def send_alert(scenario_name: str):
         ),
     }
 
+    # Native-format sources override PD-derived ones for azure/grafana scenarios
+    if "azure" in scenario:
+        payloads["azure"] = ("/webhooks/azure", scenario["azure"])
+    if "grafana_payload" in scenario:
+        payloads["grafana"] = ("/webhooks/grafana", scenario["grafana_payload"])
+
     if source not in payloads:
         print(f"Unknown source: {source}. Use: {', '.join(payloads)}")
         sys.exit(1)
@@ -493,7 +764,7 @@ def send_alert(scenario_name: str):
             f"{PAGEMENOT_URL}{path}",
             content=body,
             headers={"Content-Type": "application/json", **_sign(source, body)},
-            timeout=5.0,
+            timeout=30.0,
         )
         print(f"\nAccepted ({resp.status_code}) — check Slack")
     except httpx.ConnectError:

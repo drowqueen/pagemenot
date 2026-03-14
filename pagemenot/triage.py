@@ -707,18 +707,24 @@ async def _try_runbook_exec(result: TriageResult):
     for tag, filename in pairs_to_run:
         try:
             output = await loop.run_in_executor(_executor, dispatch_exec_step, tag, result.service)
-            display_tag = tag.replace("{{ service }}", result.service or "UNKNOWN_SERVICE")
+            display_tag = tag.replace("{{ service }}", result.service or "UNKNOWN_SERVICE").replace(
+                "{{ resource_group }}", settings.azure_resource_group or "pagemenot-rg"
+            )
             result.execution_log.append(
                 f"📖 *{filename}*\n✅ `{display_tag[:120]}`\n```{output[:300]}```"
             )
             logger.info(f"Exec step succeeded [{filename}]: {tag[:80]}")
             steps_executed += 1
         except ExecSkipped as e:
-            display_tag = tag.replace("{{ service }}", result.service or "UNKNOWN_SERVICE")
+            display_tag = tag.replace("{{ service }}", result.service or "UNKNOWN_SERVICE").replace(
+                "{{ resource_group }}", settings.azure_resource_group or "pagemenot-rg"
+            )
             result.execution_log.append(f"📖 *{filename}*\n⏭️ `{display_tag[:120]}`\n```{e}```")
             logger.info(f"Exec step skipped [{filename}]: {tag[:80]} — {e}")
         except Exception as e:
-            display_tag = tag.replace("{{ service }}", result.service or "UNKNOWN_SERVICE")
+            display_tag = tag.replace("{{ service }}", result.service or "UNKNOWN_SERVICE").replace(
+                "{{ resource_group }}", settings.azure_resource_group or "pagemenot-rg"
+            )
             result.execution_log.append(f"📖 *{filename}*\n❌ `{display_tag[:120]}`\n```{e}```")
             logger.warning(f"Exec step failed [{filename}]: {tag[:80]} — {e}")
             all_ok = False

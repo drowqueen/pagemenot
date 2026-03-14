@@ -7,8 +7,9 @@ cloud_provider: azure
 # Azure Function App Unhealthy
 
 ## Symptoms
-- Function executions failing or timing out
-- Grafana / Azure Monitor availability alert firing
+- Function executions failing or timing out; health check failing
+- Alert: "health check failing" or function app unhealthy
+- HTTP trigger not responding; function app health probe failing
 - Resource ID: microsoft.web/sites (kind: functionapp)
 
 ## Diagnosis

@@ -7,8 +7,9 @@ cloud_provider: azure
 # Azure App Service Down
 
 ## Symptoms
-- HTTP health check returning 5xx
-- Azure Monitor availability alert firing
+- HTTP health check returning 5xx or availability < 100%
+- Azure Monitor availability alert: "availability < 100%" or App Service down
+- App Service HTTP availability check failing
 - Resource ID: microsoft.web/sites
 
 ## Diagnosis
