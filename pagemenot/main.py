@@ -1211,16 +1211,21 @@ async def _auto_triage(source: str, payload: dict):
                     "region": result.region,
                 },
             )
-            manual_text = "\n".join(f"• {s[:120]}" for s in result.needs_approval[:5])
+            from pagemenot.rag import POSTMORTEMS_DIR
+
             await client.chat_postMessage(
                 channel=channel,
-                text=f"⚠️ Manual steps required: {result.alert_title}",
+                text=f"⚠️ No runbook matched — needs manual resolution: {result.alert_title}",
                 blocks=[
                     {
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": f"*⚠️ No runbook matched.* Suggested manual steps:\n{manual_text}",
+                            "text": (
+                                f"*⚠️ No runbook matched — needs manual resolution.*\n\n"
+                                f"After fixing, add a postmortem to `{POSTMORTEMS_DIR}` "
+                                f"so pagemenot auto-resolves this next time."
+                            ),
                         },
                     },
                     {
