@@ -13,6 +13,10 @@ Covers: Azure SQL Serverless DB auto-paused after inactivity; connections failin
 - Azure Monitor alert: connection_failed > 0 after period of inactivity
 - Serverless DB auto-paused (expected behaviour but triggers app alerts)
 
+## Setup
+Set `AZURE_SQL_SERVER` in `.env` to your SQL server name (e.g. `my-sql-server`).
+For multi-server environments, use per-service config or extend the webhook parser to extract the server name from the alert resource ID.
+
 ## Diagnosis
 
 <!-- exec: az sql db show --resource-group ${AZURE_RESOURCE_GROUP} --server ${AZURE_SQL_SERVER} --name {{ service }} --query "{status:status,currentSku:currentSku.name,pausedDate:pausedDate}" -o json -->
