@@ -780,10 +780,24 @@ cloud_provider: gcp   # aws | gcp | azure | k8s | generic
 
 **Template variables:**
 
-| Variable | Value |
-|----------|-------|
-| `{{ service }}` | Service name extracted from the alert |
-| `{{ namespace }}` | `PAGEMENOT_EXEC_NAMESPACE` (default: `production`) |
+All variables are extracted from the alert payload at runtime — no hardcoded resource names in runbooks.
+
+| Variable | Source |
+|----------|--------|
+| `{{ resource_name }}` | Primary resource (last path segment / service name) |
+| `{{ service }}` | Alias for `{{ resource_name }}` |
+| `{{ resource_group }}` | Azure: from `alertTargetIDs` resource path |
+| `{{ subscription_id }}` | Azure: from `alertTargetIDs` resource path |
+| `{{ region }}` | Azure: `targetResourceRegion`; GCP: `resource.labels.location`; AWS: SNS region |
+| `{{ zone }}` | GCP: `resource.labels.zone` |
+| `{{ project_id }}` | GCP: `resource.labels.project_id` |
+| `{{ account_id }}` | AWS: SNS account ID |
+| `{{ servers }}` | Azure SQL: server name from resource path |
+| `{{ databases }}` | Azure SQL: database name from resource path |
+| `{{ flexibleservers }}` | Azure PostgreSQL Flexible Server name |
+| `{{ sites }}` | Azure App Service / Function App name |
+| `{{ namespace }}` | k8s namespace — from `PAGEMENOT_EXEC_NAMESPACE` config |
+| Any alert label | Grafana, AlertManager, Datadog, NR labels flow through as-is |
 
 The `service:` frontmatter field narrows RAG retrieval — runbooks with a matching service are ranked higher. Omit it (or use `service: general`) to match any alert.
 
@@ -802,12 +816,12 @@ cloud_provider: azure
 
 ## Diagnosis
 
-<!-- exec: az webapp show --resource-group pagemenot-rg --name {{ service }} --query "state" -o tsv -->
-<!-- exec: az webapp log show --resource-group pagemenot-rg --name {{ service }} 2>&1 || echo "no logs available" -->
+<!-- exec: az webapp show --resource-group {{ resource_group }} --name {{ service }} --query "state" -o tsv -->
+<!-- exec: az webapp log show --resource-group {{ resource_group }} --name {{ service }} 2>&1 || echo "no logs available" -->
 
 ## Resolution
 
-<!-- exec: az webapp restart --resource-group pagemenot-rg --name {{ service }} -->
+<!-- exec: az webapp restart --resource-group {{ resource_group }} --name {{ service }} -->
 ```
 
 Approval-gated (PostgreSQL Flexible Server start — handles Stopping→Stopped transition):
@@ -823,13 +837,13 @@ cloud_provider: azure
 
 ## Diagnosis
 
-<!-- exec: az postgres flexible-server show --name {{ service }} --resource-group pagemenot-rg --query "{state:state,fqdn:fullyQualifiedDomainName}" -o json -->
+<!-- exec: az postgres flexible-server show --name {{ service }} --resource-group {{ resource_group }} --query "{state:state,fqdn:fullyQualifiedDomainName}" -o json -->
 
 ## Resolution
 
-<!-- exec: STATE=$(az postgres flexible-server show --name {{ service }} --resource-group pagemenot-rg --query "state" -o tsv); if [ "$STATE" = "Stopping" ]; then az postgres flexible-server wait --name {{ service }} --resource-group pagemenot-rg --custom "state=='Stopped'" --interval 15 --timeout 120; STATE="Stopped"; fi; if [ "$STATE" = "Stopped" ]; then az postgres flexible-server start --name {{ service }} --resource-group pagemenot-rg --no-wait; else echo "Server already in $STATE state — no start needed"; fi -->
-<!-- exec: az postgres flexible-server wait --name {{ service }} --resource-group pagemenot-rg --custom "state=='Ready'" --interval 15 --timeout 600 -->
-<!-- exec: az postgres flexible-server show --name {{ service }} --resource-group pagemenot-rg --query "state" -o tsv -->
+<!-- exec: STATE=$(az postgres flexible-server show --name {{ service }} --resource-group {{ resource_group }} --query "state" -o tsv); if [ "$STATE" = "Stopping" ]; then az postgres flexible-server wait --name {{ service }} --resource-group {{ resource_group }} --custom "state=='Stopped'" --interval 15 --timeout 120; STATE="Stopped"; fi; if [ "$STATE" = "Stopped" ]; then az postgres flexible-server start --name {{ service }} --resource-group {{ resource_group }} --no-wait; else echo "Server already in $STATE state — no start needed"; fi -->
+<!-- exec: az postgres flexible-server wait --name {{ service }} --resource-group {{ resource_group }} --custom "state=='Ready'" --interval 15 --timeout 600 -->
+<!-- exec: az postgres flexible-server show --name {{ service }} --resource-group {{ resource_group }} --query "state" -o tsv -->
 ```
 
 Auto-resolve (Azure SQL Serverless resume):
@@ -845,12 +859,12 @@ cloud_provider: azure
 
 ## Diagnosis
 
-<!-- exec: az sql db show --resource-group pagemenot-rg --server pagemenot-sql-srv --name {{ service }} --query "{status:status,pausedDate:pausedDate}" -o json -->
+<!-- exec: az sql db show --resource-group {{ resource_group }} --server {{ servers }} --name {{ service }} --query "{status:status,pausedDate:pausedDate}" -o json -->
 
 ## Resolution
 
-<!-- exec: az rest --method post --url "https://management.azure.com/subscriptions/$(az account show --query id -o tsv)/resourceGroups/pagemenot-rg/providers/Microsoft.Sql/servers/pagemenot-sql-srv/databases/{{ service }}/resume?api-version=2021-08-01-preview" -->
-<!-- exec: az sql db show --resource-group pagemenot-rg --server pagemenot-sql-srv --name {{ service }} --query "status" -o tsv -->
+<!-- exec: az rest --method post --url "https://management.azure.com/subscriptions/$(az account show --query id -o tsv)/resourceGroups/{{ resource_group }}/providers/Microsoft.Sql/servers/{{ servers }}/databases/{{ service }}/resume?api-version=2021-08-01-preview" -->
+<!-- exec: az sql db show --resource-group {{ resource_group }} --server {{ servers }} --name {{ service }} --query "status" -o tsv -->
 ```
 
 **AWS runbook examples:**
