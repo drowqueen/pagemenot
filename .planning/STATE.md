@@ -2,8 +2,8 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: unknown
-last_updated: "2026-03-14T19:19:08.969Z"
+status: in_progress
+last_updated: "2026-03-15T08:15:00.000Z"
 progress:
   total_phases: 4
   completed_phases: 2
@@ -19,7 +19,7 @@ See: .planning/PROJECT.md (updated 2026-03-08)
 
 **Core value:** Alert fires -> pagemenot resolves it autonomously or hands off with full context already done.
 **Current milestone:** GCP Support
-**Current focus:** Phase 3 — Plan 03-01
+**Current focus:** Phase 4 — Plan 04-04 (Azure E2E approval flow tests)
 
 ## Milestone 1: GCP Support
 
@@ -28,10 +28,26 @@ See: .planning/PROJECT.md (updated 2026-03-08)
 | 1 | RAG Cloud Provider Filtering | Complete (2026-03-08) | 1/1 |
 | 2 | GCP Alert Ingestion + Exec | Complete (2026-03-11) | 4/4 |
 | 3 | End-to-End Tests + Ship | Pending | 2 |
+| 4 | Azure Monitor Support + Testing | In Progress | 3/5 |
 
 ## Active Work
 
-Phase 4 in progress (04-01, 04-02 complete). Next: 04-03 (Cloud Build trigger to ship --target=cloud image).
+Phase 4 in progress. 04-01, 04-02, 04-03 complete. Next: 04-04 (Azure E2E tests — approval flow).
+
+**Immediate next steps (2026-03-15 session):**
+1. Pull new image on pagemenot VM (Cloud Build e9a354f0 succeeded — image at AR latest)
+   ```
+   gcloud compute ssh pagemenot --zone=us-central1-a --project=zipintel --command="cd /home/leona/pagemenot && gcloud auth configure-docker us-central1-docker.pkg.dev -q && docker pull us-central1-docker.pkg.dev/zipintel/pagemenot/pagemenot:latest && docker compose up -d"
+   ```
+2. Run RAG sanity check (n_results=1 — must be top match):
+   ```
+   docker exec pagemenot python3 -c "from pagemenot.tools import get_runbook_exec_steps; ..."
+   ```
+3. Fire 3 approval-gated incidents in parallel:
+   - `python scripts/simulate_incident.py azure-postgres-down` → exec:approve: az postgres flexible-server start
+   - `python scripts/simulate_incident.py azure-redis-down` → exec:approve: az redis force-reboot --reboot-type AllNodes
+   - `python scripts/simulate_incident.py azure-cosmos-db-throttled` → exec:approve: az cosmosdb sql database throughput update
+4. Approve/reject each in Slack, verify threads + postmortems in GCS
 
 ## Decisions
 
@@ -64,13 +80,39 @@ Phase 4 in progress (04-01, 04-02 complete). Next: 04-03 (Cloud Build trigger to
 
 ## Session
 
-- Stopped at: 2026-03-14 — Mid-wave-2 testing. Container back up (docker compose up issued, serial port confirmed start at 11:18 UTC). Runbook bugs fixed (cosmos-db filter, func-app tags). Re-fire and verify in next session.
+- Stopped at: 2026-03-15 (afternoon) — Socket Mode fix deployed (ca50a541). Cosmos ✅ resolved via approval. Postgres approval still failing — no handle_approve log entry, PMN-256 escalation created at 15:18:53. Root cause unknown.
 - Resume file: None
 
 ## Known Issues (carried forward)
-- Slack approval buttons from pre-restart triages are stale — approval store wiped on container restart. Re-fire incidents to get fresh buttons.
-- gcloud compute ssh via IAP in screen sessions loses stdout (works in interactive terminal or loop pattern with 2>&1 capture). Workaround: use gcp-wait loop pattern or interactive terminal.
-- azure-function-app-unhealthy.md RAG fix deployed (tags updated, SCP'd to VM). Re-ingest needed: `docker exec pagemenot python3 -c "from pagemenot import rag; rag.ingest_all()"`
+- **Postgres approval silent failure** — Socket Mode confirmed working (cosmos resolved same session). Postgres approval click not appearing in logs at all. PMN-256 / Q27IO4K4NIXY4X created post-approval — possibly escalation from failed exec or race on approval store pop with concurrent cosmos approval.
+- **Dedup clears via docker exec are no-ops** — only fix: wipe GCS `gs://pagemenot-state/state/dedup.json` + `docker compose restart`.
+- VM pagemenot repo path: `/home/grond/pagemenot` (not /home/leona).
+- **Grafana Cloud free trial ended** — do not use. Remove from mock list.
+
+## Immediate Next Steps (resume here)
+1. **Diagnose postgres approval silent failure**
+   - Check PMN-256 in PD for description — confirms if it's escalation from exec fail
+   - Add `logger.info("handle_approve called: %s", approval_id)` as first line of `handle_approve` (before `await ack()`) to confirm receipt
+   - Hypothesis A: race on concurrent approval store pop (cosmos + postgres fired simultaneously) — test by firing postgres alone
+   - Hypothesis B: `az postgres flexible-server start` exec fails → escalation path → PMN-256
+   - Test: fire `azure-postgres-down` alone, approve, watch logs
+2. Close open PD/Jira (PMN-252, PMN-253, PMN-254, PMN-255 already resolved, PMN-256 open)
+3. Confirm postgres server state (`az postgres flexible-server show --name pagemenot-postgres --resource-group pagemenot-rg --query state`)
+
+## Fixes Deployed This Session
+- **Socket Mode fix** — `ingest_all()` now runs in `run_in_executor` so it doesn't block event loop; task stored in `app.state.slack_task` with retry loop. Image ca50a541.
+- **Runbook templating** — all Azure runbooks use `{{ service }}` placeholder; `get_runbook_exec_steps()` substitutes service name from alert at runtime.
+- **CHANGELOG.md** updated with runbook templating + Azure Monitor + GCP label map entries.
+
+## Tests Passed (04-04 — this session round 2)
+- ✅ Socket Mode reconnects after container restart (session s_8748282455300 at 13:44)
+- ✅ Cosmos DB approval flow — postmortem written, PD+Jira resolved (PMN-255)
+- ❌ Postgres approval flow — approval click not logged, PMN-256 created (escalation?)
+
+## Pending (not yet done)
+- GCP resource label map (`_GCP_RESOURCE_SERVICE_LABEL`) in triage.py — coded, NOT built/deployed
+- README runbook authoring docs
+- Runbook comment blocks (reference example at top of each runbook)
 
 ## Accumulated Context
 

@@ -1266,6 +1266,8 @@ def get_runbook_exec_steps(
             content = _matches[0].read_text(encoding="utf-8")
             for match in re.finditer(r"<!--\s*exec(?::approve)?:\s*.+?\s*-->", content):
                 tag = match.group(0)
+                if service:
+                    tag = tag.replace("{{ service }}", service).replace("{service}", service)
                 if re.match(r"<!--\s*exec:approve:", tag):
                     approve_steps.append((tag, filename))
                 else:

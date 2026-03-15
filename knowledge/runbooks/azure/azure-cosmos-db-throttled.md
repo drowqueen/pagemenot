@@ -17,19 +17,19 @@ Covers: Cosmos DB account returning 429 TooManyRequests; provisioned RU/s exhaus
 
 Check current throughput and consumption:
 
-<!-- exec: az cosmosdb show --name pagemenot-cosmos --resource-group pagemenot-rg --query "[documentEndpoint, consistencyPolicy.defaultConsistencyLevel]" -o tsv -->
+<!-- exec: az cosmosdb show --name {{ service }} --resource-group pagemenot-rg --query "[documentEndpoint, consistencyPolicy.defaultConsistencyLevel]" -o tsv -->
 
 Check recent metrics (429 rate):
 
-<!-- exec: az monitor metrics list --resource /subscriptions/$(az account show --query id -o tsv)/resourceGroups/pagemenot-rg/providers/Microsoft.DocumentDB/databaseAccounts/pagemenot-cosmos --metric TotalRequests --filter "StatusCode eq '429'" --interval PT1M --output table -->
+<!-- exec: az monitor metrics list --resource /subscriptions/$(az account show --query id -o tsv)/resourceGroups/pagemenot-rg/providers/Microsoft.DocumentDB/databaseAccounts/{{ service }} --metric TotalRequests --filter "StatusCode eq '429'" --interval PT1M --output table -->
 
 ## Resolution
 
-Scale up throughput on the database (temporary surge capacity):
+Regenerate primary key to force client reconnection and clear stuck throttled sessions:
 
-<!-- exec:approve: az cosmosdb sql database throughput update --account-name pagemenot-cosmos --resource-group pagemenot-rg --name pagemenot-db --throughput 2000 -->
+<!-- exec:approve: az cosmosdb keys regenerate --name {{ service }} --resource-group pagemenot-rg --key-kind primary -->
 
 ## Escalation
-1. If throughput increase doesn't clear 429s within 5 min, check for hot partition key
+1. If 429s persist after key rotation, check for hot partition key
 2. Escalate to app team to review query patterns
-3. Consider enabling autoscale: `az cosmosdb sql database throughput migrate --throughput-type autoscale`
+3. Consider migrating to provisioned throughput account for autoscale support

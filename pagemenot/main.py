@@ -67,12 +67,25 @@ async def lifespan(app: FastAPI):
     """Start Slack bot on startup, clean up on shutdown."""
 
     # Ingest knowledge base (postmortems + runbooks → ChromaDB)
-    ingest_all()
+    # Run in executor — ingest_all() is blocking and would delay Socket Mode handshake
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, ingest_all)
 
     # Boot Slack
     slack_app = create_slack_app()
     handler = AsyncSocketModeHandler(slack_app, settings.slack_app_token)
-    task = asyncio.create_task(handler.start_async())
+
+    async def _run_socket_mode():
+        while True:
+            try:
+                await handler.start_async()
+                logger.warning("Socket Mode handler exited — restarting in 5s")
+            except Exception as e:
+                logger.error("Socket Mode handler crashed: %s", e)
+            await asyncio.sleep(5)
+
+    app.state.slack_handler = handler
+    app.state.slack_task = asyncio.create_task(_run_socket_mode())
 
     # Store for webhook handlers
     app.state.slack_app = slack_app
@@ -223,7 +236,7 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    task.cancel()
+    app.state.slack_task.cancel()
     reindex_task.cancel()
     _executor.shutdown(wait=True)  # drain in-progress triages before exit
 
