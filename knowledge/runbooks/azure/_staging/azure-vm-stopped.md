@@ -1,34 +1,31 @@
 ---
 service: azure-vm
-tags: azure, vm, compute, availability, heartbeat, deallocate, stopped
+tags: azure, vm, compute, availability
 cloud_provider: azure
 ---
 
 # Azure VM Stopped / Unreachable
 
-Covers: VM deallocated, powered off, or heartbeat absent. Not for nginx/web service failures — use azure-vm-nginx-down.md.
-
 ## Symptoms
-- VM stopped, deallocated, or powered off — heartbeat absent, all metrics gone
-- Azure Monitor alert: VmHeartbeat condition absent; activity log operationName `deallocate/action` or `powerOff/action`
-- VM unreachable — SSH refused, no CPU/network metrics, power state = Deallocated or Stopped
-- Fix: `az vm start` to power on the instance
+- VM health check failing
+- Azure Monitor metric absent or CPU/heartbeat alert firing
+- Resource ID: microsoft.compute/virtualmachines
 
 ## Diagnosis
 
 Check VM power state:
 
-<!-- exec: az vm show --resource-group {{ resource_group }} --name {{ service }} --query "powerState" -o tsv -->
+<!-- exec: az vm show --resource-group pagemenot-rg --name {{ service }} --query "powerState" -o tsv -->
 
 Check recent VM activity log:
 
-<!-- exec: az monitor activity-log list --resource-group {{ resource_group }} --offset 1h --query "[].{time:eventTimestamp, op:operationName.value, status:status.value}" -o table -->
+<!-- exec: az monitor activity-log list --resource-group pagemenot-rg --offset 1h --query "[].{time:eventTimestamp, op:operationName.value, status:status.value}" -o table -->
 
 ## Resolution
 
 Start the VM (safe to auto-execute — idempotent):
 
-<!-- exec: az vm start --resource-group {{ resource_group }} --name {{ service }} -->
+<!-- exec: az vm start --resource-group pagemenot-rg --name {{ service }} -->
 
 ## Escalation
 If VM fails to start after 2 minutes:

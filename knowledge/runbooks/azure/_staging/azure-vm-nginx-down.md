@@ -1,30 +1,27 @@
 ---
 service: azure-vm
-tags: azure, vm, nginx, availability, http, port80, web, systemctl
+tags: azure, vm, nginx, availability
 cloud_provider: azure
 ---
 
-# Azure VM — nginx Down (web server crashed, VM running)
-
-Covers: nginx process stopped on a running VM. Not for stopped/deallocated VMs — use azure-vm-stopped.md.
+# Azure VM — nginx Down
 
 ## Symptoms
-- nginx web server crashed or stopped; VM IS powered on and reachable
-- HTTP port 80 probe returning connection refused or 502; `systemctl is-active nginx` = inactive
-- Azure Monitor HTTP availability alert; VM heartbeat IS present, only nginx process down
-- Fix: `az vm run-command invoke` to restart nginx remotely without SSH
+- Port 80 health probe failing / HTTP availability alert firing
+- VM is running but nginx process stopped
+- Resource ID: microsoft.compute/virtualmachines
 
 ## Diagnosis
 
 Check nginx status via run-command (no SSH needed):
 
-<!-- exec: az vm run-command invoke --resource-group {{ resource_group }} --name {{ service }} --command-id RunShellScript --scripts "systemctl is-active nginx || echo nginx_down" --query "value[0].message" -o tsv -->
+<!-- exec: az vm run-command invoke --resource-group pagemenot-rg --name {{ service }} --command-id RunShellScript --scripts "systemctl is-active nginx || echo nginx_down" --query "value[0].message" -o tsv -->
 
 ## Resolution
 
-Restart nginx via run-command (requires approval — service restart on production VM):
+Restart nginx via run-command (safe to auto-execute — stateless):
 
-<!-- exec:approve: az vm run-command invoke --resource-group {{ resource_group }} --name {{ service }} --command-id RunShellScript --scripts "systemctl restart nginx && systemctl is-active nginx" --query "value[0].message" -o tsv -->
+<!-- exec: az vm run-command invoke --resource-group pagemenot-rg --name {{ service }} --command-id RunShellScript --scripts "systemctl restart nginx && systemctl is-active nginx" --query "value[0].message" -o tsv -->
 
 ## Escalation
 If nginx fails to restart:

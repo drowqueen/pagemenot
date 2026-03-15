@@ -16,20 +16,20 @@ cloud_provider: azure
 
 Check App Service state:
 
-<!-- exec: az webapp show --resource-group pagemenot-rg --name {{ service }} --query "state" -o tsv -->
+<!-- exec: az webapp show --resource-group ${AZURE_RESOURCE_GROUP} --name {{ service }} --query "state" -o tsv -->
 
 Check recent application logs:
 
-<!-- exec: az webapp log show --resource-group pagemenot-rg --name {{ service }} 2>&1 || echo "no logs available" -->
+<!-- exec: az webapp log show --resource-group ${AZURE_RESOURCE_GROUP} --name {{ service }} 2>&1 || echo "no logs available" -->
 
 ## Resolution
 
 Restart the App Service (safe to auto-execute — stateless HTTP tier):
 
-<!-- exec: az webapp restart --resource-group pagemenot-rg --name {{ service }} -->
+<!-- exec: az webapp restart --resource-group ${AZURE_RESOURCE_GROUP} --name {{ service }} -->
 
 ## Escalation
 If restart does not restore availability within 5 minutes:
-1. Check deployment slots: `az webapp deployment slot list --resource-group pagemenot-rg --name {{ service }}`
-2. Check for failed deployment: `az webapp deployment list --resource-group pagemenot-rg --name {{ service }} --query "[0]"`
+1. Check deployment slots: `az webapp deployment slot list --resource-group ${AZURE_RESOURCE_GROUP} --name {{ service }}`
+2. Check for failed deployment: `az webapp deployment list --resource-group ${AZURE_RESOURCE_GROUP} --name {{ service }} --query "[0]"`
 3. Escalate to oncall — may require config rollback or slot swap

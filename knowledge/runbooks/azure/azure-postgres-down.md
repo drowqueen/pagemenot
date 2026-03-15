@@ -15,25 +15,17 @@ Covers: PostgreSQL Flexible Server stopped or unavailable; connections refused.
 
 ## Diagnosis
 
-Check server state:
-
-<!-- exec: az postgres flexible-server show --name {{ service }} --resource-group pagemenot-rg --query "{state:state,version:version,fqdn:fullyQualifiedDomainName}" -o json -->
+<!-- exec: az postgres flexible-server show --name {{ service }} --resource-group ${AZURE_RESOURCE_GROUP} --query "{state:state,version:version,fqdn:fullyQualifiedDomainName}" -o json -->
 
 ## Resolution
 
-Start the stopped server (non-blocking — returns immediately, server starts in background):
+<!-- exec: STATE=$(az postgres flexible-server show --name {{ service }} --resource-group ${AZURE_RESOURCE_GROUP} --query "state" -o tsv); if [ "$STATE" = "Stopping" ]; then az postgres flexible-server wait --name {{ service }} --resource-group ${AZURE_RESOURCE_GROUP} --custom "state=='Stopped'" --interval 15 --timeout 120; STATE="Stopped"; fi; if [ "$STATE" = "Stopped" ]; then az postgres flexible-server start --name {{ service }} --resource-group ${AZURE_RESOURCE_GROUP} --no-wait; else echo "Server already in $STATE state — no start needed"; fi -->
 
-<!-- exec: STATE=$(az postgres flexible-server show --name {{ service }} --resource-group pagemenot-rg --query "state" -o tsv); if [ "$STATE" = "Stopping" ]; then az postgres flexible-server wait --name {{ service }} --resource-group pagemenot-rg --custom "state=='Stopped'" --interval 15 --timeout 120; STATE="Stopped"; fi; if [ "$STATE" = "Stopped" ]; then az postgres flexible-server start --name {{ service }} --resource-group pagemenot-rg --no-wait; else echo "Server already in $STATE state — no start needed"; fi -->
+<!-- exec: az postgres flexible-server wait --name {{ service }} --resource-group ${AZURE_RESOURCE_GROUP} --custom "state=='Ready'" --interval 15 --timeout 600 -->
 
-Wait until server reaches Ready state (polls every 15s, up to 10 min):
-
-<!-- exec: az postgres flexible-server wait --name {{ service }} --resource-group pagemenot-rg --custom "state=='Ready'" --interval 15 --timeout 600 -->
-
-Confirm final state:
-
-<!-- exec: az postgres flexible-server show --name {{ service }} --resource-group pagemenot-rg --query "state" -o tsv -->
+<!-- exec: az postgres flexible-server show --name {{ service }} --resource-group ${AZURE_RESOURCE_GROUP} --query "state" -o tsv -->
 
 ## Escalation
-1. If start fails, check quota: `az postgres flexible-server list --resource-group pagemenot-rg`
+1. If start fails, check quota: `az postgres flexible-server list --resource-group ${AZURE_RESOURCE_GROUP}`
 2. Check recent errors in server logs
 3. Escalate to DBA team if data integrity concern
