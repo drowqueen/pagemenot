@@ -17,17 +17,17 @@ Covers: PostgreSQL Flexible Server stopped or unavailable; connections refused.
 
 Check server state:
 
-<!-- exec: az postgres flexible-server show --name pagemenot-postgres --resource-group pagemenot-rg --query "{state:state,version:version,fqdn:fullyQualifiedDomainName}" -o json -->
+<!-- exec: az postgres flexible-server show --name {{ service }} --resource-group pagemenot-rg --query "{state:state,version:version,fqdn:fullyQualifiedDomainName}" -o json -->
 
 ## Resolution
 
-Start the stopped server:
+Start the stopped server (non-blocking — returns immediately, server starts in background):
 
-<!-- exec:approve: az postgres flexible-server start --name pagemenot-postgres --resource-group pagemenot-rg -->
+<!-- exec:approve: az postgres flexible-server start --name {{ service }} --resource-group pagemenot-rg --no-wait -->
 
-Verify server is running:
+Wait until server reaches Ready state (polls every 15s, up to 5 min):
 
-<!-- exec: az postgres flexible-server show --name pagemenot-postgres --resource-group pagemenot-rg --query "state" -o tsv -->
+<!-- exec:approve: az postgres flexible-server wait --name {{ service }} --resource-group pagemenot-rg --custom "state=='Ready'" --interval 15 --timeout 300 -->
 
 ## Escalation
 1. If start fails, check quota: `az postgres flexible-server list --resource-group pagemenot-rg`

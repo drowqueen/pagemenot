@@ -185,9 +185,35 @@ cloud_provider: aws
 <!-- exec:approve: aws ec2 start-instances --instance-ids {{ service }} -->
 ```
 
-- `<!-- exec: ... -->` — runs automatically
-- `<!-- exec:approve: ... -->` — requires human approval via Slack button
+- `<!-- exec: ... -->` — runs automatically (diagnosis steps; runs before the approval prompt)
+- `<!-- exec:approve: ... -->` — requires human approval via Slack button; multiple steps run sequentially on a single approval click
 - `{{ service }}` and `{{ resource_group }}` are substituted at runtime
+
+### Slow-starting services (VMs, databases, servers)
+
+Some operations — starting a stopped database, restarting a VM — take 2-5 minutes. The default
+`PAGEMENOT_AZ_TIMEOUT` (360s) covers these. For operations that block until completion (e.g.
+`az postgres flexible-server start` with no flags), use `--no-wait` followed by a dedicated wait
+step so pagemenot gets a real confirmation the service is healthy:
+
+```markdown
+## Resolution
+
+<!-- exec:approve: az postgres flexible-server start --name {{ service }} --resource-group {{ resource_group }} --no-wait -->
+
+<!-- exec:approve: az postgres flexible-server wait --name {{ service }} --resource-group {{ resource_group }} --custom "state=='Ready'" --interval 15 --timeout 300 -->
+```
+
+Both steps run sequentially after a single Slack approval click. The wait step polls every 15s for
+up to 300s — the incident resolves only after the wait confirms the service is healthy.
+
+| Env var | Default | When to raise |
+|---------|---------|---------------|
+| `PAGEMENOT_AZ_TIMEOUT` | 360 | Raise if `az ... wait --timeout N` and N > 300 |
+| `PAGEMENOT_AZ_READ_TIMEOUT` | 30 | Read-only `az ... show/list` commands |
+| `PAGEMENOT_SUBPROCESS_TIMEOUT` | 30 | kubectl / aws / shell commands |
+
+The same pattern works for other slow Azure resources (`az vm start`, `az sql db resume`, etc.).
 
 ## Triage Behavior
 
