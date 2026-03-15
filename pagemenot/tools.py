@@ -1299,7 +1299,14 @@ def get_runbook_exec_steps(
             for match in re.finditer(r"<!--\s*exec(?::approve)?:\s*.+?\s*-->", content):
                 tag = match.group(0)
                 for _k, _v in _ctx.items():
-                    tag = tag.replace(f"{{{{ {_k} }}}}", _v).replace(f"{{{{{_k}}}}}", _v)
+                    if not _v:
+                        continue
+                    try:
+                        _safe_v = _safe_ctx_value(_k, _v)
+                    except ValueError:
+                        logger.warning("Skipping unsafe resource_ctx value for '%s': %r", _k, _v)
+                        continue
+                    tag = tag.replace(f"{{{{ {_k} }}}}", _safe_v).replace(f"{{{{{_k}}}}}", _safe_v)
                 if re.match(r"<!--\s*exec:approve:", tag):
                     approve_steps.append((tag, filename))
                 else:

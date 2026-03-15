@@ -264,6 +264,9 @@ class TriageResult:
     resource_ctx: dict[str, str] = field(
         default_factory=dict
     )  # resource context extracted from alert payload
+    extra_resource_ctxs: list[dict] = field(
+        default_factory=list
+    )  # additional targets from multi-resource Azure alerts
 
 
 _CP_NORM: dict[str, str] = {
@@ -517,12 +520,21 @@ def _parse_alert(source: str, payload: dict) -> dict:
             if raw_target
             else (essentials.get("configurationItems", ["unknown"])[0])
         )
+        _az_region = essentials.get("targetResourceRegion", "")
         _az_ctx = (
             _parse_azure_resource_path(raw_target) if raw_target else {"resource_name": service}
         )
-        _az_region = essentials.get("targetResourceRegion", "")
         if _az_region:
             _az_ctx["region"] = _az_region
+        # Parse remaining targets — multi-resource alerts (e.g. policy firing on multiple servers)
+        _extra_ctxs: list[dict] = []
+        for _extra_id in target_ids[1:]:
+            _extra = _parse_azure_resource_path(_extra_id)
+            if _az_region:
+                _extra["region"] = _az_region
+            _extra_ctxs.append(_extra)
+        if _extra_ctxs:
+            logger.info("Azure alert has %d additional target(s)", len(_extra_ctxs))
         alert_ctx = payload.get("data", {}).get("alertContext", {})
         _op = (
             alert_ctx.get("operationName")
@@ -540,6 +552,7 @@ def _parse_alert(source: str, payload: dict) -> dict:
             "external_id": essentials.get("alertId", ""),
             "cloud_provider": ["azure"],
             "resource_ctx": _az_ctx,
+            "extra_resource_ctxs": _extra_ctxs,
         }
     elif source == "generic":
         incident = payload.get("incident", {})
@@ -827,6 +840,38 @@ async def _try_runbook_exec(result: TriageResult):
         result.resolved_automatically = True
         logger.info(f"Incident auto-resolved: {result.alert_title}")
 
+    # Run the same auto steps for each additional Azure target
+    for _extra_ctx in result.extra_resource_ctxs:
+        _extra_service = _extra_ctx.get("resource_name", result.service)
+        _extra_steps = get_runbook_exec_steps(
+            query,
+            service=_extra_service,
+            cloud_providers=result.cloud_provider,
+            resource_ctx=_extra_ctx,
+        )
+        for _tag, _filename in _extra_steps["auto"]:
+            try:
+                _out = await loop.run_in_executor(
+                    _executor,
+                    dispatch_exec_step,
+                    _tag,
+                    _extra_service,
+                    result.region,
+                    result.account_id,
+                    _extra_ctx,
+                )
+                _disp = _render_display_tag(_tag, _extra_service, _extra_ctx)
+                result.execution_log.append(
+                    f"📖 *{_filename}* (extra target)\n✅ `{_disp[:120]}`\n```{_out[:300]}```"
+                )
+                logger.info("Exec step succeeded for extra target [%s]: %s", _filename, _tag[:80])
+            except ExecSkipped as e:
+                logger.info("Exec skipped for extra target [%s]: %s — %s", _filename, _tag[:80], e)
+            except Exception as e:
+                logger.warning(
+                    "Exec failed for extra target [%s]: %s — %s", _filename, _tag[:80], e
+                )
+
 
 async def run_triage(source: str, payload: dict[str, Any]) -> TriageResult:
     """The ONE entry point for all triage. Handles mock + real transparently."""
@@ -878,6 +923,7 @@ async def run_triage(source: str, payload: dict[str, Any]) -> TriageResult:
     result.account_id = parsed.get("account_id", "")
     result.cloud_provider = parsed.get("cloud_provider", ["generic"])
     result.resource_ctx = parsed.get("resource_ctx", {})
+    result.extra_resource_ctxs = parsed.get("extra_resource_ctxs", [])
 
     # 8. Attempt runbook-driven resolution (only if exec is enabled)
     await _try_runbook_exec(result)

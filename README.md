@@ -799,6 +799,8 @@ All variables are extracted from the alert payload at runtime — no hardcoded r
 | `{{ namespace }}` | k8s namespace — from `PAGEMENOT_EXEC_NAMESPACE` config |
 | Any alert label | Grafana, AlertManager, Datadog, NR labels flow through as-is |
 
+If an Azure alert targets multiple resources (`alertTargetIDs` has more than one entry), pagemenot runs the matched runbook exec steps independently for each target — each with its own substituted `resource_ctx`.
+
 The `service:` frontmatter field narrows RAG retrieval — runbooks with a matching service are ranked higher. Omit it (or use `service: general`) to match any alert.
 
 **Azure runbook examples:**
