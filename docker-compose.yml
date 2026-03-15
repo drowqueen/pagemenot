@@ -6,6 +6,8 @@ services:
       target: ${PAGEMENOT_BUILD_TARGET:-base}
     container_name: pagemenot
     restart: unless-stopped
+    extra_hosts:
+      - "metadata.google.internal:169.254.169.254"
     env_file: .env
     environment:
       - KNOWLEDGE_DIR=/app/knowledge

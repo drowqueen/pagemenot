@@ -18,6 +18,7 @@ import datetime
 import logging
 import os
 import re
+import subprocess
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -57,9 +58,50 @@ _HETZNER_TAGS = {"hetzner", "hetzner-cloud", "htz"}
 _ONPREM_TAGS = {"onprem", "on-prem", "on_prem", "bare-metal", "baremetal"}
 
 
+def sync_from_bucket() -> None:
+    """Sync runbooks from PAGEMENOT_RUNBOOK_BUCKET to RUNBOOKS_DIR before ingest.
+
+    Supports:
+      gs://bucket/path        — gsutil rsync
+      s3://bucket/path        — aws s3 sync
+      az://account/container  — azcopy sync (requires azcopy in PATH or AZCOPY_AUTO_LOGIN=true)
+    """
+    bucket = settings.pagemenot_runbook_bucket
+    if not bucket:
+        return
+
+    RUNBOOKS_DIR.mkdir(parents=True, exist_ok=True)
+
+    if bucket.startswith("gs://"):
+        cmd = ["gsutil", "-m", "rsync", "-r", "-d", bucket, str(RUNBOOKS_DIR)]
+    elif bucket.startswith("s3://"):
+        cmd = ["aws", "s3", "sync", "--delete", bucket, str(RUNBOOKS_DIR)]
+    elif bucket.startswith("az://"):
+        parts = bucket[5:].split("/", 1)
+        account = parts[0]
+        container = parts[1] if len(parts) > 1 else ""
+        az_url = f"https://{account}.blob.core.windows.net/{container}"
+        cmd = ["azcopy", "sync", az_url, str(RUNBOOKS_DIR), "--delete-destination=true"]
+    else:
+        logger.warning("PAGEMENOT_RUNBOOK_BUCKET: unsupported scheme %r — skipped", bucket)
+        return
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode != 0:
+            logger.warning("Runbook bucket sync failed: %s", (result.stderr or result.stdout)[:300])
+        else:
+            logger.info("Runbooks synced from %s", bucket)
+    except FileNotFoundError as e:
+        logger.warning("Runbook bucket sync failed — CLI not found: %s", e)
+    except subprocess.TimeoutExpired:
+        logger.warning("Runbook bucket sync timed out after 120s")
+
+
 def ingest_all():
     """Auto-ingest all knowledge on startup. Called from main.py."""
     try:
+        sync_from_bucket()
         os.makedirs(settings.chroma_path, exist_ok=True)
         client = chromadb.PersistentClient(path=settings.chroma_path)
 
@@ -84,7 +126,7 @@ def _ingest_directory(
         logger.info(f"No {doc_type}s directory at {directory}. Skipping.")
         return
 
-    md_files = list(directory.glob("**/*.md"))
+    md_files = [f for f in directory.glob("**/*.md") if "_staging" not in f.parts]
     if not md_files:
         logger.info(f"No {doc_type}s found in {directory}.")
         return
@@ -275,6 +317,11 @@ def _detect_cloud_providers(tags_str: str, content: str, dir_hint: str = "") -> 
         detected.add("azure")
 
     return sorted(detected) if detected else ["generic"]
+
+
+def _detect_cloud_provider(tags_str: str, content: str) -> str:
+    """Single-value wrapper around _detect_cloud_providers for backward-compat tests."""
+    return _detect_cloud_providers(tags_str, content)[0]
 
 
 def _provider_flags(providers: list[str]) -> dict[str, int]:

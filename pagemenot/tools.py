@@ -956,12 +956,20 @@ def exec_shell(command: str) -> str:
     _exec_enabled()
     if settings.pagemenot_exec_dry_run:
         return f"[DRY RUN] would execute: {command}"
+    _az_read = re.search(r"\baz\s+\S+\s+show\b|\baz\s+\S+\s+list\b", command)
+    timeout = (
+        settings.pagemenot_az_read_timeout
+        if _az_read
+        else settings.pagemenot_az_timeout
+        if command.lstrip().startswith("az ")
+        else settings.pagemenot_subprocess_timeout
+    )
     result = subprocess.run(
         command,
         shell=True,
         capture_output=True,
         text=True,
-        timeout=settings.pagemenot_subprocess_timeout,
+        timeout=timeout,
     )
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "no output").strip()
@@ -1129,11 +1137,14 @@ def dispatch_exec_step(
             _lambda_version = _resolve_lambda_version(safe_service)
         return _lambda_version
 
+    rg = settings.azure_resource_group or ""
     for _raw, _sub in [
         ("{{ service }}", safe_service),
         ("{{service}}", safe_service),
         ("{{ namespace }}", namespace),
         ("{{namespace}}", namespace),
+        ("{{ resource_group }}", rg),
+        ("{{resource_group}}", rg),
     ]:
         cmd = cmd.replace(_raw, _sub)
 
@@ -1269,7 +1280,7 @@ def get_runbook_exec_steps(
 
     Returns {"auto": [(tag, filename), ...], "approve": [(tag, filename), ...]}
       - auto: <!-- exec: cmd --> steps — run immediately, no human needed
-      - approve: <!-- exec:approve: cmd --> steps — queued for human approval when APPROVAL_GATE=true
+      - approve: <!-- exec:approve: cmd --> steps — always queued for human approval
     """
     try:
         client = _chroma_client()
@@ -1311,6 +1322,8 @@ def get_runbook_exec_steps(
             content = _matches[0].read_text(encoding="utf-8")
             for match in re.finditer(r"<!--\s*exec(?::approve)?:\s*.+?\s*-->", content):
                 tag = match.group(0)
+                if service:
+                    tag = tag.replace("{{ service }}", service).replace("{service}", service)
                 if re.match(r"<!--\s*exec:approve:", tag):
                     approve_steps.append((tag, filename))
                 else:

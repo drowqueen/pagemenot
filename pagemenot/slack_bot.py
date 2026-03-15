@@ -80,7 +80,7 @@ class _ApprovalStore:
                 with open(self._FILE, "w") as f:
                     json.dump(self._mem, f)
         except Exception as e:
-            logger.warning("Could not save approvals state: %s", e)
+            logger.error("Could not save approvals state — entry may be lost on restart: %s", e)
 
     async def _client(self):
         if self._redis is None and settings.redis_url:
@@ -200,6 +200,11 @@ def create_slack_app() -> AsyncApp:
     @app.action("approve_action")
     async def handle_approve(ack, body, client):
         await ack()
+        logger.info(
+            "handle_approve called: approval_id=%s user=%s",
+            body["actions"][0]["value"].split(":")[0],
+            body["user"]["id"],
+        )
         from pagemenot.tools import dispatch_exec_step
         from pagemenot.triage import _redact_sensitive
 
@@ -771,8 +776,32 @@ async def _do_triage(say, source: str, payload: dict, thread_ts: str | None = No
         # Approval gate: pending runbook exec steps require human sign-off.
         # High confidence + exec enabled → auto-approve after delay (cancellable).
         # Otherwise → show approve/reject buttons.
-        if result.pending_exec_steps and settings.pagemenot_approval_gate:
+        if result.pending_exec_steps:
             channel = working_msg.get("channel", settings.pagemenot_channel)
+
+            # Create Jira/PD before storing approval entry so URLs are available on resolve
+            from pagemenot.main import _open_jira_ticket, _page_pagerduty
+
+            _SEV = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+            sev_rank = _SEV.get(result.severity, 0)
+            _jira_url = _pd_url = None
+            if not settings.pagemenot_exec_dry_run:
+                jira_min = _SEV.get(settings.pagemenot_jira_min_severity, 2)
+                pd_min = _SEV.get(settings.pagemenot_pd_min_severity, 2)
+                _jira_url, _pd_url = await asyncio.gather(
+                    _open_jira_ticket(result) if sev_rank >= jira_min else asyncio.sleep(0),
+                    _page_pagerduty(result) if sev_rank >= pd_min else asyncio.sleep(0),
+                    return_exceptions=True,
+                )
+                if not isinstance(_jira_url, str):
+                    _jira_url = None
+                if not isinstance(_pd_url, str):
+                    _pd_url = None
+                if _jira_url:
+                    await say(text=f"🎫 Jira ticket opened: {_jira_url}", thread_ts=thread)
+                if _pd_url:
+                    await say(text=f"📟 On-call paged via PagerDuty: {_pd_url}", thread_ts=thread)
+
             if result.confidence == "high" and settings.pagemenot_exec_enabled:
                 task_id = str(uuid.uuid4())[:8]
                 delay_min = settings.pagemenot_autoapprove_delay // 60
@@ -831,8 +860,8 @@ async def _do_triage(say, source: str, payload: dict, thread_ts: str | None = No
                         "region": result.region or "",
                         "account_id": result.account_id or "",
                         "similar_incidents": result.similar_incidents or [],
-                        "jira_url": "",
-                        "pd_url": "",
+                        "jira_url": _jira_url or "",
+                        "pd_url": _pd_url or "",
                     },
                 )
                 steps_text = "\n".join(f"• `{s[:100]}`" for s in result.pending_exec_steps[:5])

@@ -26,7 +26,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pagemenot.config import settings
 
 logger = logging.getLogger("pagemenot.triage")
-_executor = ThreadPoolExecutor(max_workers=3)
+_executor = ThreadPoolExecutor(max_workers=6)
 
 # ── Deduplication store ────────────────────────────────────────
 # (service, title_hash) → expiry timestamp (time.monotonic())
@@ -260,6 +260,7 @@ class TriageResult:
     cloud_provider: list[str] = field(
         default_factory=lambda: ["generic"]
     )  # list of providers: "aws", "gcp", "k8s", "hetzner", "onprem", "azure", "generic"
+    _op: str = ""  # Azure alertContext operationName — enriches runbook RAG query
 
 
 _CP_NORM: dict[str, str] = {
@@ -430,6 +431,49 @@ def _parse_alert(source: str, payload: dict) -> dict:
             "account_id": payload.get("account_id", ""),
             "cloud_provider": ["aws"],
         }
+    elif source == "azure":
+        _az_sev = {
+            "Sev0": "critical",
+            "Sev1": "high",
+            "Sev2": "medium",
+            "Sev3": "low",
+            "Sev4": "low",
+        }
+        essentials = payload.get("data", {}).get("essentials", {})
+        if not essentials:
+            text = str(payload)
+            return {
+                "title": payload.get("alertRule", payload.get("name", text[:80])),
+                "service": _guess_service(text),
+                "severity": "medium",
+                "description": text[:200],
+                "external_id": "",
+                "cloud_provider": ["azure"],
+            }
+        target_ids = essentials.get("alertTargetIDs", [])
+        raw_target = target_ids[0] if target_ids else ""
+        service = (
+            raw_target.rstrip("/").split("/")[-1]
+            if raw_target
+            else (essentials.get("configurationItems", ["unknown"])[0])
+        )
+        alert_ctx = payload.get("data", {}).get("alertContext", {})
+        _op = (
+            alert_ctx.get("operationName")
+            or (alert_ctx.get("properties") or {}).get("operationName")
+            or ""
+        ).lower()
+        _sev = _az_sev.get(essentials.get("severity", "Sev2"), "medium")
+        if any(x in _op for x in ("deallocate", "stop", "delete")):
+            _sev = "critical"
+        return {
+            "title": essentials.get("alertRule", "Unknown Azure Alert"),
+            "service": service,
+            "severity": _sev,
+            "description": essentials.get("description", ""),
+            "external_id": essentials.get("alertId", ""),
+            "cloud_provider": ["azure"],
+        }
     elif source == "generic":
         incident = payload.get("incident", {})
         if incident:
@@ -569,6 +613,7 @@ def _parse_crew_output(raw: str, parsed_alert: dict) -> TriageResult:
         service=parsed_alert["service"],
         severity=parsed_alert["severity"],
         raw_output=raw,
+        _op=parsed_alert.get("_op", ""),
     )
 
     lower = raw.lower()
@@ -614,8 +659,7 @@ async def _try_runbook_exec(result: TriageResult):
     """Attempt autonomous runbook execution. Mutates result in place.
 
     <!-- exec: cmd -->         → always runs immediately (DRY_RUN aware)
-    <!-- exec:approve: cmd --> → runs immediately when APPROVAL_GATE=false,
-                                 or queued in result.pending_exec_steps when APPROVAL_GATE=true
+    <!-- exec:approve: cmd --> → always queued in result.pending_exec_steps for human approval
     """
     if not settings.pagemenot_exec_enabled:
         return
@@ -624,10 +668,13 @@ async def _try_runbook_exec(result: TriageResult):
 
     # Only use tagged steps from verified runbook files.
     # LLM-generated text is NEVER passed to dispatch_exec_step — prompt injection risk.
-    # Query with alert title + root cause — crew diagnosis improves runbook matching
+    # Query with alert title + root cause + operationName for better runbook disambiguation
     query = result.alert_title
     if result.root_cause and result.root_cause != "See detailed analysis below.":
         query = f"{result.alert_title}. {result.root_cause}"
+    _op = getattr(result, "_op", "") or ""
+    if _op:
+        query = f"{query}. operation: {_op}"
     step_map = get_runbook_exec_steps(
         query, service=result.service, cloud_providers=result.cloud_provider
     )
@@ -637,16 +684,16 @@ async def _try_runbook_exec(result: TriageResult):
     if not auto_steps and not approve_steps:
         return
 
-    # Queue approve steps for human review if gate is enabled
-    if settings.pagemenot_approval_gate and approve_steps:
+    # Queue approve steps — always requires human sign-off (tag-driven, not config-driven)
+    if approve_steps:
         result.pending_exec_steps = [tag for tag, _ in approve_steps]
         approve_runbooks = sorted({fn for _, fn in approve_steps})
         logger.info(
-            f"[APPROVAL GATE] {len(approve_steps)} step(s) queued for approval from: {approve_runbooks}"
+            f"[APPROVAL QUEUED] {len(approve_steps)} step(s) queued for approval from: {approve_runbooks}"
         )
 
-    # Run auto steps + (approve steps when gate is off)
-    pairs_to_run = auto_steps + ([] if settings.pagemenot_approval_gate else approve_steps)
+    # Run auto steps only — approve steps always wait for human
+    pairs_to_run = auto_steps
     if not pairs_to_run:
         return
 
@@ -675,11 +722,15 @@ async def _try_runbook_exec(result: TriageResult):
             logger.info(f"Exec step succeeded [{filename}]: {tag[:80]}")
             steps_executed += 1
         except ExecSkipped as e:
-            display_tag = tag.replace("{{ service }}", result.service or "UNKNOWN_SERVICE")
+            display_tag = tag.replace("{{ service }}", result.service or "UNKNOWN_SERVICE").replace(
+                "{{ resource_group }}", settings.azure_resource_group or "pagemenot-rg"
+            )
             result.execution_log.append(f"📖 *{filename}*\n⏭️ `{display_tag[:120]}`\n```{e}```")
             logger.info(f"Exec step skipped [{filename}]: {tag[:80]} — {e}")
         except Exception as e:
-            display_tag = tag.replace("{{ service }}", result.service or "UNKNOWN_SERVICE")
+            display_tag = tag.replace("{{ service }}", result.service or "UNKNOWN_SERVICE").replace(
+                "{{ resource_group }}", settings.azure_resource_group or "pagemenot-rg"
+            )
             result.execution_log.append(f"📖 *{filename}*\n❌ `{display_tag[:120]}`\n```{e}```")
             logger.warning(f"Exec step failed [{filename}]: {tag[:80]} — {e}")
             all_ok = False

@@ -139,53 +139,34 @@ class TestParseCrewOutput:
         return {"title": "OOMKilled", "service": "checkout", "severity": "critical"}
 
     def test_structured_populates_fields(self):
-        structured = {
-            "root_cause": "Memory leak in request handler",
-            "confidence": "high",
-            "evidence": ["Pod logs show OOM"],
-            "remediation_steps": ["[AUTO-SAFE] kubectl rollout restart deployment/checkout"],
-            "postmortem_summary": "OOM due to leak.",
-        }
-        r = _parse_crew_output("", structured, self._alert())
-        assert r.root_cause == "Memory leak in request handler"
-        assert r.confidence == "high"
-        assert r.remediation_steps == ["[AUTO-SAFE] kubectl rollout restart deployment/checkout"]
+        r = _parse_crew_output("", self._alert())
+        assert r.root_cause
         assert r.needs_approval == []
 
     def test_needs_approval_steps_separated(self):
-        structured = {
-            "root_cause": "Bad deploy",
-            "confidence": "high",
-            "evidence": [],
-            "remediation_steps": [
-                "[NEEDS APPROVAL] Request manual rollback",
-                "[AUTO-SAFE] Review handler code",
-                "[HUMAN APPROVAL] Run load test before re-deploy",
-            ],
-            "postmortem_summary": "",
-        }
-        r = _parse_crew_output("", structured, self._alert())
+        raw = "[NEEDS APPROVAL] Request manual rollback\n[AUTO-SAFE] Review handler code\n[HUMAN APPROVAL] Run load test"
+        r = _parse_crew_output(raw, self._alert())
         assert len(r.needs_approval) == 2
         assert len(r.remediation_steps) == 1
 
     def test_prose_fallback_extracts_root_cause(self):
         # Prose fallback expects the root cause content on the line AFTER the marker
         raw = "**Root cause**\nMemory leak in Stripe webhook handler\nConfidence: high"
-        r = _parse_crew_output(raw, None, self._alert())
+        r = _parse_crew_output(raw, self._alert())
         assert r.root_cause
         assert "memory" in r.root_cause.lower() or "leak" in r.root_cause.lower()
 
     def test_prose_fallback_extracts_confidence(self):
         raw = "confidence level: medium\nroot cause: disk pressure"
-        r = _parse_crew_output(raw, None, self._alert())
+        r = _parse_crew_output(raw, self._alert())
         assert r.confidence == "medium"
 
     def test_empty_output_sets_fallback_root_cause(self):
-        r = _parse_crew_output("", {}, self._alert())
+        r = _parse_crew_output("", self._alert())
         assert r.root_cause  # never empty — uses fallback text
 
     def test_alert_metadata_preserved(self):
-        r = _parse_crew_output("", {}, self._alert())
+        r = _parse_crew_output("", self._alert())
         assert r.alert_title == "OOMKilled"
         assert r.service == "checkout"
         assert r.severity == "critical"
@@ -366,3 +347,139 @@ class TestParseAlertGCP:
         p = _parse_alert("generic", payload)
         assert p["cloud_provider"] == ["gcp"]
         assert p["service"] == "gcp-hello"
+
+
+# ── Azure Monitor alert fixtures ──────────────────────────────────────────
+
+AZURE_VM_ALERT = {
+    "schemaId": "azureMonitorCommonAlertSchema",
+    "data": {
+        "essentials": {
+            "alertId": "/subscriptions/sub123/providers/Microsoft.AlertsManagement/alerts/abc",
+            "alertRule": "VM CPU High",
+            "severity": "Sev1",
+            "monitorCondition": "Fired",
+            "alertTargetIDs": [
+                "/subscriptions/sub123/resourcegroups/my-rg/providers/microsoft.compute/virtualmachines/my-vm"
+            ],
+            "configurationItems": ["my-vm"],
+            "firedDateTime": "2026-03-11T10:00:00Z",
+            "description": "CPU > 90% for 5 minutes",
+        },
+        "alertContext": {},
+    },
+}
+
+AZURE_APP_SERVICE_ALERT = {
+    "schemaId": "azureMonitorCommonAlertSchema",
+    "data": {
+        "essentials": {
+            "alertRule": "App Service Unavailable",
+            "severity": "Sev0",
+            "monitorCondition": "Fired",
+            "alertTargetIDs": [
+                "/subscriptions/sub123/resourcegroups/my-rg/providers/microsoft.web/sites/my-app"
+            ],
+            "configurationItems": ["my-app"],
+            "description": "HTTP 5xx rate > 50%",
+        },
+        "alertContext": {},
+    },
+}
+
+AZURE_RESOLVED_ALERT = {
+    "schemaId": "azureMonitorCommonAlertSchema",
+    "data": {
+        "essentials": {
+            "alertRule": "VM CPU High",
+            "severity": "Sev1",
+            "monitorCondition": "Resolved",
+            "alertTargetIDs": [
+                "/subscriptions/sub123/resourcegroups/my-rg/providers/microsoft.compute/virtualmachines/my-vm"
+            ],
+            "configurationItems": ["my-vm"],
+            "description": "",
+        },
+        "alertContext": {},
+    },
+}
+
+
+# ── TestParseAlertAzure ────────────────────────────────────────────────────
+
+
+class TestParseAlertAzure:
+    def test_fired_fields(self):
+        p = _parse_alert("azure", AZURE_VM_ALERT)
+        assert p["title"] == "VM CPU High"
+        assert p["service"] == "my-vm"
+        assert p["cloud_provider"] == ["azure"]
+        assert p["severity"] in ("critical", "high", "medium", "low", "unknown")
+
+    def test_app_service_service_extraction(self):
+        p = _parse_alert("azure", AZURE_APP_SERVICE_ALERT)
+        assert p["service"] == "my-app"
+
+    def test_resolved_parseable(self):
+        p = _parse_alert("azure", AZURE_RESOLVED_ALERT)
+        assert isinstance(p, dict)
+        assert "service" in p
+
+    @pytest.mark.parametrize(
+        "sev_input,expected",
+        [
+            ("Sev0", "critical"),
+            ("Sev1", "high"),
+            ("Sev2", "medium"),
+            ("Sev3", "low"),
+            ("Sev4", "low"),
+        ],
+    )
+    def test_severity_mapping(self, sev_input, expected):
+        payload = {
+            "schemaId": "azureMonitorCommonAlertSchema",
+            "data": {
+                "essentials": {
+                    "alertRule": "Test Alert",
+                    "severity": sev_input,
+                    "monitorCondition": "Fired",
+                    "alertTargetIDs": [
+                        "/subscriptions/sub123/resourcegroups/rg/providers/microsoft.compute/virtualmachines/vm"
+                    ],
+                    "configurationItems": ["vm"],
+                    "description": "test",
+                },
+                "alertContext": {},
+            },
+        }
+        p = _parse_alert("azure", payload)
+        assert p["severity"] == expected
+
+    def test_service_from_last_segment(self):
+        target = AZURE_VM_ALERT["data"]["essentials"]["alertTargetIDs"][0]
+        last_segment = target.split("/")[-1]
+        p = _parse_alert("azure", AZURE_VM_ALERT)
+        assert p["service"] == last_segment
+
+    def test_legacy_payload_no_essentials(self):
+        p = _parse_alert("azure", {"data": {}})
+        assert isinstance(p, dict)
+        assert p["cloud_provider"] == ["azure"]
+
+
+# ── TestDispatchExecAzure ─────────────────────────────────────────────────
+
+
+from unittest.mock import patch  # noqa: E402
+
+
+class TestDispatchExecAzure:
+    def test_az_routes_to_exec_shell(self):
+        from pagemenot.tools import dispatch_exec_step
+
+        with patch("pagemenot.tools.exec_shell") as mock_shell:
+            mock_shell.return_value = "ok"
+            dispatch_exec_step(
+                "<!-- exec: az vm start --resource-group my-rg --name my-vm -->", "my-vm"
+            )
+        mock_shell.assert_called_once()

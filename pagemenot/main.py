@@ -67,12 +67,25 @@ async def lifespan(app: FastAPI):
     """Start Slack bot on startup, clean up on shutdown."""
 
     # Ingest knowledge base (postmortems + runbooks → ChromaDB)
-    ingest_all()
+    # Run in executor — ingest_all() is blocking and would delay Socket Mode handshake
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, ingest_all)
 
     # Boot Slack
     slack_app = create_slack_app()
     handler = AsyncSocketModeHandler(slack_app, settings.slack_app_token)
-    task = asyncio.create_task(handler.start_async())
+
+    async def _run_socket_mode():
+        while True:
+            try:
+                await handler.start_async()
+                logger.warning("Socket Mode handler exited — restarting in 5s")
+            except Exception as e:
+                logger.error("Socket Mode handler crashed: %s", e)
+            await asyncio.sleep(5)
+
+    app.state.slack_handler = handler
+    app.state.slack_task = asyncio.create_task(_run_socket_mode())
 
     # Store for webhook handlers
     app.state.slack_app = slack_app
@@ -121,6 +134,40 @@ async def lifespan(app: FastAPI):
         )
 
     _sbot._post_verification_task = _schedule_verification
+
+    import os as _os
+
+    _os.makedirs("/app/.azure", exist_ok=True)
+    if settings.azure_client_id and settings.azure_tenant_id and settings.azure_client_secret:
+        import subprocess as _sp
+
+        try:
+            _sp.run(
+                [
+                    "az",
+                    "login",
+                    "--service-principal",
+                    "--tenant",
+                    settings.azure_tenant_id,
+                    "--username",
+                    settings.azure_client_id,
+                    "--password",
+                    settings.azure_client_secret,
+                ],
+                check=True,
+                capture_output=True,
+                timeout=30,
+            )
+            if settings.azure_subscription_id:
+                _sp.run(
+                    ["az", "account", "set", "--subscription", settings.azure_subscription_id],
+                    check=True,
+                    capture_output=True,
+                    timeout=30,
+                )
+            logger.info("Azure CLI authenticated via service principal")
+        except Exception as _az_err:
+            logger.warning("Azure CLI auth failed — az exec steps will fail: %s", _az_err)
 
     # Resume any CW verifications that were in-flight when the container last stopped
     _pending = await _verif_store.get_all()
@@ -189,7 +236,7 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    task.cancel()
+    app.state.slack_task.cancel()
     reindex_task.cancel()
     _executor.shutdown(wait=True)  # drain in-progress triages before exit
 
@@ -447,6 +494,26 @@ async def newrelic_webhook(
     incident_state = payload.get("current_state", payload.get("state", "open")).lower()
     if incident_state not in ("closed", "acknowledged"):
         asyncio.create_task(_auto_triage("newrelic", payload))
+    return {"status": "accepted"}
+
+
+@app.post("/webhooks/azure")
+@limiter.limit(settings.pagemenot_webhook_rate_limit)
+async def azure_monitor_webhook(
+    request: Request,
+    x_pagemenot_signature: Optional[str] = Header(default=None),
+):
+    body = await request.body()
+    await _check_sig(
+        "azure", settings.webhook_secret_azure, body, x_pagemenot_signature, prefix="sha256="
+    )
+    payload = await request.json()
+    essentials = payload.get("data", {}).get("essentials", {})
+    if essentials.get("monitorCondition") == "Resolved":
+        parsed = _parse_alert("azure", payload)
+        _clear_dedup(parsed["service"], parsed["title"])
+        return {"status": "skipped", "reason": "azure alert resolved"}
+    asyncio.create_task(_auto_triage("azure", payload))
     return {"status": "accepted"}
 
 
@@ -1051,6 +1118,12 @@ async def _auto_triage(source: str, payload: dict):
                 _page_pagerduty(result) if sev_rank >= pd_min else asyncio.sleep(0),
             ]
             jira_url, pd_url = await asyncio.gather(*tasks, return_exceptions=True)
+            if isinstance(jira_url, Exception):
+                logger.warning("Jira ticket creation failed: %s", jira_url)
+                jira_url = None
+            if isinstance(pd_url, Exception):
+                logger.warning("PagerDuty incident creation failed: %s", pd_url)
+                pd_url = None
             if isinstance(jira_url, str):
                 await client.chat_postMessage(
                     channel=channel,
@@ -1075,11 +1148,7 @@ async def _auto_triage(source: str, payload: dict):
 
         # Approval buttons — after Jira/PD so urls are stored in entry
         _approval_sev_min = _SEV.get(settings.pagemenot_approval_min_severity, 2)
-        if (
-            result.pending_exec_steps
-            and settings.pagemenot_approval_gate
-            and sev_rank >= _approval_sev_min
-        ):
+        if result.pending_exec_steps and sev_rank >= _approval_sev_min:
             from pagemenot.slack_bot import _approval_store
             import uuid as _uuid
 
@@ -1138,7 +1207,6 @@ async def _auto_triage(source: str, payload: dict):
         if (
             not result.pending_exec_steps
             and result.needs_approval
-            and settings.pagemenot_approval_gate
             and sev_rank >= _approval_sev_min
         ):
             from pagemenot.slack_bot import _approval_store
@@ -1161,16 +1229,21 @@ async def _auto_triage(source: str, payload: dict):
                     "account_id": result.account_id,
                 },
             )
-            manual_text = "\n".join(f"• {s[:120]}" for s in result.needs_approval[:5])
+            from pagemenot.rag import POSTMORTEMS_DIR
+
             await client.chat_postMessage(
                 channel=channel,
-                text=f"⚠️ Manual steps required: {result.alert_title}",
+                text=f"⚠️ No runbook matched — needs manual resolution: {result.alert_title}",
                 blocks=[
                     {
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": f"*⚠️ No runbook matched.* Suggested manual steps:\n{manual_text}",
+                            "text": (
+                                f"*⚠️ No runbook matched — needs manual resolution.*\n\n"
+                                f"After fixing, add a postmortem to `{POSTMORTEMS_DIR}` "
+                                f"so pagemenot auto-resolves this next time."
+                            ),
                         },
                     },
                     {
@@ -1191,7 +1264,6 @@ async def _auto_triage(source: str, payload: dict):
         # Always index triage result for RAG — unless pending human approval (written on approve)
         _needs_human = bool(
             result.pending_exec_steps
-            and settings.pagemenot_approval_gate
             and sev_rank >= _SEV.get(settings.pagemenot_approval_min_severity, 2)
         )
         if not _needs_human:
@@ -1227,4 +1299,12 @@ async def _auto_triage(source: str, payload: dict):
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("pagemenot.main:app", host="0.0.0.0", port=8080, log_level="info")
+    _ssl = settings.pagemenot_ssl_keyfile and settings.pagemenot_ssl_certfile
+    uvicorn.run(
+        "pagemenot.main:app",
+        host="0.0.0.0",
+        port=settings.pagemenot_https_port if _ssl else 8080,
+        log_level="info",
+        ssl_keyfile=settings.pagemenot_ssl_keyfile or None,
+        ssl_certfile=settings.pagemenot_ssl_certfile or None,
+    )

@@ -33,11 +33,13 @@ Self-hosted. No new infrastructure. Connects to your existing monitoring stack.
 | AWS (EC2, RDS, ECS, EKS, CloudWatch) | ✅ Production-ready |
 | On-premises / bare metal (Kubernetes, Prometheus, Alertmanager) | ✅ Production-ready |
 | GCP (GCE, Cloud Run, Cloud SQL, Cloud Monitoring) | ✅ Production-ready |
-| Azure (AKS, VMs, App Service, Azure Monitor) | 🔜 Coming soon |
+| Azure (VMs, App Service, Function Apps, PostgreSQL, Redis, Cosmos DB, SQL, Azure Monitor) | ✅ Production-ready |
 
 AWS and on-prem are tested end-to-end: CloudWatch alarm delivery, EC2 remediation with approval gates, autonomous RDS recovery, CW verify-and-close, and postmortem indexing.
 
 GCP is tested end-to-end: Cloud Monitoring alert ingestion, Cloud Run ingress restore (auto), Cloud SQL restart (auto), approval-gated traffic shifts, gcloud SSH exec, and postmortem indexing.
+
+Azure is tested end-to-end: Azure Monitor webhook ingestion, approval-gated PostgreSQL Flexible Server start, Cosmos DB throughput update, Redis force-reboot, VM run-command exec, and postmortem indexing.
 
 ---
 
@@ -220,7 +222,7 @@ This is the first decision. Pagemenot builds a Docker image with the CLI tools y
 | Kubernetes only | `base` _(default)_ | kubectl (amd64 + arm64) | — |
 | AWS — EKS / ECS / EC2 | `aws` | kubectl + AWS CLI v2 | +~500 MB |
 | GCP — GKE / GCE / Cloud Run | `gcp` | kubectl + gcloud | +~400 MB |
-| Azure — AKS | `azure` | kubectl + Azure CLI | +~300 MB — 🔜 coming soon |
+| Azure — AKS / App Service / VM / PostgreSQL / Redis / Cosmos DB / SQL | `azure` | kubectl + Azure CLI | +~300 MB |
 | Multi-cloud (AWS + GCP) | `cloud` | kubectl + AWS CLI + gcloud + Azure CLI | +~1.2 GB |
 
 kubectl is always included and auto-detects `amd64` / `arm64` at build time.
@@ -423,7 +425,7 @@ Set vars in `.env` → integration activates. Unset → mock fallback.
 | Execution | Kubernetes (pod) | No config — in-cluster ServiceAccount auto-detected |
 | Execution | Kubernetes (EC2/ECS/bare metal) | `KUBECONFIG_PATH` — path to a kubeconfig file |
 | Ticketing | Jira Service Management | `JIRA_SM_URL` + `JIRA_SM_EMAIL` + `JIRA_SM_API_TOKEN` |
-| Alerts | Azure Monitor | Action Group → Webhook → `/webhooks/generic` — 🔜 coming soon |
+| Alerts | Azure Monitor | Action Group → Webhook → `/webhooks/azure` |
 
 ### `config/services.yaml`
 
@@ -442,7 +444,7 @@ Maps service names to GitHub repos for deploy correlation. Safe to commit — no
 | PagerDuty | `POST /webhooks/pagerduty` | ✓ |
 | AWS CloudWatch | `POST /webhooks/sns` | ✓ (SNS `OK` state) |
 | GCP Cloud Monitoring | `POST /webhooks/generic` | ✓ |
-| Azure Monitor | `POST /webhooks/generic` | — (🔜 coming soon) |
+| Azure Monitor | `POST /webhooks/azure` | ✓ |
 | OpsGenie | `POST /webhooks/opsgenie` | ✓ |
 | Anything else | `POST /webhooks/generic` | — |
 
@@ -531,7 +533,11 @@ Cloud Monitoring Alert Policy → Notification Channel (Webhook) → POST /webho
 
 ### Azure Monitor
 
-> 🔜 **Coming soon** — full Azure support (exec, runbooks, auto-close) is planned. Basic alert ingestion via `/webhooks/generic` works today but autonomous remediation is not yet supported.
+1. In Azure Monitor, create an Action Group with a webhook pointing to `https://YOUR_HOST/webhooks/azure`
+2. Enable **Use common alert schema** on the action
+3. Attach the action group to your alert rules
+4. Set `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_SUBSCRIPTION_ID`, and `AZURE_RESOURCE_GROUP` in `.env`
+5. Use the `azure` or `cloud` image variant so `az` CLI is available for exec steps
 
 ### Single instance, all clouds
 
@@ -735,7 +741,7 @@ Restart → auto-ingested into ChromaDB.
 knowledge/runbooks/
 ├── aws/          ← AWS-specific (EC2, RDS, ECS, CloudWatch)
 ├── gcp/          ← GCP-specific (GCE, Cloud Run, Cloud SQL, GKE)
-├── azure/        ← Azure-specific (coming soon)
+├── azure/        ← Azure-specific (VM, App Service, Function App)
 ├── k8s/          ← provider-agnostic Kubernetes
 └── generic/      ← any stack (high CPU, OOM, latency)
 ```
@@ -781,6 +787,209 @@ cloud_provider: gcp   # aws | gcp | azure | k8s | generic
 
 The `service:` frontmatter field narrows RAG retrieval — runbooks with a matching service are ranked higher. Omit it (or use `service: general`) to match any alert.
 
+**Azure runbook examples:**
+
+Auto-resolve (App Service restart):
+
+```markdown
+---
+service: azure-app-service
+tags: azure, app-service, web, availability, restart
+cloud_provider: azure
+---
+
+# Azure App Service — Down / Unavailable
+
+## Diagnosis
+
+<!-- exec: az webapp show --resource-group pagemenot-rg --name {{ service }} --query "state" -o tsv -->
+<!-- exec: az webapp log show --resource-group pagemenot-rg --name {{ service }} 2>&1 || echo "no logs available" -->
+
+## Resolution
+
+<!-- exec: az webapp restart --resource-group pagemenot-rg --name {{ service }} -->
+```
+
+Approval-gated (PostgreSQL Flexible Server start — handles Stopping→Stopped transition):
+
+```markdown
+---
+service: azure-postgres
+tags: azure, postgres, postgresql, database, down, stopped
+cloud_provider: azure
+---
+
+# Azure PostgreSQL Flexible Server — Down / Stopped
+
+## Diagnosis
+
+<!-- exec: az postgres flexible-server show --name {{ service }} --resource-group pagemenot-rg --query "{state:state,fqdn:fullyQualifiedDomainName}" -o json -->
+
+## Resolution
+
+<!-- exec: STATE=$(az postgres flexible-server show --name {{ service }} --resource-group pagemenot-rg --query "state" -o tsv); if [ "$STATE" = "Stopping" ]; then az postgres flexible-server wait --name {{ service }} --resource-group pagemenot-rg --custom "state=='Stopped'" --interval 15 --timeout 120; STATE="Stopped"; fi; if [ "$STATE" = "Stopped" ]; then az postgres flexible-server start --name {{ service }} --resource-group pagemenot-rg --no-wait; else echo "Server already in $STATE state — no start needed"; fi -->
+<!-- exec: az postgres flexible-server wait --name {{ service }} --resource-group pagemenot-rg --custom "state=='Ready'" --interval 15 --timeout 600 -->
+<!-- exec: az postgres flexible-server show --name {{ service }} --resource-group pagemenot-rg --query "state" -o tsv -->
+```
+
+Auto-resolve (Azure SQL Serverless resume):
+
+```markdown
+---
+service: azure-sql
+tags: azure, sql, database, paused, serverless
+cloud_provider: azure
+---
+
+# Azure SQL Database — Paused (Serverless Auto-Pause)
+
+## Diagnosis
+
+<!-- exec: az sql db show --resource-group pagemenot-rg --server pagemenot-sql-srv --name {{ service }} --query "{status:status,pausedDate:pausedDate}" -o json -->
+
+## Resolution
+
+<!-- exec: az rest --method post --url "https://management.azure.com/subscriptions/$(az account show --query id -o tsv)/resourceGroups/pagemenot-rg/providers/Microsoft.Sql/servers/pagemenot-sql-srv/databases/{{ service }}/resume?api-version=2021-08-01-preview" -->
+<!-- exec: az sql db show --resource-group pagemenot-rg --server pagemenot-sql-srv --name {{ service }} --query "status" -o tsv -->
+```
+
+**AWS runbook examples:**
+
+Auto-resolve (RDS instance stopped):
+
+```markdown
+---
+service: my-rds-instance
+tags: rds, database, availability, aws
+cloud_provider: aws
+---
+
+# RDS Instance Stopped
+
+## Diagnosis
+
+<!-- exec: aws rds describe-db-instances --db-instance-identifier {{ service }} -->
+<!-- exec: aws rds describe-events --source-identifier {{ service }} --source-type db-instance --duration 30 -->
+
+## Resolution
+
+<!-- exec: aws rds start-db-instance --db-instance-identifier {{ service }} -->
+```
+
+Approval-gated (ECS service unhealthy — force new deployment):
+
+```markdown
+---
+service: my-ecs-service
+tags: ecs, service, unhealthy, tasks, aws
+cloud_provider: aws
+---
+
+# ECS Service Unhealthy
+
+## Diagnosis
+
+<!-- exec: aws ecs describe-services --cluster {{ service }}-cluster --services {{ service }} -->
+<!-- exec: aws ecs list-tasks --cluster {{ service }}-cluster --service-name {{ service }} --desired-status STOPPED -->
+
+## Resolution
+
+<!-- exec:approve: aws ecs update-service --cluster {{ service }}-cluster --service {{ service }} --force-new-deployment -->
+```
+
+**GCP runbook examples:**
+
+Auto-resolve (GCE instance stopped):
+
+```markdown
+---
+service: my-gce-vm
+tags: gcp, gce, compute, availability
+cloud_provider: gcp
+---
+
+# GCE Instance Stopped
+
+## Diagnosis
+
+<!-- exec: gcloud compute instances describe {{ service }} --zone=us-central1-a --project=MY_PROJECT --format="value(status,lastStartTimestamp)" -->
+
+## Resolution
+
+<!-- exec: gcloud compute instances start {{ service }} --zone=us-central1-a --project=MY_PROJECT -->
+```
+
+Approval-gated (Cloud Run traffic shift):
+
+```markdown
+---
+service: my-cloud-run-service
+tags: gcp, cloud-run, traffic, rollback
+cloud_provider: gcp
+---
+
+# Cloud Run — Bad Deploy (Traffic Rollback)
+
+## Diagnosis
+
+<!-- exec: gcloud run services describe {{ service }} --region=us-central1 --project=MY_PROJECT --format="value(status.traffic)" -->
+
+## Resolution
+
+<!-- exec: gcloud run services update-traffic {{ service }} --region=us-central1 --project=MY_PROJECT --to-latest -->
+<!-- exec:approve: gcloud run services update-traffic {{ service }} --region=us-central1 --project=MY_PROJECT --to-revisions=STABLE_REVISION=100 -->
+```
+
+**On-premises / Kubernetes runbook examples:**
+
+Auto-resolve (OOMKill — pod memory limit):
+
+```markdown
+---
+service: general
+tags: kubernetes, k8s, oom, memory, pod
+cloud_provider: k8s
+---
+
+# Pod OOMKilled — Memory Limit Exceeded
+
+## Diagnosis
+
+<!-- exec: kubectl get pods -n {{ namespace }} -l app={{ service }} -->
+<!-- exec: kubectl describe pods -n {{ namespace }} -l app={{ service }} -->
+<!-- exec: kubectl top pods -n {{ namespace }} -l app={{ service }} -->
+
+## Resolution
+
+<!-- exec: kubectl rollout restart deployment/{{ service }} -n {{ namespace }} -->
+<!-- exec: kubectl rollout status deployment/{{ service }} -n {{ namespace }} -->
+```
+
+Approval-gated (CrashLoopBackOff — rollback):
+
+```markdown
+---
+service: general
+tags: kubernetes, k8s, crashloop, pod, rollback
+cloud_provider: k8s
+---
+
+# Pod CrashLoopBackOff
+
+## Diagnosis
+
+<!-- exec: kubectl get pods -n {{ namespace }} -l app={{ service }} -->
+<!-- exec: kubectl logs -n {{ namespace }} -l app={{ service }} --previous --tail=50 -->
+<!-- exec: kubectl describe pods -n {{ namespace }} -l app={{ service }} -->
+
+## Resolution
+
+<!-- exec:approve: kubectl rollout undo deployment/{{ service }} -n {{ namespace }} -->
+<!-- exec: kubectl rollout status deployment/{{ service }} -n {{ namespace }} -->
+```
+
+---
+
 **SSM exec tags** — run commands on EC2 instances without SSH:
 
 ```
@@ -814,6 +1023,15 @@ python scripts/simulate_incident.py db-connection-pool
 python scripts/simulate_incident.py --random
 python scripts/simulate_incident.py payment-500s --source grafana
 python scripts/simulate_incident.py payment-500s --source datadog
+
+# Azure Monitor scenarios
+python scripts/simulate_incident.py azure-app-service-down        # auto-resolve: az webapp restart
+python scripts/simulate_incident.py azure-function-app-unhealthy  # auto-resolve: az functionapp restart
+python scripts/simulate_incident.py azure-postgres-down           # approval-gated: az postgres flexible-server start
+python scripts/simulate_incident.py azure-cosmos-db-throttled     # approval-gated: throughput update
+python scripts/simulate_incident.py azure-redis-down              # approval-gated: force-reboot AllNodes
+python scripts/simulate_incident.py azure-sql-paused              # auto-resolve: az rest /resume
+python scripts/simulate_incident.py azure-vm-stopped              # approval-gated: az vm start
 ```
 
 ---
@@ -980,13 +1198,95 @@ aws iam put-role-policy --role-name pagemenot-exec \
 
 The instance profile / task role / IRSA approach is preferred — no static credentials stored anywhere.
 
-### Azure Monitor alerts
-
-> 🔜 **Coming soon.**
-
 ### GCP
 
-> 🔜 **Coming soon.**
+pagemenot authenticates via a GCP service account. Required for `gcloud ...` runbook exec steps.
+
+**Service account permissions needed:**
+
+| Permission | Purpose |
+|------------|---------|
+| `compute.instances.get` / `start` / `stop` | GCE instance ops |
+| `compute.instances.setMetadata` | SSH key injection |
+| `run.services.update` | Cloud Run traffic shifts |
+| `cloudsql.instances.restart` | Cloud SQL restart |
+| `iam.serviceAccounts.actAs` | run-command via compute |
+
+**Wiring:**
+
+| Deployment | How to grant access | `.env` |
+|------------|--------------------|----|
+| GCE VM | Attach service account to instance | `GOOGLE_APPLICATION_CREDENTIALS` not needed — ADC uses instance metadata |
+| GKE | Workload Identity — annotate SA with `iam.gke.io/gcp-service-account` | Not needed |
+| Docker / bare metal | Download SA JSON key, mount into container | `GOOGLE_APPLICATION_CREDENTIALS=/app/sa.json` |
+| Local dev | `gcloud auth application-default login` or SA JSON | `GOOGLE_APPLICATION_CREDENTIALS` path |
+
+```bash
+# Create service account
+gcloud iam service-accounts create pagemenot-exec \
+  --project=YOUR_PROJECT
+
+# Grant required roles
+gcloud projects add-iam-policy-binding YOUR_PROJECT \
+  --member="serviceAccount:pagemenot-exec@YOUR_PROJECT.iam.gserviceaccount.com" \
+  --role="roles/compute.instanceAdmin.v1"
+
+gcloud projects add-iam-policy-binding YOUR_PROJECT \
+  --member="serviceAccount:pagemenot-exec@YOUR_PROJECT.iam.gserviceaccount.com" \
+  --role="roles/run.admin"
+
+gcloud projects add-iam-policy-binding YOUR_PROJECT \
+  --member="serviceAccount:pagemenot-exec@YOUR_PROJECT.iam.gserviceaccount.com" \
+  --role="roles/cloudsql.editor"
+```
+
+### Azure
+
+pagemenot authenticates via a service principal (Entra ID app registration). Required for `az ...` runbook exec steps.
+
+Azure RBAC works differently from AWS IAM roles:
+- No "assume role" step — the service principal authenticates directly
+- Permissions are granted via **role assignments** on a resource group or subscription scope
+- `Contributor` on the resource group is sufficient for all pagemenot exec operations
+
+**Create service principal and grant access:**
+
+```bash
+# Create service principal with Contributor on your resource group
+az ad sp create-for-rbac \
+  --name pagemenot-exec \
+  --role Contributor \
+  --scopes /subscriptions/SUBSCRIPTION_ID/resourceGroups/YOUR_RESOURCE_GROUP \
+  --output json
+# → appId, password, tenant (save these)
+
+# Or scope to subscription if you have multiple resource groups
+az ad sp create-for-rbac \
+  --name pagemenot-exec \
+  --role Contributor \
+  --scopes /subscriptions/SUBSCRIPTION_ID \
+  --output json
+```
+
+**`.env` variables:**
+
+```env
+AZURE_TENANT_ID=<tenant from above>
+AZURE_CLIENT_ID=<appId from above>
+AZURE_CLIENT_SECRET=<password from above>
+AZURE_SUBSCRIPTION_ID=<your subscription ID>
+AZURE_RESOURCE_GROUP=<resource group containing your VMs / App Services>
+```
+
+**Wiring:**
+
+| Deployment | How to grant access |
+|------------|---------------------|
+| Azure VM / AKS | Use [Managed Identity](https://learn.microsoft.com/en-us/azure/active-directory/managed-identities-azure-resources/overview) — assign Contributor role to the VM's identity; no client secret needed |
+| Docker / bare metal (GCP/AWS/on-prem) | Service principal credentials via env vars above |
+| Local dev | `az login` + set `AZURE_SUBSCRIPTION_ID` and `AZURE_RESOURCE_GROUP` |
+
+Managed Identity is preferred when running on Azure — eliminates the client secret entirely.
 
 ---
 

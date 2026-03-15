@@ -1,6 +1,7 @@
 """Pagemenot configuration — all from environment variables."""
 
 from pydantic_settings import BaseSettings
+from pydantic import model_validator
 from typing import Optional
 
 
@@ -91,12 +92,12 @@ class Settings(BaseSettings):
     )
     pagemenot_exec_enabled: bool = True  # master switch for autonomous execution
     pagemenot_exec_dry_run: bool = True  # true = simulate; false = real execution
-    pagemenot_approval_gate: bool = True  # require human approval for [NEEDS APPROVAL] steps
     pagemenot_oncall_channel: Optional[str] = None  # channel to ping on critical escalations
     pagemenot_autoapprove_delay: int = 900  # seconds before auto-executing [AUTO-SAFE] steps
     pagemenot_state_bucket: Optional[str] = (
         None  # gs://bucket, s3://bucket, or az://container for state persistence
     )
+    pagemenot_runbook_bucket: str = ""  # bucket to sync runbooks from at startup: gs://bucket/path, s3://bucket/path, or az://account/container
     pagemenot_dedup_ttl_short: int = 86400  # dedup window for critical/high (seconds) — 24h
     pagemenot_dedup_ttl_long: int = 86400  # dedup window for medium/low (seconds) — 24h
     # Severity thresholds — controls when each action triggers
@@ -119,6 +120,7 @@ class Settings(BaseSettings):
     webhook_secret_newrelic: Optional[str] = None
     webhook_secret_generic: Optional[str] = None
     webhook_secret_jira: Optional[str] = None
+    webhook_secret_azure: Optional[str] = None
 
     # External LLM compliance gate
     llm_external_enterprise_confirmed: bool = False  # must be true to use non-Ollama LLMs
@@ -133,12 +135,15 @@ class Settings(BaseSettings):
     azure_client_id: Optional[str] = None
     azure_client_secret: Optional[str] = None
     azure_subscription_id: Optional[str] = None
+    azure_resource_group: Optional[str] = None  # resource group for az CLI exec steps
 
     pagemenot_dedup_short_ttl_severities: str = (
         "critical,high"  # severities that use dedup_ttl_short
     )
     pagemenot_http_timeout: int = 10  # seconds for all httpx calls
     pagemenot_subprocess_timeout: int = 30  # seconds for kubectl/aws/shell exec
+    pagemenot_az_timeout: int = 660  # seconds for az write/wait commands — must exceed az --timeout value used in runbooks (e.g. flexible-server wait --timeout 600 needs >600s here)
+    pagemenot_az_read_timeout: int = 30  # seconds for read-only az show/list commands
     pagemenot_slack_chunk_size: int = 2900  # chars per Slack message block
     pagemenot_slack_max_chunks: int = 3  # max blocks posted per triage result
     pagemenot_approval_ttl: int = 3600  # seconds before an approval entry expires
@@ -158,7 +163,21 @@ class Settings(BaseSettings):
     chroma_incidents_collection: str = "incidents"  # ChromaDB collection name for postmortems
     chroma_runbooks_collection: str = "runbooks"  # ChromaDB collection name for runbooks
 
+    pagemenot_ssl_keyfile: Optional[str] = None
+    pagemenot_ssl_certfile: Optional[str] = None
+    pagemenot_https_port: int = 8443
+
     log_level: str = "INFO"
+
+    @model_validator(mode="after")
+    def validate_ssl_config(self) -> "Settings":
+        keyfile = self.pagemenot_ssl_keyfile
+        certfile = self.pagemenot_ssl_certfile
+        if (keyfile is None) != (certfile is None):
+            raise ValueError(
+                "PAGEMENOT_SSL_KEYFILE and PAGEMENOT_SSL_CERTFILE must be set together"
+            )
+        return self
 
     @property
     def enabled_integrations(self) -> list[str]:
