@@ -273,7 +273,12 @@ def create_slack_app() -> AsyncApp:
             )
             try:
                 output = await asyncio.get_running_loop().run_in_executor(
-                    _executor, dispatch_exec_step, step, service
+                    _executor,
+                    dispatch_exec_step,
+                    step,
+                    service,
+                    entry.get("region") or None,
+                    entry.get("account_id") or None,
                 )
                 await client.chat_postMessage(
                     channel=channel,
@@ -831,7 +836,13 @@ async def _do_triage(say, source: str, payload: dict, thread_ts: str | None = No
                 )
                 task = asyncio.create_task(
                     _autoapprove_timer(
-                        channel, thread, result.pending_exec_steps, result.service, task_id
+                        channel,
+                        thread,
+                        result.pending_exec_steps,
+                        result.service,
+                        task_id,
+                        region=result.region or None,
+                        account_id=result.account_id or None,
                     )
                 )
                 _pending_autoapprove[task_id] = task
@@ -847,6 +858,7 @@ async def _do_triage(say, source: str, payload: dict, thread_ts: str | None = No
                         "root_cause": result.root_cause or "",
                         "alarm_name": result.alarm_name or "",
                         "region": result.region or "",
+                        "account_id": result.account_id or "",
                         "similar_incidents": result.similar_incidents or [],
                         "jira_url": _jira_url or "",
                         "pd_url": _pd_url or "",
@@ -925,6 +937,8 @@ async def _autoapprove_timer(
     steps: list[str],
     service: str,
     task_id: str,
+    region: str | None = None,
+    account_id: str | None = None,
 ):
     """Wait for autoapprove delay, then execute AUTO-SAFE steps."""
     from pagemenot.tools import dispatch_exec_step
@@ -943,7 +957,7 @@ async def _autoapprove_timer(
     for step in steps:
         try:
             output = await asyncio.get_running_loop().run_in_executor(
-                _executor, dispatch_exec_step, step, service
+                _executor, dispatch_exec_step, step, service, region, account_id
             )
             results.append(f"✅ {step[:80]}: {_redact_sensitive(output)[:100]}")
         except Exception as e:

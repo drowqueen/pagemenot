@@ -783,43 +783,97 @@ class ExecSkipped(RuntimeError):
     """Raised when an exec step is skipped due to missing cloud credentials/config."""
 
 
-def exec_aws(service: str, action: str, params: dict) -> str:
-    """Execute an AWS operation.
+# STS credential cache: (account_id, role_arn) → {AccessKeyId, SecretAccessKey, SessionToken, Expiration}
+# Credentials are region-independent; refreshed 5 min before expiry.
+_sts_cache: dict[tuple, dict] = {}
+_sts_cache_lock = __import__("threading").Lock()
 
-    Credential order:
-    1. AWS_ROLE_ARN set → assume that role via STS (cross-account or least-privilege)
-    2. No role → boto3 default chain: instance profile (EC2/ECS), IRSA (EKS),
-       AWS_ACCESS_KEY_ID env vars, or ~/.aws/credentials
-    """
-    _exec_enabled()
-    if settings.pagemenot_exec_dry_run:
-        return f"[DRY RUN] would call: aws {service} {action}({params})"
 
+def _get_aws_creds(role_arn: str, base_region: str) -> dict:
+    """Return cached STS credentials for role_arn, refreshing if within 5 min of expiry."""
     import boto3
     import botocore.exceptions
+    from datetime import timezone as _tz
 
-    if not settings.aws_region:
-        raise ExecSkipped("AWS not configured on this instance — skipped")
+    key = (role_arn, base_region)
+    with _sts_cache_lock:
+        cached = _sts_cache.get(key)
+        if cached:
+            expiry = cached["Expiration"]
+            if expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=_tz.utc)
+            remaining = (expiry - datetime.now(_tz.utc)).total_seconds()
+            if remaining > 300:
+                return cached
 
-    if settings.aws_role_arn:
         try:
-            sts = boto3.client("sts", region_name=settings.aws_region)
+            sts = boto3.client("sts", region_name=base_region)
             creds = sts.assume_role(
-                RoleArn=settings.aws_role_arn,
+                RoleArn=role_arn,
                 RoleSessionName="pagemenot-exec",
             )["Credentials"]
         except botocore.exceptions.ClientError as e:
             code = e.response["Error"]["Code"]
             raise RuntimeError(f"STS assume_role failed ({code}): {e.response['Error']['Message']}")
+
+        _sts_cache[key] = creds
+        return creds
+
+
+def exec_aws(
+    service: str,
+    action: str,
+    params: dict,
+    *,
+    region: str | None = None,
+    account_id: str | None = None,
+) -> str:
+    """Execute an AWS operation.
+
+    Credential order:
+    1. account_id in AWS_ACCOUNTS map → assume that account's role via STS (cached)
+    2. AWS_ROLE_ARN set → assume that role via STS (cached)
+    3. No role → boto3 default chain: instance profile (EC2/ECS), IRSA (EKS),
+       AWS_ACCESS_KEY_ID env vars, or ~/.aws/credentials
+
+    Region order: per-alert region → AWS_REGION setting
+    """
+    _exec_enabled()
+
+    effective_region = region or settings.aws_region
+    if settings.pagemenot_exec_dry_run:
+        return f"[DRY RUN] would call: aws {service} {action}({params}) region={effective_region} account={account_id}"
+
+    import boto3
+    import botocore.exceptions
+
+    if not effective_region:
+        raise ExecSkipped("AWS not configured on this instance — skipped")
+
+    role_arn = (
+        settings.aws_accounts.get(account_id) if account_id else None
+    ) or settings.aws_role_arn
+
+    logger.info(
+        "exec_aws service=%s action=%s region=%s account=%s role=%s",
+        service,
+        action,
+        effective_region,
+        account_id or "default",
+        role_arn or "none",
+    )
+
+    if role_arn:
+        creds = _get_aws_creds(role_arn, effective_region)
         client = boto3.client(
             service,
-            region_name=settings.aws_region,
+            region_name=effective_region,
             aws_access_key_id=creds["AccessKeyId"],
             aws_secret_access_key=creds["SecretAccessKey"],
             aws_session_token=creds["SessionToken"],
         )
     else:
-        client = boto3.client(service, region_name=settings.aws_region)
+        client = boto3.client(service, region_name=effective_region)
 
     method = getattr(client, action, None)
     if method is None:
@@ -1034,7 +1088,9 @@ def _safe_service_name(service: str) -> str:
     return service
 
 
-def dispatch_exec_step(step: str, service: str = "") -> str:
+def dispatch_exec_step(
+    step: str, service: str = "", region: str | None = None, account_id: str | None = None
+) -> str:
     """Parse and route a single exec step from a runbook to the correct executor.
 
     Accepts both <!-- exec: command --> (auto-safe) and <!-- exec:approve: command --> (risky).
@@ -1210,7 +1266,7 @@ def dispatch_exec_step(step: str, service: str = "") -> str:
                     result_list.append(shorthand if shorthand is not None else v)
                 params[snake] = result_list
             i = j
-        return exec_aws(aws_service, aws_action, params)
+        return exec_aws(aws_service, aws_action, params, region=region, account_id=account_id)
     elif cmd.startswith("http://") or cmd.startswith("https://"):
         return exec_http("GET", cmd)
     else:

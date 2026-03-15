@@ -504,15 +504,18 @@ aws sns subscribe --topic-arn arn:aws:sns:us-east-1:ACCOUNT:pagemenot-alerts \
   --protocol https --notification-endpoint https://YOUR_HOST/webhooks/sns --region us-east-1
 ```
 
-**Multiple AWS accounts** — each account subscribes its own SNS topics to the same pagemenot endpoint. No config change needed; pagemenot identifies the source from the SNS message payload.
+**Multiple AWS accounts** — each account subscribes its own SNS topics to the same pagemenot endpoint. Set `AWS_ACCOUNTS` so pagemenot assumes the right role per account.
 ```bash
-# Account A (244923700407)
-aws sns subscribe --topic-arn arn:aws:sns:eu-west-1:244923700407:pagemenot-alerts \
+# Account A
+aws sns subscribe --topic-arn arn:aws:sns:eu-west-1:123456789012:pagemenot-alerts \
   --protocol https --notification-endpoint https://YOUR_HOST/webhooks/sns --region eu-west-1
 
-# Account B (987654321000) — same endpoint, different account
-aws sns subscribe --topic-arn arn:aws:sns:us-east-1:987654321000:pagemenot-alerts \
+# Account B — same endpoint, different account
+aws sns subscribe --topic-arn arn:aws:sns:us-east-1:987654321098:pagemenot-alerts \
   --protocol https --notification-endpoint https://YOUR_HOST/webhooks/sns --region us-east-1
+```
+```env
+AWS_ACCOUNTS={"123456789012": "arn:aws:iam::123456789012:role/pagemenot-exec", "987654321098": "arn:aws:iam::987654321098:role/pagemenot-exec"}
 ```
 
 ### GCP Cloud Monitoring
