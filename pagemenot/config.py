@@ -64,7 +64,6 @@ class Settings(BaseSettings):
     pagerduty_from_email: Optional[str] = (
         None  # requester email for PD API; auto-discovered if unset
     )
-    opsgenie_api_key: Optional[str] = None
     # Jira Service Management
     jira_sm_url: Optional[str] = None
     jira_sm_email: Optional[str] = None
@@ -194,8 +193,6 @@ class Settings(BaseSettings):
             integrations.append("newrelic")
         if self.pagerduty_api_key:
             integrations.append("pagerduty")
-        if self.opsgenie_api_key:
-            integrations.append("opsgenie")
         if self.github_token:
             integrations.append("github")
         if self.kubeconfig_path:

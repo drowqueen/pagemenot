@@ -146,14 +146,6 @@ class TestAzureRunbooks:
     def test_runbook_dir_exists(self):
         assert self.RUNBOOK_DIR.is_dir(), "knowledge/runbooks/azure/ directory must exist"
 
-    def test_vm_runbook_has_azure_tag(self):
-        rb = self.RUNBOOK_DIR / "azure-vm-stopped.md"
-        assert rb.exists(), "azure-vm-stopped.md must exist"
-        content = rb.read_text()
-        assert "azure" in content.lower(), (
-            "runbook must contain 'azure' tag for RAG cloud_provider detection"
-        )
-
     def test_app_service_runbook_has_azure_tag(self):
         rb = self.RUNBOOK_DIR / "azure-app-service-down.md"
         assert rb.exists(), "azure-app-service-down.md must exist"

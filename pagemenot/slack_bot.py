@@ -1029,7 +1029,6 @@ def _looks_like_alert(text: str) -> bool:
         "firing",
         "triggered",
         "pagerduty",
-        "opsgenie",
         "incident",
         "outage",
         "degraded",

@@ -1,9 +1,5 @@
-"""Integration tests for Jira/PD incident tracking and resolve handling.
+"""Tests for _alarm_incidents tracking and SNS OK recovery path."""
 
-External services (Slack client, _close_jira_ticket) are mocked at the
-call boundary. Module-level state is reset between tests via fixture.
-"""
-import asyncio
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -14,137 +10,150 @@ from pagemenot.triage import _active_incidents, _dedup_key, _dedup_lock
 
 @pytest.fixture(autouse=True)
 def reset_tracking():
-    """Reset all in-memory incident tracking state before each test."""
-    main_mod._active_jira_tickets.clear()
-    main_mod._active_pd_incidents.clear()
+    main_mod._alarm_incidents.clear()
     with _dedup_lock:
         _active_incidents.clear()
     yield
-    main_mod._active_jira_tickets.clear()
-    main_mod._active_pd_incidents.clear()
+    main_mod._alarm_incidents.clear()
     with _dedup_lock:
         _active_incidents.clear()
 
 
-@pytest.fixture
-def mock_slack_client():
-    mock = AsyncMock()
-    mock.chat_postMessage = AsyncMock(return_value={"ts": "123.456"})
-    with patch("pagemenot.slack_bot.get_client", return_value=mock):
-        yield mock
+# ── _alarm_incidents state ─────────────────────────────────────────────────
 
 
-def am_resolve(alertname="OOMKilled", service="checkout"):
-    return {
-        "status": "resolved",
-        "labels": {"alertname": alertname, "service": service, "severity": "critical"},
-        "annotations": {},
-    }
+class TestAlarmIncidents:
+    def test_empty_initially(self):
+        assert len(main_mod._alarm_incidents) == 0
 
+    def test_entry_stored_and_retrieved(self):
+        main_mod._alarm_incidents["EC2-Nginx-Health"] = {
+            "jira_url": "https://jira.example/browse/INC-42",
+            "pd_url": "https://pd.example/incidents/P1",
+            "channel": "alerts",
+            "thread_ts": "123.456",
+        }
+        entry = main_mod._alarm_incidents["EC2-Nginx-Health"]
+        assert entry["jira_url"] == "https://jira.example/browse/INC-42"
+        assert entry["pd_url"] == "https://pd.example/incidents/P1"
 
-# ── Jira dedup state ──────────────────────────────────────────────────────
+    def test_pop_removes_entry(self):
+        main_mod._alarm_incidents["alarm-1"] = {
+            "jira_url": "x",
+            "pd_url": "y",
+            "channel": "c",
+            "thread_ts": "t",
+        }
+        entry = main_mod._alarm_incidents.pop("alarm-1", None)
+        assert entry is not None
+        assert "alarm-1" not in main_mod._alarm_incidents
 
-class TestJiraTracking:
-    def test_no_ticket_tracked_initially(self):
-        key = _dedup_key("checkout", "OOMKilled")
-        assert main_mod._active_jira_tickets.get(key) is None
+    def test_pop_missing_key_returns_none(self):
+        assert main_mod._alarm_incidents.pop("nonexistent", None) is None
 
-    def test_ticket_stored_and_retrieved(self):
-        key = _dedup_key("checkout", "OOMKilled")
-        main_mod._active_jira_tickets[key] = "INC-42"
-        assert main_mod._active_jira_tickets[key] == "INC-42"
-
-    def test_different_alerts_tracked_independently(self):
-        k1 = _dedup_key("checkout", "OOMKilled")
-        k2 = _dedup_key("payment", "HighLatency")
-        main_mod._active_jira_tickets[k1] = "INC-1"
-        main_mod._active_jira_tickets[k2] = "INC-2"
-        assert main_mod._active_jira_tickets[k1] == "INC-1"
-        assert main_mod._active_jira_tickets[k2] == "INC-2"
+    def test_multiple_alarms_tracked_independently(self):
+        main_mod._alarm_incidents["alarm-a"] = {
+            "jira_url": "INC-1",
+            "pd_url": "",
+            "channel": "c",
+            "thread_ts": "t",
+        }
+        main_mod._alarm_incidents["alarm-b"] = {
+            "jira_url": "INC-2",
+            "pd_url": "",
+            "channel": "c",
+            "thread_ts": "t",
+        }
+        assert main_mod._alarm_incidents["alarm-a"]["jira_url"] == "INC-1"
+        assert main_mod._alarm_incidents["alarm-b"]["jira_url"] == "INC-2"
 
     def test_dedup_key_stable_across_fire_and_resolve(self):
         from pagemenot.triage import _parse_alert
-        fire = _parse_alert("alertmanager", {
-            "status": "firing",
-            "labels": {"alertname": "OOMKilled", "service": "checkout", "severity": "critical"},
-            "annotations": {},
-        })
-        resolve = _parse_alert("alertmanager", {
-            "status": "resolved",
-            "labels": {"alertname": "OOMKilled", "service": "checkout", "severity": "critical"},
-            "annotations": {},
-        })
-        assert _dedup_key(fire["service"], fire["title"]) == _dedup_key(resolve["service"], resolve["title"])
+
+        fire = _parse_alert(
+            "alertmanager",
+            {
+                "status": "firing",
+                "labels": {"alertname": "OOMKilled", "service": "checkout", "severity": "critical"},
+                "annotations": {},
+            },
+        )
+        resolve = _parse_alert(
+            "alertmanager",
+            {
+                "status": "resolved",
+                "labels": {"alertname": "OOMKilled", "service": "checkout", "severity": "critical"},
+                "annotations": {},
+            },
+        )
+        assert _dedup_key(fire["service"], fire["title"]) == _dedup_key(
+            resolve["service"], resolve["title"]
+        )
 
 
-# ── _handle_resolve ────────────────────────────────────────────────────────
+# ── SNS OK recovery path ───────────────────────────────────────────────────
 
-class TestHandleResolve:
-    async def test_no_jira_tracked_skips_close(self, mock_slack_client):
-        with patch("pagemenot.main._close_jira_ticket", new_callable=AsyncMock) as mock_close:
-            await main_mod._handle_resolve("alertmanager", am_resolve())
-            mock_close.assert_not_called()
 
-    async def test_tracked_jira_is_closed(self, mock_slack_client):
-        key = _dedup_key("checkout", "OOMKilled")
-        main_mod._active_jira_tickets[key] = "INC-99"
-        with patch("pagemenot.main._close_jira_ticket", new_callable=AsyncMock, return_value=True) as mock_close:
-            await main_mod._handle_resolve("alertmanager", am_resolve())
-            mock_close.assert_called_once()
-            assert mock_close.call_args[0][0] == "INC-99"
+SNS_ALARM_PAYLOAD = {
+    "Type": "Notification",
+    "Message": '{"AlarmName":"EC2-Nginx-Health","NewStateValue":"ALARM","NewStateReason":"threshold","OldStateValue":"OK","Trigger":{"MetricName":"HealthCheck"}}',
+    "Subject": "ALARM: EC2-Nginx-Health",
+    "TopicArn": "arn:aws:sns:eu-west-1:123456789:pagemenot-alerts",
+}
 
-    async def test_ticket_removed_from_tracking_on_success(self, mock_slack_client):
-        key = _dedup_key("checkout", "OOMKilled")
-        main_mod._active_jira_tickets[key] = "INC-99"
-        with patch("pagemenot.main._close_jira_ticket", new_callable=AsyncMock, return_value=True):
-            await main_mod._handle_resolve("alertmanager", am_resolve())
-        assert key not in main_mod._active_jira_tickets
+SNS_OK_PAYLOAD = {
+    "Type": "Notification",
+    "Message": '{"AlarmName":"EC2-Nginx-Health","NewStateValue":"OK","NewStateReason":"back to normal","OldStateValue":"ALARM","Trigger":{"MetricName":"HealthCheck"}}',
+    "Subject": "OK: EC2-Nginx-Health",
+    "TopicArn": "arn:aws:sns:eu-west-1:123456789:pagemenot-alerts",
+}
 
-    async def test_ticket_kept_in_tracking_on_close_failure(self, mock_slack_client):
-        key = _dedup_key("checkout", "OOMKilled")
-        main_mod._active_jira_tickets[key] = "INC-99"
-        with patch("pagemenot.main._close_jira_ticket", new_callable=AsyncMock, return_value=False):
-            await main_mod._handle_resolve("alertmanager", am_resolve())
-        assert main_mod._active_jira_tickets.get(key) == "INC-99"
 
-    async def test_dedup_registry_cleared_on_resolve(self, mock_slack_client):
-        from pagemenot.triage import _check_and_register
-        _check_and_register("checkout", "OOMKilled", "critical")
-        key = _dedup_key("checkout", "OOMKilled")
-        with _dedup_lock:
-            assert key in _active_incidents
+@pytest.mark.asyncio
+async def test_sns_ok_clears_alarm_incidents():
+    from httpx import ASGITransport, AsyncClient
+    from pagemenot.main import app
 
-        with patch("pagemenot.main._close_jira_ticket", new_callable=AsyncMock, return_value=True):
-            await main_mod._handle_resolve("alertmanager", am_resolve())
+    main_mod._alarm_incidents["EC2-Nginx-Health"] = {
+        "jira_url": "https://jira.example/browse/INC-99",
+        "pd_url": "",
+        "channel": "alerts",
+        "thread_ts": "123.456",
+    }
 
-        with _dedup_lock:
-            assert key not in _active_incidents
+    with (
+        patch("pagemenot.main._resolve_jira_ticket", new_callable=AsyncMock),
+        patch("pagemenot.main._resolve_pagerduty_incident", new_callable=AsyncMock),
+        patch("pagemenot.slack_bot.get_client") as mock_gc,
+        patch("pagemenot.main._verif_store") as mock_store,
+    ):
+        mock_store.pop = AsyncMock(return_value=None)
+        mock_client = AsyncMock()
+        mock_client.chat_postMessage = AsyncMock(return_value={"ts": "456.789"})
+        mock_gc.return_value = mock_client
 
-    async def test_pd_tracking_cleared_on_resolve(self, mock_slack_client):
-        key = _dedup_key("checkout", "OOMKilled")
-        main_mod._active_pd_incidents[key] = "https://pd.example/i/123"
-        with patch("pagemenot.main._close_jira_ticket", new_callable=AsyncMock, return_value=True):
-            await main_mod._handle_resolve("alertmanager", am_resolve())
-        assert key not in main_mod._active_pd_incidents
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post("/webhooks/sns", json=SNS_OK_PAYLOAD)
 
-    async def test_slack_notified_on_success(self, mock_slack_client):
-        key = _dedup_key("checkout", "OOMKilled")
-        main_mod._active_jira_tickets[key] = "INC-99"
-        with patch("pagemenot.main._close_jira_ticket", new_callable=AsyncMock, return_value=True):
-            await main_mod._handle_resolve("alertmanager", am_resolve())
-        mock_slack_client.chat_postMessage.assert_called_once()
-        call_text = mock_slack_client.chat_postMessage.call_args[1]["text"]
-        assert "INC-99" in call_text
-        assert "closed" in call_text.lower()
+    assert resp.status_code == 200
+    assert "EC2-Nginx-Health" not in main_mod._alarm_incidents
 
-    async def test_slack_notified_on_close_failure(self, mock_slack_client):
-        key = _dedup_key("checkout", "OOMKilled")
-        main_mod._active_jira_tickets[key] = "INC-99"
-        with patch("pagemenot.main._close_jira_ticket", new_callable=AsyncMock, return_value=False):
-            await main_mod._handle_resolve("alertmanager", am_resolve())
-        call_text = mock_slack_client.chat_postMessage.call_args[1]["text"]
-        assert "could not close" in call_text.lower()
 
-    async def test_malformed_payload_does_not_raise(self, mock_slack_client):
-        # Should not raise — bad payloads are logged and dropped
-        await main_mod._handle_resolve("alertmanager", {"garbage": True})
+@pytest.mark.asyncio
+async def test_sns_ok_with_no_tracked_incident_does_not_raise():
+    from httpx import ASGITransport, AsyncClient
+    from pagemenot.main import app
+
+    with (
+        patch("pagemenot.main._resolve_jira_ticket", new_callable=AsyncMock),
+        patch("pagemenot.main._resolve_pagerduty_incident", new_callable=AsyncMock),
+        patch("pagemenot.slack_bot.get_client") as mock_gc,
+        patch("pagemenot.main._verif_store") as mock_store,
+    ):
+        mock_store.pop = AsyncMock(return_value=None)
+        mock_gc.return_value = AsyncMock()
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post("/webhooks/sns", json=SNS_OK_PAYLOAD)
+
+    assert resp.status_code == 200

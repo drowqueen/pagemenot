@@ -15,13 +15,13 @@ cloud_provider: azure
 
 Check nginx status via run-command (no SSH needed):
 
-<!-- exec: az vm run-command invoke --resource-group pagemenot-rg --name {{ service }} --command-id RunShellScript --scripts "systemctl is-active nginx || echo nginx_down" --query "value[0].message" -o tsv -->
+<!-- exec: az vm run-command invoke --resource-group {{ resource_group }} --name {{ service }} --command-id RunShellScript --scripts "systemctl is-active nginx || echo nginx_down" --query "value[0].message" -o tsv -->
 
 ## Resolution
 
 Restart nginx via run-command (safe to auto-execute — stateless):
 
-<!-- exec: az vm run-command invoke --resource-group pagemenot-rg --name {{ service }} --command-id RunShellScript --scripts "systemctl restart nginx && systemctl is-active nginx" --query "value[0].message" -o tsv -->
+<!-- exec: az vm run-command invoke --resource-group {{ resource_group }} --name {{ service }} --command-id RunShellScript --scripts "systemctl restart nginx && systemctl is-active nginx" --query "value[0].message" -o tsv -->
 
 ## Escalation
 If nginx fails to restart:

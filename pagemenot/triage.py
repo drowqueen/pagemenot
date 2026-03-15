@@ -261,6 +261,12 @@ class TriageResult:
         default_factory=lambda: ["generic"]
     )  # list of providers: "aws", "gcp", "k8s", "hetzner", "onprem", "azure", "generic"
     _op: str = ""  # Azure alertContext operationName — enriches runbook RAG query
+    resource_ctx: dict[str, str] = field(
+        default_factory=dict
+    )  # resource context extracted from alert payload
+    extra_resource_ctxs: list[dict] = field(
+        default_factory=list
+    )  # additional targets from multi-resource Azure alerts
 
 
 _CP_NORM: dict[str, str] = {
@@ -332,31 +338,56 @@ def _detect_cp_from_text(title: str, description: str) -> list[str]:
     return _normalize_cloud_provider("")
 
 
+def _parse_azure_resource_path(path: str) -> dict[str, str]:
+    """Extract named segments from an Azure resource path.
+
+    /subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.Sql/servers/{srv}/databases/{db}
+    → {"subscription_id": sub, "resource_group": rg, "servers": srv, "databases": db, "resource_name": db}
+    """
+    ctx: dict[str, str] = {}
+    parts = [p for p in path.split("/") if p]
+    i = 0
+    while i < len(parts):
+        key = parts[i].lower()
+        if key == "providers" and i + 1 < len(parts):
+            i += 2  # skip "providers" + namespace (e.g. "Microsoft.Sql")
+            continue
+        val = parts[i + 1] if i + 1 < len(parts) else None
+        if val is None:
+            break
+        if key == "subscriptions":
+            ctx["subscription_id"] = val
+        elif key == "resourcegroups":
+            ctx["resource_group"] = val
+        else:
+            ctx[key] = val  # e.g. "servers" → srv, "databases" → db
+        i += 2
+    if parts:
+        ctx["resource_name"] = parts[-1]
+    return ctx
+
+
 def _parse_alert(source: str, payload: dict) -> dict:
     """Normalize any alert source into standard fields."""
     _default_cp = _normalize_cloud_provider("")
     if source == "pagerduty":
         _pd_title = payload.get("title", payload.get("description", "Unknown"))
         _pd_desc = payload.get("description", "")
+        _pd_service = payload.get("service", {}).get("name", "unknown")
+        _pd_details = payload.get("details", {})
+        _pd_ctx: dict[str, str] = {"resource_name": _pd_service}
+        if isinstance(_pd_details, dict):
+            for k, v in _pd_details.items():
+                if isinstance(v, str):
+                    _pd_ctx.setdefault(k, v)
         return {
             "title": _pd_title,
-            "service": payload.get("service", {}).get("name", "unknown"),
+            "service": _pd_service,
             "severity": "critical" if payload.get("urgency") == "high" else "medium",
             "description": _pd_desc,
             "external_id": payload.get("id", ""),
             "cloud_provider": _detect_cp_from_text(_pd_title, _pd_desc),
-        }
-    elif source == "opsgenie":
-        priority_map = {"P1": "critical", "P2": "high", "P3": "medium", "P4": "low", "P5": "low"}
-        _og_title = payload.get("message", "Unknown")
-        _og_desc = payload.get("description", "")
-        return {
-            "title": _og_title,
-            "service": payload.get("entity", payload.get("alias", "unknown")),
-            "severity": priority_map.get(payload.get("priority", "P3"), "medium"),
-            "description": _og_desc,
-            "external_id": payload.get("alertId", ""),
-            "cloud_provider": _detect_cp_from_text(_og_title, _og_desc),
+            "resource_ctx": _pd_ctx,
         }
     elif source == "datadog":
         tags_raw = payload.get("tags", [])
@@ -364,35 +395,48 @@ def _parse_alert(source: str, payload: dict) -> dict:
             tags = {k: v for k, v in (t.split(":", 1) for t in tags_raw if ":" in t)}
         else:
             tags = tags_raw if isinstance(tags_raw, dict) else {}
+        _dd_service = tags.get("service", _guess_service(str(payload)))
         _dd_cp = _normalize_cloud_provider(tags.get("cloud_provider", tags.get("cloud", "")))
+        _dd_ctx: dict[str, str] = {"resource_name": _dd_service}
+        for k, v in tags.items():
+            if isinstance(v, str):
+                _dd_ctx.setdefault(k, v)
         return {
             "title": payload.get("title", payload.get("event_title", "Unknown")),
-            "service": tags.get("service", _guess_service(str(payload))),
+            "service": _dd_service,
             "severity": "critical" if payload.get("alert_type") == "error" else "medium",
             "description": payload.get("body", payload.get("text", "")),
             "external_id": str(payload.get("id", "")),
             "cloud_provider": _dd_cp,
+            "resource_ctx": _dd_ctx,
         }
     elif source == "newrelic":
         _nr_targets = payload.get("targets", [])
         _nr_labels = _nr_targets[0].get("labels", {}) if _nr_targets else {}
+        _nr_service = _nr_targets[0].get("name", "unknown") if _nr_targets else "unknown"
         _nr_provider = _nr_labels.get("provider", _nr_labels.get("cloud", "")).upper()
         _NR_CP = {"GCP": "gcp", "GOOGLE": "gcp", "AWS": "aws", "AMAZON": "aws", "AZURE": "azure"}
         _nr_cloud = [_NR_CP[_nr_provider]] if _nr_provider in _NR_CP else _default_cp
+        _nr_ctx: dict[str, str] = {"resource_name": _nr_service}
+        for k, v in _nr_labels.items():
+            if isinstance(v, str):
+                _nr_ctx.setdefault(k, v)
         return {
             "title": payload.get("name", payload.get("condition_name", "Unknown")),
-            "service": _nr_targets[0].get("name", "unknown") if _nr_targets else "unknown",
+            "service": _nr_service,
             "severity": "critical"
             if payload.get("severity", "").upper() == "CRITICAL"
             else "medium",
             "description": payload.get("details", ""),
             "external_id": str(payload.get("incident_id", "")),
             "cloud_provider": _nr_cloud,
+            "resource_ctx": _nr_ctx,
         }
     elif source == "grafana":
         alerts = payload.get("alerts", [{}])
         first = alerts[0] if alerts else {}
         labels = first.get("labels", {})
+        _gf_service = labels.get("service", labels.get("job", "unknown"))
         _gf_raw = labels.get("cloud_provider", labels.get("cloud", labels.get("provider", "")))
         _gf_provider = _normalize_cloud_provider(_gf_raw)
         if _gf_provider == ["generic"]:
@@ -401,35 +445,54 @@ def _parse_alert(source: str, payload: dict) -> dict:
                 _gf_provider = ["gcp"]
             elif any(k in _gf_text for k in ("aws", "amazon")):
                 _gf_provider = ["aws"]
+        _gf_ctx: dict[str, str] = {"resource_name": _gf_service}
+        for k, v in labels.items():
+            if isinstance(v, str):
+                _gf_ctx.setdefault(k, v)
         return {
             "title": payload.get("title", labels.get("alertname", "Unknown")),
-            "service": labels.get("service", labels.get("job", "unknown")),
+            "service": _gf_service,
             "severity": labels.get("severity", "medium"),
             "description": payload.get("message", ""),
             "cloud_provider": _gf_provider,
+            "resource_ctx": _gf_ctx,
         }
     elif source == "alertmanager":
         labels = payload.get("labels", {})
         annotations = payload.get("annotations", {})
+        _am_service = labels.get("service", labels.get("job", "unknown"))
         _am_cp = _normalize_cloud_provider(labels.get("cloud_provider", labels.get("cloud", "")))
+        _am_ctx: dict[str, str] = {"resource_name": _am_service}
+        for k, v in labels.items():
+            if isinstance(v, str):
+                _am_ctx.setdefault(k, v)
         return {
             "title": labels.get("alertname", "Unknown"),
-            "service": labels.get("service", labels.get("job", "unknown")),
+            "service": _am_service,
             "severity": labels.get("severity", "medium"),
             "description": annotations.get("description", annotations.get("summary", "")),
             "cloud_provider": _am_cp,
+            "resource_ctx": _am_ctx,
         }
     elif source == "sns":
+        _sns_service = payload.get("service", "unknown")
+        _sns_region = payload.get("region", "")
+        _sns_account = payload.get("account_id", "")
         return {
             "title": payload.get("title", payload.get("alarm_name", "")),
-            "service": payload.get("service", "unknown"),
+            "service": _sns_service,
             "severity": payload.get("severity", "high"),
             "description": payload.get("message", ""),
             "external_id": payload.get("alarm_name", ""),
             "alarm_name": payload.get("alarm_name", ""),
-            "region": payload.get("region", ""),
-            "account_id": payload.get("account_id", ""),
+            "region": _sns_region,
+            "account_id": _sns_account,
             "cloud_provider": ["aws"],
+            "resource_ctx": {
+                "resource_name": _sns_service,
+                "region": _sns_region,
+                "account_id": _sns_account,
+            },
         }
     elif source == "azure":
         _az_sev = {
@@ -457,6 +520,21 @@ def _parse_alert(source: str, payload: dict) -> dict:
             if raw_target
             else (essentials.get("configurationItems", ["unknown"])[0])
         )
+        _az_region = essentials.get("targetResourceRegion", "")
+        _az_ctx = (
+            _parse_azure_resource_path(raw_target) if raw_target else {"resource_name": service}
+        )
+        if _az_region:
+            _az_ctx["region"] = _az_region
+        # Parse remaining targets — multi-resource alerts (e.g. policy firing on multiple servers)
+        _extra_ctxs: list[dict] = []
+        for _extra_id in target_ids[1:]:
+            _extra = _parse_azure_resource_path(_extra_id)
+            if _az_region:
+                _extra["region"] = _az_region
+            _extra_ctxs.append(_extra)
+        if _extra_ctxs:
+            logger.info("Azure alert has %d additional target(s)", len(_extra_ctxs))
         alert_ctx = payload.get("data", {}).get("alertContext", {})
         _op = (
             alert_ctx.get("operationName")
@@ -473,6 +551,8 @@ def _parse_alert(source: str, payload: dict) -> dict:
             "description": essentials.get("description", ""),
             "external_id": essentials.get("alertId", ""),
             "cloud_provider": ["azure"],
+            "resource_ctx": _az_ctx,
+            "extra_resource_ctxs": _extra_ctxs,
         }
     elif source == "generic":
         incident = payload.get("incident", {})
@@ -515,12 +595,22 @@ def _parse_alert(source: str, payload: dict) -> dict:
                 )
             state = incident.get("state", "open")
             severity = "high" if state == "open" else "low"
+            _gcp_ctx: dict[str, str] = {"resource_name": service}
+            _gcp_ctx.update({k: v for k, v in labels.items() if isinstance(v, str)})
+            if "project_id" not in _gcp_ctx and labels.get("project_id"):
+                _gcp_ctx["project_id"] = labels["project_id"]
+            _loc = labels.get("location") or labels.get("region", "")
+            if _loc:
+                _gcp_ctx["region"] = _loc
+            if labels.get("zone"):
+                _gcp_ctx["zone"] = labels["zone"]
             return {
                 "title": incident.get("condition_name", "Unknown GCP Alert"),
                 "service": service,
                 "severity": severity,
                 "description": incident.get("summary", incident.get("url", "")),
                 "cloud_provider": ["gcp"],
+                "resource_ctx": _gcp_ctx,
             }
         text = payload.get("text", payload.get("description", str(payload)))
         return {
@@ -655,6 +745,16 @@ def _parse_crew_output(raw: str, parsed_alert: dict) -> TriageResult:
     return result
 
 
+def _render_display_tag(tag: str, service: str, resource_ctx: dict[str, str]) -> str:
+    """Substitute all resource context vars in a tag for display (no validation)."""
+    t = tag.replace("{{ service }}", service or "UNKNOWN").replace(
+        "{{service}}", service or "UNKNOWN"
+    )
+    for key, val in resource_ctx.items():
+        t = t.replace(f"{{{{ {key} }}}}", val).replace(f"{{{{{key}}}}}", val)
+    return t
+
+
 async def _try_runbook_exec(result: TriageResult):
     """Attempt autonomous runbook execution. Mutates result in place.
 
@@ -676,7 +776,10 @@ async def _try_runbook_exec(result: TriageResult):
     if _op:
         query = f"{query}. operation: {_op}"
     step_map = get_runbook_exec_steps(
-        query, service=result.service, cloud_providers=result.cloud_provider
+        query,
+        service=result.service,
+        cloud_providers=result.cloud_provider,
+        resource_ctx=result.resource_ctx,
     )
     auto_steps: list[tuple[str, str]] = step_map["auto"]
     approve_steps: list[tuple[str, str]] = step_map["approve"]
@@ -714,23 +817,20 @@ async def _try_runbook_exec(result: TriageResult):
                 result.service,
                 result.region,
                 result.account_id,
+                result.resource_ctx,
             )
-            display_tag = tag.replace("{{ service }}", result.service or "UNKNOWN_SERVICE")
+            display_tag = _render_display_tag(tag, result.service, result.resource_ctx)
             result.execution_log.append(
                 f"📖 *{filename}*\n✅ `{display_tag[:120]}`\n```{output[:300]}```"
             )
             logger.info(f"Exec step succeeded [{filename}]: {tag[:80]}")
             steps_executed += 1
         except ExecSkipped as e:
-            display_tag = tag.replace("{{ service }}", result.service or "UNKNOWN_SERVICE").replace(
-                "{{ resource_group }}", settings.azure_resource_group or "pagemenot-rg"
-            )
+            display_tag = _render_display_tag(tag, result.service, result.resource_ctx)
             result.execution_log.append(f"📖 *{filename}*\n⏭️ `{display_tag[:120]}`\n```{e}```")
             logger.info(f"Exec step skipped [{filename}]: {tag[:80]} — {e}")
         except Exception as e:
-            display_tag = tag.replace("{{ service }}", result.service or "UNKNOWN_SERVICE").replace(
-                "{{ resource_group }}", settings.azure_resource_group or "pagemenot-rg"
-            )
+            display_tag = _render_display_tag(tag, result.service, result.resource_ctx)
             result.execution_log.append(f"📖 *{filename}*\n❌ `{display_tag[:120]}`\n```{e}```")
             logger.warning(f"Exec step failed [{filename}]: {tag[:80]} — {e}")
             all_ok = False
@@ -739,6 +839,38 @@ async def _try_runbook_exec(result: TriageResult):
     if all_ok and steps_executed > 0 and not result.pending_exec_steps:
         result.resolved_automatically = True
         logger.info(f"Incident auto-resolved: {result.alert_title}")
+
+    # Run the same auto steps for each additional Azure target
+    for _extra_ctx in result.extra_resource_ctxs:
+        _extra_service = _extra_ctx.get("resource_name", result.service)
+        _extra_steps = get_runbook_exec_steps(
+            query,
+            service=_extra_service,
+            cloud_providers=result.cloud_provider,
+            resource_ctx=_extra_ctx,
+        )
+        for _tag, _filename in _extra_steps["auto"]:
+            try:
+                _out = await loop.run_in_executor(
+                    _executor,
+                    dispatch_exec_step,
+                    _tag,
+                    _extra_service,
+                    result.region,
+                    result.account_id,
+                    _extra_ctx,
+                )
+                _disp = _render_display_tag(_tag, _extra_service, _extra_ctx)
+                result.execution_log.append(
+                    f"📖 *{_filename}* (extra target)\n✅ `{_disp[:120]}`\n```{_out[:300]}```"
+                )
+                logger.info("Exec step succeeded for extra target [%s]: %s", _filename, _tag[:80])
+            except ExecSkipped as e:
+                logger.info("Exec skipped for extra target [%s]: %s — %s", _filename, _tag[:80], e)
+            except Exception as e:
+                logger.warning(
+                    "Exec failed for extra target [%s]: %s — %s", _filename, _tag[:80], e
+                )
 
 
 async def run_triage(source: str, payload: dict[str, Any]) -> TriageResult:
@@ -790,6 +922,8 @@ async def run_triage(source: str, payload: dict[str, Any]) -> TriageResult:
     result.region = parsed.get("region", "")
     result.account_id = parsed.get("account_id", "")
     result.cloud_provider = parsed.get("cloud_provider", ["generic"])
+    result.resource_ctx = parsed.get("resource_ctx", {})
+    result.extra_resource_ctxs = parsed.get("extra_resource_ctxs", [])
 
     # 8. Attempt runbook-driven resolution (only if exec is enabled)
     await _try_runbook_exec(result)

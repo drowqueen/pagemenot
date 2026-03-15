@@ -15,17 +15,17 @@ cloud_provider: azure
 
 Check VM power state:
 
-<!-- exec: az vm show --resource-group pagemenot-rg --name {{ service }} --query "powerState" -o tsv -->
+<!-- exec: az vm show --resource-group {{ resource_group }} --name {{ service }} --query "powerState" -o tsv -->
 
 Check recent VM activity log:
 
-<!-- exec: az monitor activity-log list --resource-group pagemenot-rg --offset 1h --query "[].{time:eventTimestamp, op:operationName.value, status:status.value}" -o table -->
+<!-- exec: az monitor activity-log list --resource-group {{ resource_group }} --offset 1h --query "[].{time:eventTimestamp, op:operationName.value, status:status.value}" -o table -->
 
 ## Resolution
 
 Start the VM (safe to auto-execute — idempotent):
 
-<!-- exec: az vm start --resource-group pagemenot-rg --name {{ service }} -->
+<!-- exec: az vm start --resource-group {{ resource_group }} --name {{ service }} -->
 
 ## Escalation
 If VM fails to start after 2 minutes:

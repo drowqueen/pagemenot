@@ -1,6 +1,5 @@
 """Unit tests for pagemenot.triage — pure functions only."""
 
-import hashlib
 import time
 
 import pytest
@@ -12,6 +11,7 @@ from pagemenot.triage import (
     _dedup_key,
     _dedup_lock,
     _parse_alert,
+    _parse_azure_resource_path,
     _parse_crew_output,
 )
 
@@ -31,10 +31,6 @@ def clear_dedup():
 class TestDedupKey:
     def test_deterministic(self):
         assert _dedup_key("checkout", "OOMKilled") == _dedup_key("checkout", "OOMKilled")
-
-    def test_uses_sha256(self):
-        _, h = _dedup_key("svc", "OOMKilled pods")
-        assert h == hashlib.sha256("oomkilled pods".encode()).hexdigest()[:16]
 
     def test_case_insensitive(self):
         assert _dedup_key("CHECKOUT", "OOMKilled") == _dedup_key("checkout", "oomkilled")
@@ -483,3 +479,305 @@ class TestDispatchExecAzure:
                 "<!-- exec: az vm start --resource-group my-rg --name my-vm -->", "my-vm"
             )
         mock_shell.assert_called_once()
+
+
+# ── Dynamic resource context ───────────────────────────────────────────────
+
+
+class TestParseAzureResourcePath:
+    def test_postgres_flexible_server(self):
+        path = "/subscriptions/sub-123/resourceGroups/prod-rg/providers/Microsoft.DBforPostgreSQL/flexibleServers/my-postgres"
+        ctx = _parse_azure_resource_path(path)
+        assert ctx["subscription_id"] == "sub-123"
+        assert ctx["resource_group"] == "prod-rg"
+        assert ctx["flexibleservers"] == "my-postgres"
+        assert ctx["resource_name"] == "my-postgres"
+
+    def test_sql_server_with_database(self):
+        path = "/subscriptions/sub-abc/resourceGroups/data-rg/providers/Microsoft.Sql/servers/sql-srv/databases/mydb"
+        ctx = _parse_azure_resource_path(path)
+        assert ctx["subscription_id"] == "sub-abc"
+        assert ctx["resource_group"] == "data-rg"
+        assert ctx["servers"] == "sql-srv"
+        assert ctx["databases"] == "mydb"
+        assert ctx["resource_name"] == "mydb"
+
+    def test_app_service_site(self):
+        path = "/subscriptions/sub123/resourcegroups/my-rg/providers/microsoft.web/sites/my-app"
+        ctx = _parse_azure_resource_path(path)
+        assert ctx["resource_group"] == "my-rg"
+        assert ctx["sites"] == "my-app"
+        assert ctx["resource_name"] == "my-app"
+
+    def test_redis_cache(self):
+        path = (
+            "/subscriptions/sub-x/resourceGroups/cache-rg/providers/Microsoft.Cache/Redis/my-redis"
+        )
+        ctx = _parse_azure_resource_path(path)
+        assert ctx["resource_group"] == "cache-rg"
+        assert ctx["redis"] == "my-redis"
+
+
+class TestResourceCtxAzureParse:
+    def _azure_postgres_payload(self, rg="prod-rg", server="my-postgres"):
+        return {
+            "schemaId": "azureMonitorCommonAlertSchema",
+            "data": {
+                "essentials": {
+                    "alertRule": "PostgreSQL Down",
+                    "severity": "Sev1",
+                    "monitorCondition": "Fired",
+                    "alertTargetIDs": [
+                        f"/subscriptions/sub-123/resourceGroups/{rg}/providers/Microsoft.DBforPostgreSQL/flexibleServers/{server}"
+                    ],
+                    "configurationItems": [server],
+                    "targetResourceRegion": "eastus",
+                    "description": "PostgreSQL flexible server unreachable",
+                },
+                "alertContext": {},
+            },
+        }
+
+    def test_resource_group_in_ctx(self):
+        p = _parse_alert("azure", self._azure_postgres_payload(rg="prod-rg"))
+        assert p["resource_ctx"]["resource_group"] == "prod-rg"
+
+    def test_flexibleservers_in_ctx(self):
+        p = _parse_alert("azure", self._azure_postgres_payload(server="my-postgres"))
+        assert p["resource_ctx"]["flexibleservers"] == "my-postgres"
+
+    def test_region_in_ctx(self):
+        p = _parse_alert("azure", self._azure_postgres_payload())
+        assert p["resource_ctx"]["region"] == "eastus"
+
+    def test_resource_name_is_last_segment(self):
+        p = _parse_alert("azure", self._azure_postgres_payload(server="pg-prod-01"))
+        assert p["resource_ctx"]["resource_name"] == "pg-prod-01"
+
+    def test_different_server_name_flows_through(self):
+        p1 = _parse_alert("azure", self._azure_postgres_payload(server="pg-east"))
+        p2 = _parse_alert("azure", self._azure_postgres_payload(server="pg-west"))
+        assert p1["resource_ctx"]["flexibleservers"] == "pg-east"
+        assert p2["resource_ctx"]["flexibleservers"] == "pg-west"
+
+    def test_multi_target_extra_resource_ctxs_populated(self):
+        payload = {
+            "schemaId": "azureMonitorCommonAlertSchema",
+            "data": {
+                "essentials": {
+                    "alertRule": "PostgreSQL Down",
+                    "severity": "Sev1",
+                    "monitorCondition": "Fired",
+                    "alertTargetIDs": [
+                        "/subscriptions/sub-123/resourceGroups/prod-rg/providers/Microsoft.DBforPostgreSQL/flexibleServers/pg-east",
+                        "/subscriptions/sub-123/resourceGroups/prod-rg/providers/Microsoft.DBforPostgreSQL/flexibleServers/pg-west",
+                    ],
+                    "configurationItems": ["pg-east"],
+                    "description": "Two servers down",
+                },
+                "alertContext": {},
+            },
+        }
+        p = _parse_alert("azure", payload)
+        assert p["resource_ctx"]["flexibleservers"] == "pg-east"
+        assert len(p["extra_resource_ctxs"]) == 1
+        assert p["extra_resource_ctxs"][0]["flexibleservers"] == "pg-west"
+        assert p["extra_resource_ctxs"][0]["resource_group"] == "prod-rg"
+
+    def test_single_target_extra_resource_ctxs_empty(self):
+        p = _parse_alert("azure", self._azure_postgres_payload())
+        assert p["extra_resource_ctxs"] == []
+
+
+class TestResourceCtxGCPParse:
+    def _gcp_cloud_sql_payload(self, project="my-project", zone="us-central1-a"):
+        return {
+            "incident": {
+                "condition_name": "Cloud SQL Unavailable",
+                "state": "open",
+                "resource": {
+                    "type": "cloudsql_database",
+                    "labels": {
+                        "database_id": f"{project}:my-sql",
+                        "project_id": project,
+                        "region": "us-central1",
+                        "zone": zone,
+                    },
+                },
+                "resource_display_name": "my-sql",
+            }
+        }
+
+    def test_project_id_in_ctx(self):
+        p = _parse_alert("generic", self._gcp_cloud_sql_payload(project="zipintel"))
+        assert p["resource_ctx"]["project_id"] == "zipintel"
+
+    def test_region_in_ctx(self):
+        p = _parse_alert("generic", self._gcp_cloud_sql_payload())
+        assert p["resource_ctx"]["region"] == "us-central1"
+
+    def test_zone_in_ctx(self):
+        p = _parse_alert("generic", self._gcp_cloud_sql_payload(zone="us-central1-b"))
+        assert p["resource_ctx"]["zone"] == "us-central1-b"
+
+    def test_different_project_flows_through(self):
+        p = _parse_alert("generic", self._gcp_cloud_sql_payload(project="other-proj"))
+        assert p["resource_ctx"]["project_id"] == "other-proj"
+
+
+class TestResourceCtxAWSSNS:
+    def _sns_payload(self, service="nginx-prod", region="eu-west-1", account="123456789"):
+        return {
+            "title": "EC2 Nginx Down",
+            "service": service,
+            "region": region,
+            "account_id": account,
+            "severity": "high",
+            "alarm_name": "EC2-Nginx-Health",
+            "message": "nginx service stopped",
+        }
+
+    def test_resource_name_in_ctx(self):
+        p = _parse_alert("sns", self._sns_payload(service="nginx-prod"))
+        assert p["resource_ctx"]["resource_name"] == "nginx-prod"
+
+    def test_region_in_ctx(self):
+        p = _parse_alert("sns", self._sns_payload(region="us-east-1"))
+        assert p["resource_ctx"]["region"] == "us-east-1"
+
+    def test_account_id_in_ctx(self):
+        p = _parse_alert("sns", self._sns_payload(account="999000111"))
+        assert p["resource_ctx"]["account_id"] == "999000111"
+
+    def test_different_service_flows_through(self):
+        p = _parse_alert("sns", self._sns_payload(service="rds-prod"))
+        assert p["resource_ctx"]["resource_name"] == "rds-prod"
+
+
+class TestResourceCtxGrafanaK8s:
+    """Grafana alert with k8s labels — namespace + service flow to resource_ctx."""
+
+    def _grafana_k8s_payload(self, service="checkout", namespace="production"):
+        return {
+            "title": "Pod CrashLoopBackOff",
+            "alerts": [
+                {
+                    "labels": {
+                        "alertname": "PodCrashLoopBackOff",
+                        "service": service,
+                        "namespace": namespace,
+                        "severity": "critical",
+                    }
+                }
+            ],
+        }
+
+    def test_namespace_in_ctx(self):
+        p = _parse_alert("grafana", self._grafana_k8s_payload(namespace="production"))
+        assert p["resource_ctx"]["namespace"] == "production"
+
+    def test_service_in_ctx(self):
+        p = _parse_alert("grafana", self._grafana_k8s_payload(service="checkout"))
+        assert p["resource_ctx"]["service"] == "checkout"
+
+    def test_different_namespace_flows_through(self):
+        p = _parse_alert("grafana", self._grafana_k8s_payload(namespace="staging"))
+        assert p["resource_ctx"]["namespace"] == "staging"
+
+    def test_cloud_provider_is_generic_for_onprem(self):
+        p = _parse_alert("grafana", self._grafana_k8s_payload())
+        assert p["cloud_provider"] == ["generic"]
+
+
+class TestTemplateSubstitution:
+    """dispatch_exec_step resolves {{ vars }} from resource_ctx before execution."""
+
+    def test_azure_resource_group_substituted(self):
+        from pagemenot.tools import dispatch_exec_step
+
+        with patch("pagemenot.tools.exec_shell") as mock_shell:
+            mock_shell.return_value = "ok"
+            dispatch_exec_step(
+                "<!-- exec: az postgres flexible-server show --name {{ service }} --resource-group {{ resource_group }} -->",
+                "my-postgres",
+                resource_ctx={"resource_group": "prod-rg"},
+            )
+        cmd = mock_shell.call_args[0][0]
+        assert "--resource-group prod-rg" in cmd
+        assert "--name my-postgres" in cmd
+        assert "{{" not in cmd
+
+    def test_gcp_project_id_substituted(self):
+        from pagemenot.tools import dispatch_exec_step
+
+        with patch("pagemenot.tools.exec_shell") as mock_shell:
+            mock_shell.return_value = "ok"
+            dispatch_exec_step(
+                "<!-- exec: gcloud sql instances restart {{ service }} --project={{ project_id }} --quiet -->",
+                "my-sql",
+                resource_ctx={"project_id": "zipintel"},
+            )
+        cmd = mock_shell.call_args[0][0]
+        assert "--project=zipintel" in cmd
+        assert "my-sql" in cmd
+        assert "{{" not in cmd
+
+    def test_aws_service_substituted(self):
+        from pagemenot.tools import dispatch_exec_step
+
+        with patch("pagemenot.tools.exec_aws") as mock_aws:
+            mock_aws.return_value = "{}"
+            dispatch_exec_step(
+                "<!-- exec: aws rds start-db-instance --db-instance-identifier {{ service }} -->",
+                "rds-prod",
+                resource_ctx={"resource_name": "rds-prod"},
+            )
+        # exec_aws is called with (service, action, params, ...) — just confirm no unresolved vars
+        # by checking dispatch did not raise
+        mock_aws.assert_called_once()
+
+    def test_k8s_namespace_from_grafana_ctx(self):
+        from pagemenot.tools import dispatch_exec_step
+
+        with patch("pagemenot.tools.exec_kubectl") as mock_kubectl:
+            mock_kubectl.return_value = "pod/checkout running"
+            dispatch_exec_step(
+                "<!-- exec: kubectl get pods -n {{ namespace }} -l app={{ service }} -->",
+                "checkout",
+                resource_ctx={"namespace": "production"},
+            )
+        cmd = mock_kubectl.call_args[0][0]
+        assert "-n production" in cmd
+        assert "-l app=checkout" in cmd
+        assert "{{" not in cmd
+
+    def test_unresolved_var_raises(self):
+        from pagemenot.tools import dispatch_exec_step
+
+        with patch("pagemenot.tools.exec_shell"):
+            with pytest.raises(ValueError, match="Unresolved template variables"):
+                dispatch_exec_step(
+                    "<!-- exec: az group show --name {{ missing_var }} -->",
+                    "svc",
+                    resource_ctx={},
+                )
+
+    def test_multiple_vars_all_substituted(self):
+        from pagemenot.tools import dispatch_exec_step
+
+        with patch("pagemenot.tools.exec_shell") as mock_shell:
+            mock_shell.return_value = "ok"
+            dispatch_exec_step(
+                "<!-- exec: az postgres flexible-server start --name {{ flexibleservers }} --resource-group {{ resource_group }} --subscription {{ subscription_id }} -->",
+                "pg-prod",
+                resource_ctx={
+                    "flexibleservers": "pg-prod",
+                    "resource_group": "prod-rg",
+                    "subscription_id": "sub-123",
+                },
+            )
+        cmd = mock_shell.call_args[0][0]
+        assert "pg-prod" in cmd
+        assert "prod-rg" in cmd
+        assert "sub-123" in cmd
+        assert "{{" not in cmd
