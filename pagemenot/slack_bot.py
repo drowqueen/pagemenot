@@ -80,7 +80,7 @@ class _ApprovalStore:
                 with open(self._FILE, "w") as f:
                     json.dump(self._mem, f)
         except Exception as e:
-            logger.warning("Could not save approvals state: %s", e)
+            logger.error("Could not save approvals state — entry may be lost on restart: %s", e)
 
     async def _client(self):
         if self._redis is None and settings.redis_url:
@@ -200,6 +200,11 @@ def create_slack_app() -> AsyncApp:
     @app.action("approve_action")
     async def handle_approve(ack, body, client):
         await ack()
+        logger.info(
+            "handle_approve called: approval_id=%s user=%s",
+            body["actions"][0]["value"].split(":")[0],
+            body["user"]["id"],
+        )
         from pagemenot.tools import dispatch_exec_step
         from pagemenot.triage import _redact_sensitive
 

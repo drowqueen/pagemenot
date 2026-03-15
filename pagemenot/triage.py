@@ -26,7 +26,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pagemenot.config import settings
 
 logger = logging.getLogger("pagemenot.triage")
-_executor = ThreadPoolExecutor(max_workers=3)
+_executor = ThreadPoolExecutor(max_workers=6)
 
 # ── Deduplication store ────────────────────────────────────────
 # (service, title_hash) → expiry timestamp (time.monotonic())

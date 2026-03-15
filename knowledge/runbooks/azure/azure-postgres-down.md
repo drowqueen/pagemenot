@@ -23,11 +23,15 @@ Check server state:
 
 Start the stopped server (non-blocking — returns immediately, server starts in background):
 
-<!-- exec:approve: az postgres flexible-server start --name {{ service }} --resource-group pagemenot-rg --no-wait -->
+<!-- exec:approve: STATE=$(az postgres flexible-server show --name {{ service }} --resource-group pagemenot-rg --query "state" -o tsv); if [ "$STATE" = "Stopped" ]; then az postgres flexible-server start --name {{ service }} --resource-group pagemenot-rg --no-wait; else echo "Server already in $STATE state — no start needed"; fi -->
 
-Wait until server reaches Ready state (polls every 15s, up to 5 min):
+Wait until server reaches Ready state (polls every 15s, up to 10 min):
 
-<!-- exec:approve: az postgres flexible-server wait --name {{ service }} --resource-group pagemenot-rg --custom "state=='Ready'" --interval 15 --timeout 300 -->
+<!-- exec: az postgres flexible-server wait --name {{ service }} --resource-group pagemenot-rg --custom "state=='Ready'" --interval 15 --timeout 600 -->
+
+Confirm final state:
+
+<!-- exec: az postgres flexible-server show --name {{ service }} --resource-group pagemenot-rg --query "state" -o tsv -->
 
 ## Escalation
 1. If start fails, check quota: `az postgres flexible-server list --resource-group pagemenot-rg`

@@ -33,11 +33,13 @@ Self-hosted. No new infrastructure. Connects to your existing monitoring stack.
 | AWS (EC2, RDS, ECS, EKS, CloudWatch) | ✅ Production-ready |
 | On-premises / bare metal (Kubernetes, Prometheus, Alertmanager) | ✅ Production-ready |
 | GCP (GCE, Cloud Run, Cloud SQL, Cloud Monitoring) | ✅ Production-ready |
-| Azure (VMs, App Service, Function Apps, Azure Monitor) | ✅ Production-ready |
+| Azure (VMs, App Service, Function Apps, PostgreSQL, Redis, Cosmos DB, SQL, Azure Monitor) | ✅ Production-ready |
 
 AWS and on-prem are tested end-to-end: CloudWatch alarm delivery, EC2 remediation with approval gates, autonomous RDS recovery, CW verify-and-close, and postmortem indexing.
 
 GCP is tested end-to-end: Cloud Monitoring alert ingestion, Cloud Run ingress restore (auto), Cloud SQL restart (auto), approval-gated traffic shifts, gcloud SSH exec, and postmortem indexing.
+
+Azure is tested end-to-end: Azure Monitor webhook ingestion, approval-gated PostgreSQL Flexible Server start, Cosmos DB throughput update, Redis force-reboot, VM run-command exec, and postmortem indexing.
 
 ---
 
