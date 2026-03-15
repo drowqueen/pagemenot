@@ -19,14 +19,14 @@ For multi-server environments, use per-service config or extend the webhook pars
 
 ## Diagnosis
 
-<!-- exec: az sql db show --resource-group ${AZURE_RESOURCE_GROUP} --server ${AZURE_SQL_SERVER} --name {{ service }} --query "{status:status,currentSku:currentSku.name,pausedDate:pausedDate}" -o json -->
+<!-- exec: az sql db show --resource-group {{ resource_group }} --server {{ servers }} --name {{ service }} --query "{status:status,currentSku:currentSku.name,pausedDate:pausedDate}" -o json -->
 
 ## Resolution
 
-<!-- exec: az rest --method post --url "https://management.azure.com/subscriptions/$(az account show --query id -o tsv)/resourceGroups/${AZURE_RESOURCE_GROUP}/providers/Microsoft.Sql/servers/${AZURE_SQL_SERVER}/databases/{{ service }}/resume?api-version=2021-08-01-preview" -->
+<!-- exec: az rest --method post --url "https://management.azure.com/subscriptions/$(az account show --query id -o tsv)/resourceGroups/{{ resource_group }}/providers/Microsoft.Sql/servers/{{ servers }}/databases/{{ service }}/resume?api-version=2021-08-01-preview" -->
 
-<!-- exec: az sql db show --resource-group ${AZURE_RESOURCE_GROUP} --server ${AZURE_SQL_SERVER} --name {{ service }} --query "status" -o tsv -->
+<!-- exec: az sql db show --resource-group {{ resource_group }} --server {{ servers }} --name {{ service }} --query "status" -o tsv -->
 
 ## Escalation
-1. If resume fails, check server quota: `az sql server show --name ${AZURE_SQL_SERVER} --resource-group ${AZURE_RESOURCE_GROUP}`
+1. If resume fails, check server quota: `az sql server show --name {{ servers }} --resource-group {{ resource_group }}`
 2. If repeatedly auto-pausing, increase auto-pause delay or disable: `az sql db update ... --auto-pause-delay -1`

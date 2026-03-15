@@ -82,10 +82,6 @@ def get_available_tools() -> dict[str, list]:
         monitor_tools.append(get_pagerduty_incident)
         logger.info("✅ PagerDuty connected")
 
-    if settings.opsgenie_api_key:
-        monitor_tools.append(get_opsgenie_alert)
-        logger.info("✅ OpsGenie connected")
-
     # ── Diagnoser tools ───────────────────────────────────
     if settings.github_token:
         diagnoser_tools.append(get_recent_deploys)
@@ -126,7 +122,6 @@ def get_available_tools() -> dict[str, list]:
             ("LOKI_URL", settings.loki_url),
             ("GRAFANA_URL", settings.grafana_url),
             ("PAGERDUTY_API_KEY", settings.pagerduty_api_key),
-            ("OPSGENIE_API_KEY", settings.opsgenie_api_key),
             ("GITHUB_TOKEN", settings.github_token),
         ]
         if not s
@@ -345,52 +340,6 @@ def get_pagerduty_incident(incident_id_or_description: str) -> str:
 
     except Exception as e:
         return f"PagerDuty query failed: {e}"
-
-
-@tool("Get OpsGenie Alert Details")
-def get_opsgenie_alert(alert_id_or_service: str) -> str:
-    """Get OpsGenie alert details. Input: alert ID or service name."""
-    try:
-        with httpx.Client(timeout=settings.pagemenot_http_timeout) as client:
-            if len(alert_id_or_service) == 36 and "-" in alert_id_or_service:
-                resp = client.get(
-                    f"https://api.opsgenie.com/v2/alerts/{alert_id_or_service}",
-                    headers={"Authorization": f"GenieKey {settings.opsgenie_api_key}"},
-                )
-                if resp.status_code == 200:
-                    a = resp.json()["data"]
-                    return (
-                        f"OpsGenie Alert {a['id']}:\n"
-                        f"  Message: {a.get('message', 'N/A')}\n"
-                        f"  Priority: {a.get('priority', 'N/A')}\n"
-                        f"  Status: {a.get('status', 'N/A')}\n"
-                        f"  Tags: {', '.join(a.get('tags', []))}\n"
-                        f"  Created: {a.get('createdAt', 'N/A')}"
-                    )
-
-            resp = client.get(
-                "https://api.opsgenie.com/v2/alerts",
-                headers={"Authorization": f"GenieKey {settings.opsgenie_api_key}"},
-                params={
-                    "query": alert_id_or_service,
-                    "limit": 5,
-                    "sort": "createdAt",
-                    "order": "desc",
-                },
-            )
-            alerts = resp.json().get("data", [])
-            if not alerts:
-                return f"No OpsGenie alerts found for '{alert_id_or_service}'."
-
-            lines = []
-            for a in alerts:
-                lines.append(
-                    f"  [{a['id'][:8]}] {a.get('message', '?')} — {a.get('status', '?')} ({a.get('priority', '?')})"
-                )
-            return "Recent OpsGenie alerts:\n" + "\n".join(lines)
-
-    except Exception as e:
-        return f"OpsGenie query failed: {e}"
 
 
 @tool("Query Datadog Metrics")
@@ -1088,13 +1037,25 @@ def _safe_service_name(service: str) -> str:
     return service
 
 
+def _safe_ctx_value(key: str, val: str) -> str:
+    """Validate a resource context value before shell substitution."""
+    if not re.fullmatch(r"[a-zA-Z0-9_\-\.\/]+", val):
+        raise ValueError(f"Unsafe resource context value for '{key}': {val!r}")
+    return val
+
+
 def dispatch_exec_step(
-    step: str, service: str = "", region: str | None = None, account_id: str | None = None
+    step: str,
+    service: str = "",
+    region: str | None = None,
+    account_id: str | None = None,
+    resource_ctx: dict[str, str] | None = None,
 ) -> str:
     """Parse and route a single exec step from a runbook to the correct executor.
 
     Accepts both <!-- exec: command --> (auto-safe) and <!-- exec:approve: command --> (risky).
-    Template substitution ({{ service }}) happens after routing and validation.
+    Template substitution happens after routing and validation — all {{ key }} vars
+    are resolved from resource_ctx (extracted from the alert payload).
     """
     # Match both <!-- exec: --> and <!-- exec:approve: --> — raw LLM text rejected
     match = re.match(r"<!--\s*exec(?::approve)?:\s*(.+?)\s*-->", step)
@@ -1137,21 +1098,29 @@ def dispatch_exec_step(
             _lambda_version = _resolve_lambda_version(safe_service)
         return _lambda_version
 
-    rg = settings.azure_resource_group or ""
-    for _raw, _sub in [
-        ("{{ service }}", safe_service),
-        ("{{service}}", safe_service),
-        ("{{ namespace }}", namespace),
-        ("{{namespace}}", namespace),
-        ("{{ resource_group }}", rg),
-        ("{{resource_group}}", rg),
-    ]:
-        cmd = cmd.replace(_raw, _sub)
+    # Apply resource context substitutions — all {{ key }} vars from alert payload
+    ctx = dict(resource_ctx) if resource_ctx else {}
+    # service and resource_name are always available
+    ctx.setdefault("service", safe_service)
+    ctx.setdefault("resource_name", safe_service)
+    # namespace comes from config (infra topology, not alert payload)
+    ctx.setdefault("namespace", namespace)
+
+    for key, val in ctx.items():
+        if not val:
+            continue
+        safe_val = _safe_ctx_value(key, val)
+        cmd = cmd.replace(f"{{{{ {key} }}}}", safe_val).replace(f"{{{{{key}}}}}", safe_val)
 
     # Dynamic template vars resolved on demand
     if "{{ lambda_version }}" in cmd or "{{lambda_version}}" in cmd:
         lv = _get_lambda_version()
         cmd = cmd.replace("{{ lambda_version }}", lv).replace("{{lambda_version}}", lv)
+
+    # Fail fast on unresolved template vars — safer than executing with literal {{ }}
+    if re.search(r"\{\{[^}]+\}\}", cmd):
+        _unresolved = re.findall(r"\{\{[^}]+\}\}", cmd)
+        raise ValueError(f"Unresolved template variables in exec step: {_unresolved}")
 
     # Route to correct executor
     if cmd.startswith("kubectl "):
@@ -1274,7 +1243,10 @@ def dispatch_exec_step(
 
 
 def get_runbook_exec_steps(
-    query: str, service: str = "", cloud_providers: list[str] | None = None
+    query: str,
+    service: str = "",
+    cloud_providers: list[str] | None = None,
+    resource_ctx: dict[str, str] | None = None,
 ) -> dict[str, list[tuple[str, str]]]:
     """Search runbooks by query, return exec steps split by approval requirement.
 
@@ -1320,10 +1292,14 @@ def get_runbook_exec_steps(
             if not _matches:
                 continue
             content = _matches[0].read_text(encoding="utf-8")
+            _ctx = dict(resource_ctx) if resource_ctx else {}
+            if service:
+                _ctx.setdefault("service", service)
+                _ctx.setdefault("resource_name", service)
             for match in re.finditer(r"<!--\s*exec(?::approve)?:\s*.+?\s*-->", content):
                 tag = match.group(0)
-                if service:
-                    tag = tag.replace("{{ service }}", service).replace("{service}", service)
+                for _k, _v in _ctx.items():
+                    tag = tag.replace(f"{{{{ {_k} }}}}", _v).replace(f"{{{{{_k}}}}}", _v)
                 if re.match(r"<!--\s*exec:approve:", tag):
                     approve_steps.append((tag, filename))
                 else:
